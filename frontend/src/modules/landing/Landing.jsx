@@ -9,16 +9,19 @@ function Landing() {
       <div className="content">
         <h1>SNAP AI</h1>
 
-        <h2>
-          Lorem ipsum dolor sit amet consectetur adipisicing elit. Praesentium
-          doloremque quisquam in quo ab placeat suscipit incidunt aperiam ullam
-          error dicta, vel numquam enim molestiae non aut beatae debitis eius!e.
-        </h2>
+        <p className="tagline">
+          Transform organizational data into actionable insights using AI-driven
+          analytics, knowledge retrieval, and automated reporting
+        </p>
 
         <div className="buttons">
-          <button onClick={() => navigate("/signup")}>Sign Up</button>
+          <button onClick={() => navigate("/signup")} className="signup">
+            Sign Up
+          </button>
 
-          <button onClick={() => navigate("/login")}>Log In</button>
+          <button onClick={() => navigate("/login")} className="login">
+            Log In
+          </button>
         </div>
       </div>
     </div>
