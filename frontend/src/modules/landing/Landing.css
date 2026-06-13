@@ -1,0 +1,41 @@
+.Landing {
+  background-color: black;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  text-align: center;
+  font-family: "IBM Plex Sans", sans-serif;
+}
+
+.content {
+  background-color: aqua;
+  width: 70%;
+}
+
+.element {
+  margin: 50px;
+}
+
+h1 {
+  font-style: italic;
+  font-weight: 600;
+  font-size: 5rem;
+}
+
+h2 {
+  font-weight: 300;
+  font-size: 1.5rem;
+}
+
+.buttons {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+button {
+  margin: 20px;
+  font-size: 1.5rem;
+  padding: 10px;
+}
