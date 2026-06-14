@@ -109,6 +109,7 @@ button {
 
 .signup:hover {
   box-shadow: 0 12px 30px rgba(236, 72, 153, 0.35);
+  transform: translateY(-2px);
 }
 
 .login {
