@@ -15,23 +15,18 @@ function Signup() {
 
         <form className="signup-form">
           <input type="text" placeholder="Full Name" />
-
           <input type="email" placeholder="Email Address" />
-
           <input type="password" placeholder="Password" />
-
           <select>
             <option value="">Select Role</option>
             <option value="employee">Employee</option>
             <option value="manager">Manager</option>
             <option value="admin">Administrator</option>
           </select>
-
           <button type="submit" className="signup-btn">
             Create Account
           </button>
         </form>
-
         <p className="login-text">
           Already have an account?
           <span onClick={() => navigate("/login")}> Log In</span>
