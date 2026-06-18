@@ -104,10 +104,22 @@
   transition: all 0.3s ease;
 }
 
-.signup-btn:hover {
+.signup-btn:hover:not(:disabled) {
   transform: translateY(-2px);
 
   box-shadow: 0 12px 30px rgba(236, 72, 153, 0.35);
+}
+
+.signup-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.error-message {
+  color: #ef4444;
+  font-size: 0.875rem;
+  margin: -8px 0 8px 0;
+  text-align: center;
 }
 
 .login-text {
