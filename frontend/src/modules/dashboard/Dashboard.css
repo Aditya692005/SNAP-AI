@@ -1,0 +1,142 @@
+.dashboard {
+  min-height: 100vh;
+  display: flex;
+
+  background: #020713;
+  color: white;
+
+  font-family: "IBM Plex Sans", sans-serif;
+}
+
+.dashboard-content {
+  flex: 1;
+  padding: 2rem 3rem;
+}
+
+.dashboard-header {
+  margin-bottom: 2rem;
+}
+
+.dashboard-header h1 {
+  font-size: 2.5rem;
+  margin-bottom: 0.5rem;
+
+  color: white;
+}
+
+.dashboard-header p {
+  color: #94a3b8;
+  font-size: 1rem;
+  line-height: 1.6;
+}
+
+/* Welcome Card */
+
+.welcome-card {
+  background: rgba(255, 255, 255, 0.05);
+
+  border: 1px solid rgba(255, 255, 255, 0.08);
+
+  border-radius: 20px;
+
+  padding: 2rem;
+}
+
+.welcome-card h2 {
+  margin-bottom: 1rem;
+
+  color: white;
+}
+
+.welcome-card p {
+  color: #94a3b8;
+
+  line-height: 1.8;
+
+  max-width: 700px;
+}
+
+/* Upload Button */
+
+.upload-btn {
+  margin-top: 1.5rem;
+
+  background: linear-gradient(135deg, #ec4899, #8b5cf6);
+
+  border: none;
+
+  color: white;
+
+  padding: 14px 28px;
+
+  border-radius: 12px;
+
+  font-size: 1rem;
+  font-weight: 600;
+
+  cursor: pointer;
+
+  transition: all 0.3s ease;
+}
+
+.upload-btn:hover {
+  transform: translateY(-2px);
+
+  box-shadow: 0 12px 30px rgba(236, 72, 153, 0.35);
+}
+
+/* Dashboard Cards Grid */
+
+.dashboard-grid {
+  margin-top: 2rem;
+
+  display: grid;
+
+  grid-template-columns: repeat(2, 1fr);
+
+  gap: 1.5rem;
+}
+
+.dashboard-card {
+  background: rgba(255, 255, 255, 0.05);
+
+  border: 1px solid rgba(255, 255, 255, 0.08);
+
+  border-radius: 20px;
+
+  padding: 1.5rem;
+}
+
+.dashboard-card h2 {
+  margin-bottom: 1.5rem;
+
+  font-size: 1.25rem;
+}
+
+/* Empty State */
+
+.empty-state {
+  color: #64748b;
+
+  border: 2px dashed #334155;
+
+  border-radius: 12px;
+
+  padding: 3rem;
+
+  text-align: center;
+
+  line-height: 1.6;
+}
+
+/* Responsive */
+
+@media (max-width: 900px) {
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-content {
+    padding: 1.5rem;
+  }
+}

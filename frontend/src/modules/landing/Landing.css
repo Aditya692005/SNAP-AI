@@ -82,7 +82,7 @@
   animation-delay: 0.4s;
 }
 
-button {
+.Landing button {
   padding: 14px 32px;
   border-radius: 12px;
   cursor: pointer;

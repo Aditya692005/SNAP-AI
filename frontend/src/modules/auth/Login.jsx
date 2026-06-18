@@ -16,7 +16,11 @@ function Login() {
 
           <input type="password" placeholder="Password" />
 
-          <button type="submit" className="login-btn">
+          <button
+            type="submit"
+            className="login-btn"
+            onClick={() => navigate("/dashboard")}
+          >
             Log In
           </button>
         </form>

@@ -23,7 +23,11 @@ function Signup() {
             <option value="manager">Manager</option>
             <option value="admin">Administrator</option>
           </select>
-          <button type="submit" className="signup-btn">
+          <button
+            type="submit"
+            className="signup-btn"
+            onClick={() => navigate("/dashboard")}
+          >
             Create Account
           </button>
         </form>
