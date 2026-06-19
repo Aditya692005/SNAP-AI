@@ -14,8 +14,8 @@ export const authService = {
     }
 
     const data = await response.json();
-    localStorage.setItem("token", data.token);
-    localStorage.setItem("user", JSON.stringify(data.user));
+    // Don't set token yet - user needs to verify email first
+    localStorage.setItem("pendingEmail", email);
     return data;
   },
 
@@ -34,12 +34,29 @@ export const authService = {
     const data = await response.json();
     localStorage.setItem("token", data.token);
     localStorage.setItem("user", JSON.stringify(data.user));
+    localStorage.removeItem("pendingEmail");
     return data;
+  },
+
+  async verifyEmail(token) {
+    const response = await fetch(`${API_BASE_URL}/api/auth/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.message || "Verification failed");
+    }
+
+    return await response.json();
   },
 
   logout() {
     localStorage.removeItem("token");
     localStorage.removeItem("user");
+    localStorage.removeItem("pendingEmail");
   },
 
   getToken() {

@@ -6,6 +6,7 @@ require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
+const helmet = require("helmet");
 
 const authRoutes = require("./src/routes/authRoutes");
 const errorHandler = require("./src/middleware/errorHandler");
@@ -13,8 +14,15 @@ const { connectWithRetry } = require("./src/config/db");
 
 const app = express();
 
-app.use(cors({ origin: process.env.CORS_ORIGIN || "http://localhost:5173" }));
-app.use(express.json());
+// Security middleware — must come before routes
+app.use(helmet()); // Sets secure HTTP headers
+app.use(
+  cors({
+    origin: process.env.CORS_ORIGIN || "http://localhost:5173",
+    credentials: true, // Allow credentials (cookies, auth headers)
+  })
+);
+app.use(express.json({ limit: "10kb" })); // Limit payload size to prevent large attacks
 
 // Simple health check — useful for confirming the server is up before
 // debugging anything else.
