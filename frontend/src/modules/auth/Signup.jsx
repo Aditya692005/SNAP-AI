@@ -6,23 +6,32 @@ function Signup() {
 
   return (
     <div className="signup-page">
+      <div className="glow glow-1"></div>
+      <div className="glow glow-2"></div>
+
       <div className="signup-card">
         <h1>Create Account</h1>
 
         <p className="subtitle">
-          Join SNAP AI and unlock <br /> intelligent business insights
+          Join SNAP AI and unlock
+          <br />
+          intelligent business insights
         </p>
 
         <form className="signup-form">
           <input type="text" placeholder="Full Name" />
+
           <input type="email" placeholder="Email Address" />
+
           <input type="password" placeholder="Password" />
+
           <select>
             <option value="">Select Role</option>
             <option value="employee">Employee</option>
             <option value="manager">Manager</option>
             <option value="admin">Administrator</option>
           </select>
+
           <button
             type="submit"
             className="signup-btn"
@@ -31,6 +40,7 @@ function Signup() {
             Create Account
           </button>
         </form>
+
         <p className="login-text">
           Already have an account?
           <span onClick={() => navigate("/login")}> Log In</span>

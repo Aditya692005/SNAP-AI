@@ -6,6 +6,9 @@ function Login() {
 
   return (
     <div className="login-page">
+      <div className="glow glow-1"></div>
+      <div className="glow glow-2"></div>
+
       <div className="login-card">
         <h1>Welcome Back</h1>
 

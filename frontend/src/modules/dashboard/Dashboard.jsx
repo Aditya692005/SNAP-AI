@@ -52,6 +52,12 @@ function Dashboard() {
             <div className="empty-state">No reports generated.</div>
           </div>
         </div>
+
+        <div className="dashboard-chat">
+          <input type="text" placeholder="Ask SNAP AI..." />
+
+          <button>Send</button>
+        </div>
       </main>
     </div>
   );
