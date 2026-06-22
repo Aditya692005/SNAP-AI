@@ -1,88 +1,90 @@
-// src/models/userModel.js
-//
-// All raw SQL for the `users` table lives here. Controllers never write
-// SQL directly — they call these functions instead.
-
-const { pool } = require("../config/db");
+const supabase = require('../../supabase/supabase')
 
 async function findByEmail(email) {
-  const [rows] = await pool.query(
-    "SELECT id, name, email, password_hash, role, email_verified, failed_login_attempts, locked_until, created_at FROM users WHERE email = ? LIMIT 1",
-    [email],
-  );
-  return rows[0] || null;
+  const { data, error } = await supabase
+    .from('users')
+    .select('id, name, email, password_hash, role, email_verified, failed_login_attempts, locked_until, created_at')
+    .eq('email', email)
+    .single()
+  if (error) return null
+  return data
 }
 
 async function findById(id) {
-  const [rows] = await pool.query(
-    "SELECT id, name, email, role, email_verified, created_at FROM users WHERE id = ? LIMIT 1",
-    [id],
-  );
-  return rows[0] || null;
+  const { data, error } = await supabase
+    .from('users')
+    .select('id, name, email, role, email_verified, created_at')
+    .eq('id', id)
+    .single()
+  if (error) return null
+  return data
 }
 
 async function createUser({ name, email, passwordHash, role, verificationToken, verificationExpires }) {
-  const [result] = await pool.query(
-    "INSERT INTO users (name, email, password_hash, role, email_verified, email_verification_token, email_verification_expires) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    [name, email, passwordHash, role, false, verificationToken, verificationExpires],
-  );
-
-  return {
-    id: result.insertId,
-    name,
-    email,
-    role,
-    email_verified: false,
-  };
+  const { data, error } = await supabase
+    .from('users')
+    .insert([{
+      name,
+      email,
+      password_hash: passwordHash,
+      role,
+      email_verified: false,
+      email_verification_token: verificationToken,
+      email_verification_expires: verificationExpires
+    }])
+    .select('id, name, email, role, email_verified')
+    .single()
+  if (error) throw error
+  return data
 }
 
 async function verifyEmail(verificationToken) {
-  // Check if token exists and hasn't expired
-  const [rows] = await pool.query(
-    "SELECT id, email, email_verification_expires FROM users WHERE email_verification_token = ? LIMIT 1",
-    [verificationToken],
-  );
+  const { data: user, error } = await supabase
+    .from('users')
+    .select('id, email, email_verification_expires')
+    .eq('email_verification_token', verificationToken)
+    .single()
 
-  if (!rows[0]) {
-    console.error("[DB] Token not found in database");
-    return null; // Token not found
+  if (error || !user) {
+    console.error('[DB] Token not found')
+    return null
   }
 
-  const user = rows[0];
-  const expiresAt = new Date(user.email_verification_expires);
-  const now = new Date();
-  
-  if (expiresAt < now) {
-    console.error(`[DB] Token expired. Expires: ${expiresAt}, Now: ${now}`);
-    return null; // Token expired
+  const expiresAt = new Date(user.email_verification_expires)
+  if (expiresAt < new Date()) {
+    console.error('[DB] Token expired')
+    return null
   }
 
-  console.log(`[DB] Updating user ${user.id} (${user.email}) as verified...`);
-  
-  // Update user as verified
-  const result = await pool.query(
-    "UPDATE users SET email_verified = true, email_verification_token = NULL, email_verification_expires = NULL WHERE id = ?",
-    [user.id],
-  );
+  const { error: updateError } = await supabase
+    .from('users')
+    .update({
+      email_verified: true,
+      email_verification_token: null,
+      email_verification_expires: null
+    })
+    .eq('id', user.id)
 
-  console.log(`[DB] ✅ Update result:`, result[0]);
-
-  return user;
+  if (updateError) throw updateError
+  return user
 }
 
 async function findByVerificationToken(token) {
-  const [rows] = await pool.query(
-    "SELECT id, name, email FROM users WHERE email_verification_token = ? LIMIT 1",
-    [token],
-  );
-  return rows[0] || null;
+  const { data, error } = await supabase
+    .from('users')
+    .select('id, name, email')
+    .eq('email_verification_token', token)
+    .single()
+  if (error) return null
+  return data
 }
 
 async function updateFailedLoginAttempts(userId, attempts, lockedUntil) {
-  await pool.query(
-    "UPDATE users SET failed_login_attempts = ?, locked_until = ? WHERE id = ?",
-    [attempts, lockedUntil, userId],
-  );
+  const { error } = await supabase
+    .from('users')
+    .update({ failed_login_attempts: attempts, locked_until: lockedUntil })
+    .eq('id', userId)
+  if (error) throw error
 }
 
-module.exports = { findByEmail, findById, createUser, verifyEmail, findByVerificationToken, updateFailedLoginAttempts };
+module.exports = { findByEmail, findById, createUser, verifyEmail, findByVerificationToken, updateFailedLoginAttempts }
