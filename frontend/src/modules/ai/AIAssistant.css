@@ -1,0 +1,165 @@
+.ai-layout {
+  min-height: 100vh;
+
+  display: flex;
+
+  background: #020713;
+
+  color: white;
+
+  font-family: "IBM Plex Sans", sans-serif;
+}
+
+.ai-content {
+  flex: 1;
+
+  display: flex;
+
+  flex-direction: column;
+
+  justify-content: center;
+
+  align-items: center;
+
+  position: relative;
+
+  padding: 2rem;
+}
+
+.ai-center {
+  text-align: center;
+
+  width: 100%;
+
+  max-width: 900px;
+}
+
+.ai-center h1 {
+  font-size: 3rem;
+
+  margin-bottom: 1rem;
+}
+
+.ai-center p {
+  color: #94a3b8;
+
+  font-size: 1.1rem;
+
+  line-height: 1.8;
+
+  margin-bottom: 2.5rem;
+}
+
+.suggestions {
+  display: grid;
+
+  grid-template-columns: repeat(2, 1fr);
+
+  gap: 1rem;
+
+  margin-bottom: 3rem;
+}
+
+.suggestions button {
+  background: rgba(255, 255, 255, 0.05);
+
+  border: 1px solid rgba(255, 255, 255, 0.08);
+
+  border-radius: 16px;
+
+  padding: 1rem;
+
+  color: white;
+
+  cursor: pointer;
+
+  font-size: 0.95rem;
+
+  transition: all 0.3s ease;
+}
+
+.suggestions button:hover {
+  border-color: #8b5cf6;
+
+  background: rgba(139, 92, 246, 0.08);
+
+  transform: translateY(-2px);
+}
+
+.chat-input-container {
+  position: absolute;
+
+  bottom: 2rem;
+
+  width: 70%;
+
+  display: flex;
+
+  justify-content: center;
+}
+
+.chat-input {
+  width: 100%;
+
+  max-width: 900px;
+
+  position: relative;
+}
+
+.chat-input input {
+  width: 100%;
+
+  padding: 16px 130px 16px 20px;
+
+  border-radius: 16px;
+
+  border: 1px solid #334155;
+
+  background: rgba(255, 255, 255, 0.05);
+
+  color: white;
+
+  font-size: 1.1rem;
+
+  outline: none;
+}
+
+.chat-input input:focus {
+  border-color: #8b5cf6;
+}
+
+.chat-input button {
+  position: absolute;
+
+  right: 8px;
+
+  top: 50%;
+
+  transform: translateY(-50%);
+
+  height: calc(100% - 16px);
+
+  padding: 0 20px;
+
+  border: none;
+
+  border-radius: 12px;
+
+  color: white;
+
+  font-size: 1.1rem;
+
+  font-weight: 600;
+
+  cursor: pointer;
+
+  background: linear-gradient(135deg, #ec4899, #8b5cf6);
+
+  transition: all 0.3s ease;
+}
+
+.chat-input button:hover {
+  transform: translateY(-50%) scale(1.03);
+
+  box-shadow: 0 10px 25px rgba(236, 72, 153, 0.3);
+}
