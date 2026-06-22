@@ -1,0 +1,107 @@
+.verify-email-page {
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: #020713;
+  font-family: "IBM Plex Sans", sans-serif;
+}
+
+.verify-email-card {
+  width: 450px;
+  padding: 40px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 24px;
+  backdrop-filter: blur(12px);
+  animation: fadeInUp 0.8s ease;
+  text-align: center;
+}
+
+.status-icon {
+  font-size: 4rem;
+  margin-bottom: 20px;
+  animation: bounce 0.6s ease;
+}
+
+.status-icon span {
+  display: inline-block;
+}
+
+.verify-email-card h1 {
+  color: white;
+  font-size: 2rem;
+  margin-bottom: 15px;
+}
+
+.message {
+  color: #cbd5e1;
+  font-size: 1rem;
+  margin-bottom: 20px;
+  line-height: 1.6;
+}
+
+.message.success {
+  color: #4ade80;
+  font-weight: 500;
+}
+
+.message.error {
+  color: #f87171;
+  font-weight: 500;
+}
+
+.email-display {
+  background: rgba(139, 92, 246, 0.1);
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  border-radius: 8px;
+  padding: 12px;
+  color: #cbd5e1;
+  font-size: 0.9rem;
+  margin-bottom: 20px;
+  word-break: break-all;
+}
+
+.resend-btn {
+  background: linear-gradient(135deg, #ec4899, #8b5cf6);
+  color: white;
+  border: none;
+  padding: 12px 24px;
+  border-radius: 8px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  margin-top: 10px;
+}
+
+.resend-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 20px rgba(236, 72, 153, 0.3);
+}
+
+.redirect-text {
+  color: #94a3b8;
+  font-size: 0.9rem;
+  margin-top: 15px;
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes bounce {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
