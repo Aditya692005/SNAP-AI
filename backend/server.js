@@ -14,7 +14,7 @@ const { connectWithRetry } = require("./src/config/db");
 const ragRoutes = require("./src/routes/ragRoutes");
 const app = express();
 
-app.use("/api/rag", ragRoutes);
+
 // Security middleware — must come before routes
 app.use(helmet()); // Sets secure HTTP headers
 app.use(
@@ -32,7 +32,7 @@ app.get("/health", (req, res) => {
 });
 
 app.use("/api/auth", authRoutes);
-
+app.use("/api/rag", ragRoutes);
 // 404 for anything that didn't match a route above
 app.use((req, res) => {
   res.status(404).json({ message: "Not found." });
