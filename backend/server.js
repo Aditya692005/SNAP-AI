@@ -11,9 +11,10 @@ const helmet = require("helmet");
 const authRoutes = require("./src/routes/authRoutes");
 const errorHandler = require("./src/middleware/errorHandler");
 const { connectWithRetry } = require("./src/config/db");
-
+const ragRoutes = require("./src/routes/ragRoutes");
 const app = express();
 
+app.use("/api/rag", ragRoutes);
 // Security middleware — must come before routes
 app.use(helmet()); // Sets secure HTTP headers
 app.use(
