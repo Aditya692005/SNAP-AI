@@ -1,0 +1,107 @@
+import { useEffect, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
+import { authService } from "../services/authService";
+import { getTheme, toggleTheme } from "../services/theme";
+import "./UserMenu.css";
+
+const PUBLIC_PATHS = ["/", "/login", "/signup", "/verify-email"];
+
+const ROLE_LABELS = {
+  employee: "Employee",
+  manager: "Manager",
+  org_admin: "Company Admin",
+  admin: "Administrator",
+};
+
+function initials(name, email) {
+  const base = (name || email || "?").trim();
+  const parts = base.split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return base.slice(0, 2).toUpperCase();
+}
+
+function UserMenu() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
+  const [theme, setTheme] = useState(getTheme());
+  const [departments, setDepartments] = useState([]);
+
+  const user = authService.getUser();
+
+  useEffect(() => {
+    if (!authService.isAuthenticated()) return;
+    authService.getDepartments().then(setDepartments).catch(() => setDepartments([]));
+  }, []);
+
+  // Hide on public/auth pages and when logged out.
+  if (PUBLIC_PATHS.includes(location.pathname) || !authService.isAuthenticated() || !user) {
+    return null;
+  }
+
+  const deptName =
+    departments.find((d) => d.id === user.department_id)?.name ||
+    (user.department_id ? `Dept #${user.department_id}` : "—");
+  const roleLabel = ROLE_LABELS[user.role] || user.role || "—";
+
+  function onToggleTheme() {
+    setTheme(toggleTheme());
+  }
+
+  function onLogout() {
+    authService.logout();
+    navigate("/login");
+  }
+
+  return (
+    <div className="usermenu">
+      <button
+        className="usermenu-avatar"
+        onClick={() => setOpen((o) => !o)}
+        title={user.name || user.email}
+        aria-label="Account menu"
+      >
+        {initials(user.name, user.email)}
+      </button>
+
+      {open && (
+        <>
+          <div className="usermenu-backdrop" onClick={() => setOpen(false)} />
+          <div className="usermenu-panel">
+            <div className="usermenu-id">
+              <div className="usermenu-avatar lg">{initials(user.name, user.email)}</div>
+              <div className="usermenu-id-text">
+                <span className="usermenu-name">{user.name || "—"}</span>
+                <span className="usermenu-email">{user.email}</span>
+              </div>
+            </div>
+
+            <div className="usermenu-rows">
+              <div className="usermenu-row">
+                <span className="usermenu-key">Role</span>
+                <span className="usermenu-val">{roleLabel}</span>
+              </div>
+              <div className="usermenu-row">
+                <span className="usermenu-key">Department</span>
+                <span className="usermenu-val">{deptName}</span>
+              </div>
+            </div>
+
+            <div className="usermenu-sep" />
+
+            <button className="usermenu-theme" onClick={onToggleTheme}>
+              <span>{theme === "dark" ? "🌙 Dark mode" : "☀️ Light mode"}</span>
+              <span className={`theme-switch ${theme === "light" ? "on" : ""}`} />
+            </button>
+
+            <button className="usermenu-logout" onClick={onLogout}>
+              ⎋ Log out
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+export default UserMenu;

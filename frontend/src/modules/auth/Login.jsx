@@ -1,7 +1,91 @@
+import { useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { authService } from "../../services/authService";
 import "./Login.css";
 
 function Login() {
-  return <h1>Login Page</h1>;
+  const navigate = useNavigate();
+  const [formData, setFormData] = useState({
+    email: "",
+    password: "",
+  });
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const handleChange = (e) => {
+    const { name, value } = e.target;
+    setFormData((prev) => ({
+      ...prev,
+      [name]: value,
+    }));
+    setError("");
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+
+    try {
+      if (!formData.email || !formData.password) {
+        throw new Error("Please fill in all fields");
+      }
+
+      await authService.login(formData.email, formData.password);
+      navigate("/dashboard");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="login-page">
+      <div className="glow glow-1"></div>
+      <div className="glow glow-2"></div>
+
+      <div className="login-card">
+        <h1>Welcome Back</h1>
+
+        <p className="subtitle">Sign in to access your SNAP AI workspace</p>
+
+        <form className="login-form" onSubmit={handleSubmit}>
+          <input
+            type="email"
+            name="email"
+            placeholder="Email Address"
+            value={formData.email}
+            onChange={handleChange}
+            disabled={loading}
+          />
+
+          <input
+            type="password"
+            name="password"
+            placeholder="Password"
+            value={formData.password}
+            onChange={handleChange}
+            disabled={loading}
+          />
+
+          {error && <p className="error-message">{error}</p>}
+          <button
+            type="submit"
+            className="login-btn"
+            disabled={loading}
+          >
+            {loading ? "Signing In..." : "Log In"}
+          </button>
+        </form>
+
+        <p className="signup-text">
+          Don't have an account?
+          <span onClick={() => navigate("/signup")}> Sign Up</span>
+        </p>
+      </div>
+    </div>
+  );
 }
 
 export default Login;
