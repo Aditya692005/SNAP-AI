@@ -100,7 +100,7 @@ async function signup(req, res, next) {
     const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
     const verificationToken = generateVerificationToken();
     // Token expires in 24 hours
-    const verificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const verificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); //verificationExpires: new Date(Date.now() + 5 * 60 * 1000) add this for adityas duration in bed 
 
     const newUser = await createUser({
       name: name.trim(),

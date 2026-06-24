@@ -12,6 +12,9 @@ const transporter = nodemailer.createTransport({
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASSWORD, // Use app-specific password for Gmail
   },
+  tls: {
+    rejectUnauthorized: false, // Allow self-signed certificates (for development)
+  }
 });
 
 // Generate random verification token
