@@ -38,6 +38,14 @@
   margin-bottom: 0.5rem;
 }
 
+.dashboard-org-meta {
+  margin: 0.35rem 0 0;
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #94a3b8;
+}
+
 .dashboard-header h1 {
   font-size: 2.6rem;
   line-height: 1.1;

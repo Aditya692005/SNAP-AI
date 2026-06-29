@@ -1,12 +1,15 @@
 // src/models/departmentModel.js
-// CRUD for organisational departments.
+// CRUD for organisational departments. v2 departments are per-organization
+// (uuid id, organization_id, name, description) - the old global `key` column
+// is gone, so every query is scoped to an organization.
 
 const supabase = require("../../supabase/supabase");
 
-async function listDepartments() {
+async function listDepartments(organizationId) {
   const { data, error } = await supabase
     .from("departments")
-    .select("id, key, name")
+    .select("id, name, description")
+    .eq("organization_id", organizationId)
     .order("name");
   if (error) throw error;
   return data || [];
@@ -15,31 +18,31 @@ async function listDepartments() {
 async function findDepartmentById(id) {
   const { data, error } = await supabase
     .from("departments")
-    .select("id, key, name")
+    .select("id, name, description, organization_id")
     .eq("id", id)
     .single();
   if (error) return null;
   return data;
 }
 
-async function createDepartment(key, name) {
+async function createDepartment(organizationId, name, description = null) {
   const { data, error } = await supabase
     .from("departments")
-    .insert({ key, name })
-    .select("id, key, name")
+    .insert({ organization_id: organizationId, name, description })
+    .select("id, name, description")
     .single();
   if (error) throw error;
   return data;
 }
 
-// Number of (active) users currently in a department — used to block deletion
-// of a non-empty department.
+// Number of still-active users in a department - used to block deletion of a
+// non-empty department.
 async function countUsersInDepartment(id) {
   const { count, error } = await supabase
     .from("users")
     .select("id", { count: "exact", head: true })
     .eq("department_id", id)
-    .is("deactivated_at", null);
+    .neq("status", "INACTIVE");
   if (error) throw error;
   return count || 0;
 }

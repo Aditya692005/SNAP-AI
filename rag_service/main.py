@@ -108,7 +108,7 @@ app.add_middleware(
 )
 
 # ── File loaders ───────────────────────────────────────────────────────────────
-ALLOWED_EXTENSIONS = {".pdf", ".csv", ".txt", ".xlsx", ".xls", ".docx", ".pptx"}
+ALLOWED_EXTENSIONS = {".pdf", ".csv", ".txt", ".xlsx", ".xls", ".doc    x", ".pptx"}
 
 
 def excel_engine(path: Path) -> Literal["openpyxl", "xlrd"]:

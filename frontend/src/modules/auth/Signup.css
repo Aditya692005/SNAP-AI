@@ -107,7 +107,8 @@
 }
 
 .signup-form input,
-.signup-form select {
+.signup-form select,
+.signup-form textarea {
   width: 100%;
 
   padding: 14px 16px;
@@ -125,17 +126,51 @@
   outline: none;
 
   transition: all 0.3s ease;
+
+  box-sizing: border-box;
 }
 
-.signup-form input::placeholder {
+.signup-form textarea {
+  resize: vertical;
+  font-family: inherit;
+}
+
+.signup-form input::placeholder,
+.signup-form textarea::placeholder {
   color: #64748b;
 }
 
 .signup-form input:focus,
-.signup-form select:focus {
+.signup-form select:focus,
+.signup-form textarea:focus {
   border-color: #8b5cf6;
 
   box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.15);
+}
+
+/* Pre-signup org check + the org_admin "set up your organization" section */
+.field-hint {
+  font-size: 0.85rem;
+  color: #94a3b8;
+  margin: -4px 0 0;
+  text-align: left;
+}
+
+.org-setup {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid #334155;
+  border-radius: 14px;
+  background: rgba(139, 92, 246, 0.06);
+}
+
+.org-setup-title {
+  margin: 0;
+  font-weight: 600;
+  color: #e2e8f0;
+  text-align: left;
 }
 
 .signup-form option {

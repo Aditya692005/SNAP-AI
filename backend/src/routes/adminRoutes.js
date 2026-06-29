@@ -3,8 +3,9 @@
 // Company-admin (org_admin) endpoints. Mount in server.js:
 //   app.use("/api/admin", adminRoutes);
 //
-// Every route requires a logged-in org_admin. Destructive actions are recorded
-// in admin_audit.
+// Every route requires a logged-in org_admin and is scoped to that admin's own
+// organization (req.user.organization_id). Destructive actions are recorded in
+// admin_audit.
 
 const express = require("express");
 
@@ -13,6 +14,7 @@ const requireRole = require("../middleware/requireRole");
 const AppError = require("../utils/AppError");
 const { ASSIGNABLE_ROLES } = require("../utils/validators");
 const { listUsers, updateUser, deactivateUser, findById } = require("../models/userModel");
+const { findRoleByName } = require("../models/roleModel");
 const {
   listDepartments,
   findDepartmentById,
@@ -28,7 +30,7 @@ router.use(requireAuth, requireRole("org_admin"));
 // ── Users ─────────────────────────────────────────────────────────────────────
 router.get("/users", async (req, res, next) => {
   try {
-    return res.json({ users: await listUsers() });
+    return res.json({ users: await listUsers(req.user.organization_id) });
   } catch (err) {
     return next(err);
   }
@@ -37,7 +39,8 @@ router.get("/users", async (req, res, next) => {
 // PATCH /api/admin/users/:id  { department_id?, role? }
 router.patch("/users/:id", async (req, res, next) => {
   try {
-    const id = Number(req.params.id);
+    const id = req.params.id; // uuid
+    const orgId = req.user.organization_id;
     const { department_id, role } = req.body;
     const fields = {};
 
@@ -45,18 +48,25 @@ router.patch("/users/:id", async (req, res, next) => {
       if (!ASSIGNABLE_ROLES.includes(role)) {
         throw new AppError(`Role must be one of: ${ASSIGNABLE_ROLES.join(", ")}.`, 400);
       }
-      fields.role = role;
+      const roleRow = await findRoleByName(role);
+      if (!roleRow) throw new AppError(`Role '${role}' is not configured.`, 400);
+      fields.role_id = roleRow.id;
     }
     if (department_id !== undefined && department_id !== null) {
       const dept = await findDepartmentById(department_id);
-      if (!dept) throw new AppError("Department does not exist.", 400);
+      if (!dept || dept.organization_id !== orgId) {
+        throw new AppError("Department does not exist in your organization.", 400);
+      }
       fields.department_id = dept.id;
+    } else if (department_id === null) {
+      // Explicit unassign.
+      fields.department_id = null;
     }
     if (Object.keys(fields).length === 0) {
       throw new AppError("Provide department_id and/or role to update.", 400);
     }
 
-    const updated = await updateUser(id, fields);
+    const updated = await updateUser(id, orgId, fields);
     if (!updated) throw new AppError("User not found.", 404);
     await logAdminAction(req.user.id, "user.update", {
       targetType: "user",
@@ -72,14 +82,17 @@ router.patch("/users/:id", async (req, res, next) => {
 // DELETE /api/admin/users/:id  (soft delete / deactivate)
 router.delete("/users/:id", async (req, res, next) => {
   try {
-    const id = Number(req.params.id);
+    const id = req.params.id; // uuid
+    const orgId = req.user.organization_id;
     if (id === req.user.id) {
       throw new AppError("You cannot deactivate your own account.", 400);
     }
     const target = await findById(id);
-    if (!target) throw new AppError("User not found.", 404);
+    if (!target || target.organization_id !== orgId) {
+      throw new AppError("User not found.", 404);
+    }
 
-    const result = await deactivateUser(id);
+    const result = await deactivateUser(id, orgId);
     await logAdminAction(req.user.id, "user.deactivate", {
       targetType: "user",
       targetId: id,
@@ -94,7 +107,7 @@ router.delete("/users/:id", async (req, res, next) => {
 // ── Departments ───────────────────────────────────────────────────────────────
 router.get("/departments", async (req, res, next) => {
   try {
-    return res.json({ departments: await listDepartments() });
+    return res.json({ departments: await listDepartments(req.user.organization_id) });
   } catch (err) {
     return next(err);
   }
@@ -103,22 +116,19 @@ router.get("/departments", async (req, res, next) => {
 router.post("/departments", async (req, res, next) => {
   try {
     const name = (req.body.name || "").trim();
-    let key = (req.body.key || "").trim().toLowerCase();
+    const description = (req.body.description || "").trim() || null;
     if (!name) throw new AppError("Department name is required.", 400);
-    // Derive a key from the name when not supplied.
-    if (!key) key = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
-    if (!key) throw new AppError("Could not derive a department key from the name.", 400);
 
-    const dept = await createDepartment(key, name);
+    const dept = await createDepartment(req.user.organization_id, name, description);
     await logAdminAction(req.user.id, "department.create", {
       targetType: "department",
       targetId: dept.id,
-      meta: { key, name },
+      meta: { name },
     });
     return res.status(201).json({ department: dept });
   } catch (err) {
     if (err && err.code === "23505") {
-      return next(new AppError("A department with that key already exists.", 409));
+      return next(new AppError("A department with that name already exists.", 409));
     }
     return next(err);
   }
@@ -126,9 +136,11 @@ router.post("/departments", async (req, res, next) => {
 
 router.delete("/departments/:id", async (req, res, next) => {
   try {
-    const id = Number(req.params.id);
+    const id = req.params.id; // uuid
     const dept = await findDepartmentById(id);
-    if (!dept) throw new AppError("Department not found.", 404);
+    if (!dept || dept.organization_id !== req.user.organization_id) {
+      throw new AppError("Department not found.", 404);
+    }
 
     const userCount = await countUsersInDepartment(id);
     if (userCount > 0) {
@@ -142,7 +154,7 @@ router.delete("/departments/:id", async (req, res, next) => {
     await logAdminAction(req.user.id, "department.delete", {
       targetType: "department",
       targetId: id,
-      meta: { key: dept.key, name: dept.name },
+      meta: { name: dept.name },
     });
     return res.json({ deleted: true });
   } catch (err) {

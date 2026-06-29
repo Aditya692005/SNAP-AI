@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import Sidebar from "../../components/Sidebar";
 import ChartBlock from "../ai/ChartBlock";
+import { organizationService } from "../../services/authService";
 import {
   DEPARTMENTS,
   DEPT_BY_ID,
@@ -171,6 +172,7 @@ function Dashboard() {
   const [documents, setDocuments] = useState([]);
   const [prefs, setPrefs] = useState({});
   const [pinnedCharts, setPinnedCharts] = useState([]);
+  const [org, setOrg] = useState(null);
   const [loading, setLoading] = useState(true);
   const [recomputing, setRecomputing] = useState(false);
   const [activeMetric, setActiveMetric] = useState("revenue");
@@ -187,6 +189,7 @@ function Dashboard() {
 
   useEffect(() => {
     refresh();
+    organizationService.get().then(setOrg).catch(() => {});
   }, []);
 
   const series = data?.series || {};
@@ -451,9 +454,19 @@ function Dashboard() {
         {/* Header */}
         <div className="dashboard-header">
           <div className="dashboard-title-wrap">
-            <span className="dashboard-eyebrow">SNAP AI · Studio</span>
-            <h1>Insights Dashboard</h1>
-            <p>Department metrics, extracted automatically from your documents.</p>
+            <span className="dashboard-eyebrow">SNAP AI · {org?.name || "Studio"}</span>
+            <h1>{org?.name ? `${org.name} — Insights Dashboard` : "Insights Dashboard"}</h1>
+            <p>
+              {org?.description ||
+                "Department metrics, extracted automatically from your documents."}
+            </p>
+            {org && (org.industry || org.country || org.subscription_plan) && (
+              <p className="dashboard-org-meta">
+                {[org.industry, org.country, org.subscription_plan]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </p>
+            )}
           </div>
 
           <div className="dashboard-toolbar">

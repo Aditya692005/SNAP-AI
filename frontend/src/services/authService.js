@@ -8,11 +8,31 @@ function authHeaders() {
 }
 
 export const authService = {
-  async signup(name, email, password, role, departmentId) {
+  // Check whether the email's domain already has an organization. When it
+  // doesn't, this signup creates the org and the form collects its details.
+  async checkOrgStatus(email) {
+    const response = await fetch(
+      `${API_BASE_URL}/api/auth/org-status?email=${encodeURIComponent(email)}`
+    );
+    if (!response.ok) return { valid: false };
+    return response.json();
+  },
+
+  // `org` (optional) = { name, bio, industry } - only used when the email's
+  // domain is new, in which case this user becomes the org_admin.
+  async signup(name, email, password, org) {
+    const body = { name, email, password };
+    if (org) {
+      body.organizationName = org.name;
+      body.organizationBio = org.bio;
+      body.organizationIndustry = org.industry;
+      body.organizationCountry = org.country;
+      body.organizationSubscriptionPlan = org.subscriptionPlan;
+    }
     const response = await fetch(`${API_BASE_URL}/api/auth/signup`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, email, password, role, departmentId }),
+      body: JSON.stringify(body),
     });
 
     if (!response.ok) {
@@ -133,5 +153,25 @@ export const adminService = {
     return handle(
       await fetch(`${API_BASE_URL}/api/admin/departments/${id}`, { method: "DELETE", headers: authHeaders() })
     );
+  },
+};
+
+// Organization details (read for everyone; edit requires MANAGE_ORGANIZATION).
+export const organizationService = {
+  async get() {
+    return (
+      await handle(await fetch(`${API_BASE_URL}/api/organization`, { headers: authHeaders() }))
+    ).organization;
+  },
+  async update(fields) {
+    return (
+      await handle(
+        await fetch(`${API_BASE_URL}/api/organization`, {
+          method: "PATCH",
+          headers: authHeaders(),
+          body: JSON.stringify(fields),
+        })
+      )
+    ).organization;
   },
 };

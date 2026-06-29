@@ -39,19 +39,18 @@ function validatePasswordStrength(password) {
   return errors;
 }
 
-// Roles a user may self-select at signup (privileged roles are granted by an
-// existing company admin, never self-assigned).
-const SIGNUP_ROLES = ["employee", "manager"];
 // All roles an admin may assign. "org_admin" is the company-wide admin.
+// Signup no longer takes a role: org/role are derived from the email domain
+// (first user of a domain -> org_admin, everyone else -> employee).
 const ASSIGNABLE_ROLES = ["employee", "manager", "org_admin"];
 
-function validateSignupInput({ name, email, password, role, departmentId }) {
+function validateSignupInput({ name, email, password }) {
   // Sanitize inputs
   const sanitizedName = sanitizeInput(name);
   const sanitizedEmail = sanitizeInput(email).toLowerCase();
 
-  if (!sanitizedName || !sanitizedEmail || !password || !role) {
-    return "Name, email, password, and role are all required.";
+  if (!sanitizedName || !sanitizedEmail || !password) {
+    return "Name, email, and password are all required.";
   }
   if (sanitizedName.length < 2 || sanitizedName.length > 255) {
     return "Name must be between 2 and 255 characters.";
@@ -64,13 +63,6 @@ function validateSignupInput({ name, email, password, role, departmentId }) {
   if (passwordErrors.length > 0) {
     return `Password must have: ${passwordErrors.join(", ")}.`;
   }
-
-  if (!SIGNUP_ROLES.includes(role)) {
-    return `Role must be one of: ${SIGNUP_ROLES.join(", ")}.`;
-  }
-  if (!Number.isInteger(Number(departmentId)) || Number(departmentId) <= 0) {
-    return "A valid department is required.";
-  }
   return null;
 }
 
@@ -80,6 +72,5 @@ module.exports = {
   validateSignupInput,
   validatePasswordStrength,
   sanitizeInput,
-  SIGNUP_ROLES,
   ASSIGNABLE_ROLES,
 };

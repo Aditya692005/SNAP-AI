@@ -43,7 +43,7 @@ async function sendVerificationEmail(email, name, verificationToken) {
       </a>
     </p>
     <p>Or copy this link: ${verificationLink}</p>
-    <p>This link expires in 24 hours.</p>
+    <p>This link expires in 10 minutes. If it expires, just log in again to get a new one.</p>
     <p>If you didn't create this account, please ignore this email.</p>
   `;
 

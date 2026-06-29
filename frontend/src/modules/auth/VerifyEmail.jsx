@@ -23,10 +23,10 @@ function VerifyEmail() {
         const response = await authService.verifyEmail(token);
         setEmail(response.user?.email || "");
         setStatus("success");
-        setMessage("Email verified successfully! Redirecting to dashboard...");
+        setMessage("Email verified successfully! Redirecting to login...");
 
-        // Redirect to dashboard after 2 seconds
-        setTimeout(() => navigate("/dashboard"), 2000);
+        // Signup does not log the user in, so send them to login to sign in.
+        setTimeout(() => navigate("/login"), 2000);
       } catch (err) {
         setStatus("error");
         setMessage(err.message || "Failed to verify email. Please try again.");
@@ -62,7 +62,7 @@ function VerifyEmail() {
         )}
 
         {status === "success" && (
-          <p className="redirect-text">Redirecting to dashboard in 2 seconds...</p>
+          <p className="redirect-text">Redirecting to login in 2 seconds...</p>
         )}
       </div>
     </div>

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { authService } from "../services/authService";
 import { getTheme, toggleTheme } from "../services/theme";
@@ -25,23 +25,16 @@ function UserMenu() {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [theme, setTheme] = useState(getTheme());
-  const [departments, setDepartments] = useState([]);
 
   const user = authService.getUser();
-
-  useEffect(() => {
-    if (!authService.isAuthenticated()) return;
-    authService.getDepartments().then(setDepartments).catch(() => setDepartments([]));
-  }, []);
 
   // Hide on public/auth pages and when logged out.
   if (PUBLIC_PATHS.includes(location.pathname) || !authService.isAuthenticated() || !user) {
     return null;
   }
 
-  const deptName =
-    departments.find((d) => d.id === user.department_id)?.name ||
-    (user.department_id ? `Dept #${user.department_id}` : "—");
+  // Department is assigned later by an org_admin, so it may be unset at first.
+  const deptName = user.department_id ? "Assigned" : "Unassigned";
   const roleLabel = ROLE_LABELS[user.role] || user.role || "—";
 
   function onToggleTheme() {
