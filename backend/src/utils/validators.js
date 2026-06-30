@@ -39,13 +39,18 @@ function validatePasswordStrength(password) {
   return errors;
 }
 
-function validateSignupInput({ name, email, password, role }) {
+// All roles an admin may assign. "org_admin" is the company-wide admin.
+// Signup no longer takes a role: org/role are derived from the email domain
+// (first user of a domain -> org_admin, everyone else -> employee).
+const ASSIGNABLE_ROLES = ["employee", "manager", "org_admin"];
+
+function validateSignupInput({ name, email, password }) {
   // Sanitize inputs
   const sanitizedName = sanitizeInput(name);
   const sanitizedEmail = sanitizeInput(email).toLowerCase();
-  
-  if (!sanitizedName || !sanitizedEmail || !password || !role) {
-    return "Name, email, password, and role are all required.";
+
+  if (!sanitizedName || !sanitizedEmail || !password) {
+    return "Name, email, and password are all required.";
   }
   if (sanitizedName.length < 2 || sanitizedName.length > 255) {
     return "Name must be between 2 and 255 characters.";
@@ -53,17 +58,19 @@ function validateSignupInput({ name, email, password, role }) {
   if (!isValidEmail(sanitizedEmail)) {
     return "Please provide a valid email address.";
   }
-  
+
   const passwordErrors = validatePasswordStrength(password);
   if (passwordErrors.length > 0) {
     return `Password must have: ${passwordErrors.join(", ")}.`;
   }
-  
-  const allowedRoles = ["employee", "manager", "admin"];
-  if (!allowedRoles.includes(role)) {
-    return `Role must be one of: ${allowedRoles.join(", ")}.`;
-  }
   return null;
 }
 
-module.exports = { isValidEmail, validateLoginInput, validateSignupInput, validatePasswordStrength, sanitizeInput };
+module.exports = {
+  isValidEmail,
+  validateLoginInput,
+  validateSignupInput,
+  validatePasswordStrength,
+  sanitizeInput,
+  ASSIGNABLE_ROLES,
+};

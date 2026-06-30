@@ -1,0 +1,244 @@
+/* ──────────────────────────────────────────────────────────────────────────
+   Light theme. Dark is the default (no overrides). These rules apply only when
+   <html data-theme="light"> is set (see services/theme.js). They retarget the
+   dark-designed surfaces to a light palette while keeping the purple accents.
+   ────────────────────────────────────────────────────────────────────────── */
+
+html[data-theme="light"] body {
+  background: #eef1f7;
+  color: #0f172a;
+}
+
+/* Page shells */
+html[data-theme="light"] .dashboard,
+html[data-theme="light"] .ai-layout,
+html[data-theme="light"] .admin,
+html[data-theme="light"] .documents-layout {
+  background: #eef1f7;
+  color: #0f172a;
+}
+
+/* Sidebar */
+html[data-theme="light"] .sidebar {
+  background: #ffffff;
+  border-right-color: #e2e8f0;
+}
+html[data-theme="light"] .sidebar a { color: #475569; }
+html[data-theme="light"] .sidebar a:hover { background: rgba(139, 92, 246, 0.1); color: #1e293b; }
+html[data-theme="light"] .sidebar a.active { color: #4c1d95; }
+html[data-theme="light"] .sidebar-divider,
+html[data-theme="light"] .sidebar-footer { border-color: #e2e8f0; }
+html[data-theme="light"] .sidebar-divider { background: #e2e8f0; }
+html[data-theme="light"] .sidebar-toggle {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+  color: #475569;
+}
+html[data-theme="light"] .sidebar-toggle:hover {
+  background: rgba(139, 92, 246, 0.14);
+  border-color: rgba(139, 92, 246, 0.5);
+  color: #1e293b;
+}
+
+/* Cards / panels / rows: translucent-white → solid white on light borders */
+html[data-theme="light"] .kpi-card,
+html[data-theme="light"] .chart-panel,
+html[data-theme="light"] .focus-panel,
+html[data-theme="light"] .period-bar,
+html[data-theme="light"] .sources-panel,
+html[data-theme="light"] .sources-drawer,
+html[data-theme="light"] .docs-drawer,
+html[data-theme="light"] .docs-drawer-item,
+html[data-theme="light"] .welcome-card,
+html[data-theme="light"] .admin-panel,
+html[data-theme="light"] .dept-row,
+html[data-theme="light"] .source-row,
+html[data-theme="light"] .chart-block,
+html[data-theme="light"] .chat-input,
+html[data-theme="light"] .usermenu-panel {
+  background: #ffffff;
+  border-color: #e2e8f0;
+  color: #0f172a;
+}
+
+/* Text that was white/near-white */
+html[data-theme="light"] .kpi-value,
+html[data-theme="light"] .admin-table td,
+html[data-theme="light"] .source-name,
+html[data-theme="light"] .docs-item-name,
+html[data-theme="light"] .dept-name,
+html[data-theme="light"] .usermenu-name,
+html[data-theme="light"] .usermenu-val,
+html[data-theme="light"] .bubble-text {
+  color: #0f172a;
+}
+
+/* Plain white headings (gradient headings keep their fill) */
+html[data-theme="light"] .welcome-card h2,
+html[data-theme="light"] .drawer-header h2,
+html[data-theme="light"] .docs-drawer-header h2,
+html[data-theme="light"] .dept-heading h2,
+html[data-theme="light"] .sources-header h2,
+html[data-theme="light"] .focus-header h2 {
+  color: #0f172a;
+  -webkit-text-fill-color: #0f172a;
+}
+
+/* Inputs / selects / textareas */
+html[data-theme="light"] input,
+html[data-theme="light"] select,
+html[data-theme="light"] textarea {
+  background: #ffffff;
+  color: #0f172a;
+  border-color: #cbd5e1;
+}
+
+/* Chips & ghost buttons */
+html[data-theme="light"] .chip,
+html[data-theme="light"] .ghost-btn {
+  background: #ffffff;
+  color: #334155;
+  border-color: #cbd5e1;
+}
+
+/* Dropdown menus (currency/period/usermenu) */
+html[data-theme="light"] .currency-menu,
+html[data-theme="light"] .period-menu {
+  background: #ffffff;
+  border-color: #e2e8f0;
+}
+html[data-theme="light"] .currency-menu button,
+html[data-theme="light"] .period-menu button { color: #334155; }
+
+/* Segmented controls */
+html[data-theme="light"] .segmented,
+html[data-theme="light"] .admin-tabs,
+html[data-theme="light"] .gran-segmented {
+  background: #eef1f7;
+  border-color: #e2e8f0;
+}
+
+/* Chat bubbles */
+html[data-theme="light"] .chat-bubble.assistant {
+  background: #f1f5f9;
+  color: #0f172a;
+}
+
+/* Tables */
+html[data-theme="light"] .admin-table th {
+  color: #475569;
+  border-bottom-color: #e2e8f0;
+}
+html[data-theme="light"] .admin-table td { border-bottom-color: #eef1f7; }
+
+/* UserMenu surfaces */
+html[data-theme="light"] .usermenu-theme,
+html[data-theme="light"] .usermenu-rows .usermenu-row {
+  color: #334155;
+}
+html[data-theme="light"] .usermenu-sep { background: #e2e8f0; }
+
+/* ──────────────────────────────────────────────────────────────────────────
+   AI Assistant — light mode polish
+   ────────────────────────────────────────────────────────────────────────── */
+html[data-theme="light"] .ai-content { color: #0f172a; }
+html[data-theme="light"] .ai-header p { color: #64748b; }
+
+/* Header buttons */
+html[data-theme="light"] .docs-toggle-btn {
+  background: #ffffff;
+  border-color: #cbd5e1;
+  color: #475569;
+}
+html[data-theme="light"] .docs-toggle-btn:hover { border-color: #8b5cf6; color: #1e293b; }
+
+/* Focus banner */
+html[data-theme="light"] .focus-banner {
+  background: rgba(139, 92, 246, 0.08);
+  border-color: rgba(139, 92, 246, 0.3);
+  color: #5b21b6;
+}
+html[data-theme="light"] .focus-banner strong { color: #4c1d95; }
+html[data-theme="light"] .focus-clear { border-color: #cbd5e1; color: #475569; }
+html[data-theme="light"] .focus-clear:hover { background: #eef1f7; color: #1e293b; }
+
+/* Chat bubbles */
+html[data-theme="light"] .chat-bubble.user {
+  background: linear-gradient(135deg, #8b5cf6, #6366f1);
+  border-color: transparent;
+  color: #ffffff;
+}
+html[data-theme="light"] .chat-bubble.assistant {
+  background: #ffffff;
+  border-color: #e2e8f0;
+  color: #1e293b;
+}
+html[data-theme="light"] .chat-bubble.error {
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+html[data-theme="light"] .bubble-sources { border-top-color: #e2e8f0; color: #64748b; }
+html[data-theme="light"] .source-chip {
+  background: rgba(139, 92, 246, 0.1);
+  border-color: rgba(139, 92, 246, 0.3);
+  color: #7c3aed;
+}
+html[data-theme="light"] .source-chip:hover { color: #6d28d9; }
+
+/* Input bar */
+html[data-theme="light"] .chat-input { background: #ffffff; border-color: #cbd5e1; }
+html[data-theme="light"] .chat-input:focus-within { border-color: #8b5cf6; }
+html[data-theme="light"] .chat-input textarea { color: #0f172a; }
+html[data-theme="light"] .chat-input textarea::placeholder { color: #94a3b8; }
+
+/* Generated-document card */
+html[data-theme="light"] .doc-card { background: #f8fafc; border-color: #e2e8f0; }
+html[data-theme="light"] .doc-card-title { color: #1e293b; }
+
+/* Chart / table block */
+html[data-theme="light"] .chart-block { background: #ffffff; border-color: #e2e8f0; }
+html[data-theme="light"] .chart-title { color: #1e293b; }
+html[data-theme="light"] .chart-table th,
+html[data-theme="light"] .chart-table td { border-color: #e2e8f0; color: #334155; }
+html[data-theme="light"] .chart-table th { background: rgba(139, 92, 246, 0.12); color: #1e293b; }
+html[data-theme="light"] .chart-table tbody tr:nth-child(even) { background: #f8fafc; }
+
+/* Documents drawer */
+html[data-theme="light"] .docs-drawer {
+  background:
+    radial-gradient(600px 300px at 100% 0%, rgba(139, 92, 246, 0.08), transparent 60%),
+    #ffffff;
+  border-left-color: #e2e8f0;
+  box-shadow: -20px 0 50px -20px rgba(15, 23, 42, 0.25);
+}
+html[data-theme="light"] .docs-drawer-header h2 { color: #0f172a; }
+html[data-theme="light"] .docs-drawer-close {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+  color: #475569;
+}
+html[data-theme="light"] .docs-drawer-item { background: #ffffff; border-color: #e2e8f0; color: #1e293b; }
+
+/* Markdown-rendered responses */
+html[data-theme="light"] .bubble-text.markdown h1,
+html[data-theme="light"] .bubble-text.markdown h2,
+html[data-theme="light"] .bubble-text.markdown h3,
+html[data-theme="light"] .bubble-text.markdown h4 { color: #0f172a; }
+html[data-theme="light"] .bubble-text.markdown strong { color: #0f172a; }
+html[data-theme="light"] .bubble-text.markdown a { color: #7c3aed; }
+html[data-theme="light"] .bubble-text.markdown blockquote {
+  color: #475569;
+  border-left-color: rgba(139, 92, 246, 0.5);
+}
+html[data-theme="light"] .bubble-text.markdown :not(pre) > code {
+  background: rgba(139, 92, 246, 0.12);
+  border-color: rgba(139, 92, 246, 0.25);
+  color: #6d28d9;
+}
+html[data-theme="light"] .bubble-text.markdown pre { background: #f8fafc; border-color: #e2e8f0; }
+html[data-theme="light"] .bubble-text.markdown pre code { color: #1e293b; }
+html[data-theme="light"] .bubble-text.markdown th { background: rgba(139, 92, 246, 0.1); color: #0f172a; }
+html[data-theme="light"] .bubble-text.markdown th,
+html[data-theme="light"] .bubble-text.markdown td { border-color: #e2e8f0; }
+html[data-theme="light"] .bubble-text.markdown tr:nth-child(even) td { background: #f8fafc; }
+html[data-theme="light"] .bubble-text.markdown hr { border-top-color: #e2e8f0; }

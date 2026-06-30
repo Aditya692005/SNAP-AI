@@ -12,6 +12,9 @@ const authRoutes = require("./src/routes/authRoutes");
 const errorHandler = require("./src/middleware/errorHandler");
 const { connectWithRetry } = require("./src/config/db");
 const ragRoutes = require("./src/routes/ragRoutes");
+const dashboardRoutes = require("./src/routes/dashboardRoutes");
+const adminRoutes = require("./src/routes/adminRoutes");
+const organizationRoutes = require("./src/routes/organizationRoutes");
 const app = express();
 
 
@@ -33,6 +36,9 @@ app.get("/health", (req, res) => {
 
 app.use("/api/auth", authRoutes);
 app.use("/api/rag", ragRoutes);
+app.use("/api/dashboard", dashboardRoutes);
+app.use("/api/admin", adminRoutes);
+app.use("/api/organization", organizationRoutes);
 // 404 for anything that didn't match a route above
 app.use((req, res) => {
   res.status(404).json({ message: "Not found." });
@@ -54,5 +60,6 @@ async function start() {
     process.exit(1);
   }
 }
+
 
 start();

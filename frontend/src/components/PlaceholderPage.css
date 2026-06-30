@@ -1,0 +1,46 @@
+.placeholder-layout {
+  min-height: 100vh;
+  display: flex;
+  background: #020713;
+  color: white;
+  font-family: "IBM Plex Sans", sans-serif;
+}
+
+.placeholder-content {
+  flex: 1;
+  padding: 2rem 3rem;
+}
+
+.placeholder-header {
+  margin-bottom: 2rem;
+}
+
+.placeholder-header h1 {
+  font-size: 3rem;
+  margin-bottom: 0.5rem;
+  background: #8b5cf6;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+.placeholder-header p {
+  color: #94a3b8;
+}
+
+.placeholder-card {
+  background: #0a1224;
+  border: 1px solid #1e293b;
+  border-radius: 12px;
+  padding: 2rem;
+  max-width: 520px;
+}
+
+.placeholder-card h2 {
+  margin-bottom: 0.5rem;
+}
+
+.placeholder-card p {
+  color: #94a3b8;
+}
