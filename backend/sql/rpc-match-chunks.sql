@@ -1,23 +1,34 @@
 -- ============================================================================
--- SNAP-AI - pgvector similarity-search RPC
--- Run once, AFTER schema.sql.
---
--- supabase-js / supabase-py cannot issue the `<=>` operator directly, so RAG
--- retrieval goes through this function via supabase.rpc('match_document_chunks',
--- {...}). It returns the closest chunks by COSINE distance, matching the
--- vector_cosine_ops ivfflat index on document_chunks.embedding.
---
--- Scoping:
---   * p_organization_id  - hard tenant boundary (always required).
---   * p_document_ids      - optional uuid[] of documents the caller is allowed to
---                           see (computed in the backend from document_access).
---                           Pass NULL to search every document in the org.
---
--- `similarity` is returned as 1 - cosine_distance (1.0 = identical, 0 = orthogonal).
+-- SNAP-AI - Move document_chunks embeddings to vector(384) + recreate the
+-- pgvector similarity-search RPC. Safe to run while document_chunks is empty.
 -- ============================================================================
 
+-- 1) Resize the embedding column (the ivfflat index must be dropped first,
+--    since it's bound to the column type).
+drop index if exists idx_document_chunks_embedding;
+
+alter table document_chunks
+    alter column embedding type vector(384);
+
+
+-- 1) Resize the embedding column (the ivfflat index must be dropped first,
+--    since it's bound to the column type).
+drop index if exists idx_document_chunks_embedding;
+
+alter table document_chunks
+    alter column embedding type vector(384);
+
+create index idx_document_chunks_embedding
+    on document_chunks using ivfflat (embedding vector_cosine_ops) with (lists = 100);
+
+-- 2) Recreate the search function with the matching 384-dim signature.
+--    supabase-js / supabase-py cannot issue `<=>` directly, so retrieval goes
+--    through this RPC. Returns the closest chunks by COSINE distance.
+--      * p_organization_id - hard tenant boundary (always required)
+--      * p_document_ids     - optional uuid[] the caller may see (NULL = whole org)
+--    similarity = 1 - cosine_distance (1.0 identical, 0 orthogonal).
 create or replace function match_document_chunks(
-    query_embedding   vector(768),
+    query_embedding   vector(384),
     p_organization_id uuid,
     match_count       int     default 5,
     p_document_ids    uuid[]  default null

@@ -86,6 +86,61 @@ export const authService = {
     return await response.json();
   },
 
+  // Forgot password: request a reset link by email (always succeeds generically).
+  async forgotPassword(email) {
+    const response = await fetch(`${API_BASE_URL}/api/auth/forgot-password`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || "Request failed");
+    return data;
+  },
+
+  // Reset password via the emailed OTP (new password, no current password).
+  async resetPassword(email, otp, password) {
+    const response = await fetch(`${API_BASE_URL}/api/auth/reset-password`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, otp, password }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || "Reset failed");
+    return data;
+  },
+
+  // Invitations (admin-added users)
+  async getInviteInfo(token) {
+    const res = await fetch(
+      `${API_BASE_URL}/api/auth/invite-info?token=${encodeURIComponent(token)}`
+    );
+    if (!res.ok) return { valid: false };
+    return res.json();
+  },
+  async acceptInvite(token, password, name) {
+    const res = await fetch(`${API_BASE_URL}/api/auth/accept-invite`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token, password, name }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || "Could not accept invite");
+    return data;
+  },
+
+  // Change password while logged in (requires current password).
+  async changePassword(currentPassword, newPassword) {
+    const response = await fetch(`${API_BASE_URL}/api/auth/change-password`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ currentPassword, newPassword }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || "Could not change password");
+    return data;
+  },
+
   logout() {
     localStorage.removeItem("token");
     localStorage.removeItem("user");
@@ -137,21 +192,93 @@ export const adminService = {
       await fetch(`${API_BASE_URL}/api/admin/users/${id}`, { method: "DELETE", headers: authHeaders() })
     );
   },
+  async reactivateUser(id) {
+    return handle(
+      await fetch(`${API_BASE_URL}/api/admin/users/${id}`, {
+        method: "PATCH",
+        headers: authHeaders(),
+        body: JSON.stringify({ status: "ACTIVE" }),
+      })
+    );
+  },
+  async deleteUser(id) {
+    return handle(
+      await fetch(`${API_BASE_URL}/api/admin/users/${id}?permanent=1`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      })
+    );
+  },
   async listDepartments() {
     return (await handle(await fetch(`${API_BASE_URL}/api/admin/departments`, { headers: authHeaders() }))).departments || [];
   },
-  async createDepartment(name, key) {
+  async createDepartment(name, description) {
     return handle(
       await fetch(`${API_BASE_URL}/api/admin/departments`, {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify({ name, key }),
+        body: JSON.stringify({ name, description }),
       })
     );
   },
-  async deleteDepartment(id) {
+  async updateDepartment(id, fields) {
     return handle(
-      await fetch(`${API_BASE_URL}/api/admin/departments/${id}`, { method: "DELETE", headers: authHeaders() })
+      await fetch(`${API_BASE_URL}/api/admin/departments/${id}`, {
+        method: "PATCH",
+        headers: authHeaders(),
+        body: JSON.stringify(fields),
+      })
+    );
+  },
+  async deleteDepartment(id, opts = {}) {
+    // opts: { reassignTo?: uuid, deactivate?: boolean }
+    const q = new URLSearchParams();
+    if (opts.reassignTo) q.set("reassign_to", opts.reassignTo);
+    if (opts.deactivate) q.set("deactivate", "1");
+    const qs = q.toString() ? `?${q.toString()}` : "";
+    return handle(
+      await fetch(`${API_BASE_URL}/api/admin/departments/${id}${qs}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      })
+    );
+  },
+
+  async deleteRole(id) {
+    return handle(
+      await fetch(`${API_BASE_URL}/api/admin/roles/${id}`, { method: "DELETE", headers: authHeaders() })
+    );
+  },
+
+  // Users
+  async inviteUser(payload) {
+    // { email, name?, role_id, department_id? }
+    return handle(
+      await fetch(`${API_BASE_URL}/api/admin/users`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(payload),
+      })
+    );
+  },
+
+  // Roles & permissions
+  async listRoles() {
+    return (await handle(await fetch(`${API_BASE_URL}/api/admin/roles`, { headers: authHeaders() }))).roles || [];
+  },
+  async listPermissions() {
+    return (
+      await handle(await fetch(`${API_BASE_URL}/api/admin/permissions`, { headers: authHeaders() }))
+    ).permissions || [];
+  },
+  async createRole(payload) {
+    // { name, description?, permissions: [action, ...] }
+    return handle(
+      await fetch(`${API_BASE_URL}/api/admin/roles`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(payload),
+      })
     );
   },
 };

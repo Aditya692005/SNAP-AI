@@ -9,6 +9,16 @@ html[data-theme="light"] body {
   color: #0f172a;
 }
 
+/* Dropdowns: dark popup (index.css) → light popup with dark text on the light theme */
+html[data-theme="light"] select {
+  color: #0f172a;
+}
+html[data-theme="light"] select option,
+html[data-theme="light"] select optgroup {
+  background-color: #ffffff;
+  color: #0f172a;
+}
+
 /* Page shells */
 html[data-theme="light"] .dashboard,
 html[data-theme="light"] .ai-layout,

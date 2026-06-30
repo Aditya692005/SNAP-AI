@@ -27,7 +27,6 @@ function AIAssistant() {
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(null); // { done, total }
   const [clearing, setClearing] = useState(false);
-  const [docCount, setDocCount] = useState(0);
   const [docList, setDocList] = useState([]);
   const [showDocs, setShowDocs] = useState(false);
   const [activeDoc, setActiveDoc] = useState(null);
@@ -44,17 +43,52 @@ function AIAssistant() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // Documents the user can access (uploaded/processed), from Supabase.
   async function fetchDocs() {
     try {
-      const res = await fetch(`${API_BASE}/api/rag/documents`, {
+      const res = await fetch(`${API_BASE}/api/documents`, {
         headers: authHeaders(),
       });
       if (!res.ok) return;
       const data = await res.json();
-      setDocList(data.documents || []);
-      setDocCount(data.total_chunks || 0);
+      setDocList(data.documents || []); // [{ id, file_name, status, ... }]
     } catch {
-      // silently ignore — RAG service may not be up yet
+      // silently ignore — backend may not be up yet
+    }
+  }
+
+  // ── remove ONE document everywhere (vector store + DB + Supabase + dashboard) ──
+  async function removeDocument(d) {
+    if (
+      !window.confirm(
+        `Remove "${d.file_name}" from the AI, database, and dashboard? This cannot be undone.`
+      )
+    ) {
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/documents/${d.id}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(e.message || "Remove failed");
+      }
+      setDocList((prev) => prev.filter((x) => x.id !== d.id));
+      if (activeDoc === d.file_name) setActiveDoc(null);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          text: `🗑️ Removed **${d.file_name}** from the AI, vector store, database, and dashboard metrics.`,
+        },
+      ]);
+    } catch (err) {
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", text: `❌ ${err.message}`, error: true },
+      ]);
     }
   }
 
@@ -135,7 +169,7 @@ function AIAssistant() {
     for (const file of files) {
       try {
         const data = await uploadOne(file);
-        succeeded.push({ filename: data.filename, chunks: data.chunks_indexed });
+        succeeded.push({ filename: data.filename, chunks: data.chunks });
       } catch (err) {
         failed.push({ filename: file.name, error: err.message });
       } finally {
@@ -200,7 +234,6 @@ function AIAssistant() {
         throw new Error(err.message || "Clear failed");
       }
       setDocList([]);
-      setDocCount(0);
       setActiveDoc(null);
       setShowDocs(false);
       setMessages((prev) => [
@@ -301,7 +334,7 @@ function AIAssistant() {
         ...prev,
         {
           role: "assistant",
-          text: `✅ Added **${filename}** to my knowledge base (${data.chunks_indexed} chunks). I'm now focused on it — ask me anything about it.`,
+          text: `✅ Added **${filename}** to my knowledge base (${data.chunks} chunks). I'm now focused on it — ask me anything about it.`,
         },
       ]);
     } catch (err) {
@@ -325,8 +358,8 @@ function AIAssistant() {
               <h1>SNAP AI Assistant</h1>
               <p>
                 {docList.length > 0
-                  ? `${docList.length} document${docList.length > 1 ? "s" : ""} indexed (${docCount} chunks)`
-                  : "No documents indexed yet — upload one below"}
+                  ? `${docList.length} document${docList.length > 1 ? "s" : ""} uploaded`
+                  : "No documents uploaded yet — upload one below"}
               </p>
             </div>
           </div>
@@ -497,7 +530,7 @@ function AIAssistant() {
           <div>
             <h2>Documents</h2>
             <span className="docs-drawer-hint">
-              {docList.length} indexed · newest first · click to focus the chat
+              {docList.length} uploaded · click to focus · 🗑 to remove everywhere
             </span>
           </div>
           <button
@@ -514,16 +547,36 @@ function AIAssistant() {
         ) : (
           <div className="docs-drawer-list">
             {docList.map((d) => (
-              <button
-                key={d}
-                type="button"
-                className={`docs-drawer-item ${activeDoc === d ? "active" : ""}`}
-                onClick={() => setActiveDoc(activeDoc === d ? null : d)}
-                title={activeDoc === d ? "Click to unfocus" : `Focus chat on ${d}`}
-              >
-                <span className="docs-item-name">📄 {d}</span>
-                {activeDoc === d && <span className="docs-item-focus">focused</span>}
-              </button>
+              <div key={d.id} className="docs-drawer-row">
+                <button
+                  type="button"
+                  className={`docs-drawer-item ${activeDoc === d.file_name ? "active" : ""}`}
+                  onClick={() =>
+                    setActiveDoc(activeDoc === d.file_name ? null : d.file_name)
+                  }
+                  title={
+                    activeDoc === d.file_name
+                      ? "Click to unfocus"
+                      : `Focus chat on ${d.file_name}`
+                  }
+                >
+                  <span className="docs-item-name">📄 {d.file_name}</span>
+                  <span className={`docs-item-status ${(d.status || "").toLowerCase()}`}>
+                    {d.status === "PROCESSED" ? "ready" : (d.status || "").toLowerCase()}
+                  </span>
+                  {activeDoc === d.file_name && (
+                    <span className="docs-item-focus">focused</span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  className="docs-item-remove"
+                  onClick={() => removeDocument(d)}
+                  title="Remove from AI, database, and dashboard"
+                >
+                  🗑
+                </button>
+              </div>
             ))}
           </div>
         )}

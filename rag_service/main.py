@@ -15,7 +15,7 @@ import markdown
 import pandas as pd
 from fpdf import FPDF
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -31,6 +31,9 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_google_genai.chat_models import ChatGoogleGenerativeAIError
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+import supabase_store as store
+from handlers import parse_file
 
 load_dotenv()
 
@@ -52,6 +55,14 @@ embeddings = HuggingFaceEmbeddings(
     model_name="all-MiniLM-L6-v2",
     model_kwargs={"device": "cpu"},
 )
+
+# document_chunks.embedding is vector(384); fail fast if the model's output
+# length ever changes, since a dim mismatch silently breaks inserts + search.
+EMBED_DIM = len(embeddings.embed_query("dimension probe"))
+if EMBED_DIM != 384:
+    raise RuntimeError(
+        f"Embedding model returns {EMBED_DIM} dims but document_chunks expects 384."
+    )
 
 llm = ChatGoogleGenerativeAI(
     model=GEMINI_MODEL,
@@ -108,7 +119,7 @@ app.add_middleware(
 )
 
 # ── File loaders ───────────────────────────────────────────────────────────────
-ALLOWED_EXTENSIONS = {".pdf", ".csv", ".txt", ".xlsx", ".xls", ".doc    x", ".pptx"}
+ALLOWED_EXTENSIONS = {".pdf", ".csv", ".txt", ".xlsx", ".xls", ".docx", ".pptx"}
 
 
 def excel_engine(path: Path) -> Literal["openpyxl", "xlrd"]:
@@ -196,6 +207,90 @@ def index_file(path: Path, filename: str) -> int:
     return len(chunks)
 
 
+# ── Supabase-backed indexing (Phase 2) ────────────────────────────────────────
+# Tables are stored verbatim in document_tables, but we ALSO embed an LLM-written
+# summary of each table so semantic search matches prose ("Q2 revenue by region")
+# instead of raw numbers (which embed poorly).
+TABLE_SUMMARY_PROMPT = ChatPromptTemplate.from_messages([
+    ("system",
+     "You summarize a data table so it can be found by semantic search. "
+     "In 3-6 sentences describe what the table contains: its columns, the "
+     "entities and time periods covered, and the most notable figures or trends. "
+     "Use concrete numbers taken from the data. Do not invent values."),
+    ("human", "Table: {name}\nColumns: {columns}\nRows (JSON sample):\n{rows}"),
+])
+
+
+def summarize_table(table) -> str:
+    name = table.table_name or table.sheet_name or "table"
+    columns = table.heading_context or (
+        ", ".join(map(str, table.rows[0].keys())) if table.rows else ""
+    )
+    rows_sample = json.dumps(table.rows[:50], ensure_ascii=False)[:6000]
+    try:
+        chain = TABLE_SUMMARY_PROMPT | llm | StrOutputParser()
+        summary = chain.invoke({"name": name, "columns": columns, "rows": rows_sample})
+    except Exception:
+        # LLM unavailable (quota etc.) — fall back to a deterministic description
+        # so indexing still yields a searchable chunk.
+        summary = f"Table with columns {columns} and {len(table.rows)} rows."
+    return f"[Table: {name}] {summary.strip()}"
+
+
+def index_document(document_id: str, organization_id: str, path: Path, filename: str) -> dict:
+    """Parse a file into Supabase: tables -> document_tables, and text + table
+    summaries -> embedded document_chunks. Returns {chunks, tables}."""
+    parsed = parse_file(path)
+
+    text_blocks = list(parsed.text_chunks)
+    for table in parsed.tables:
+        store.insert_document_table(document_id, table)
+        text_blocks.append(summarize_table(table))
+
+    chunk_texts: list[str] = []
+    for block in text_blocks:
+        if block and block.strip():
+            chunk_texts.extend(splitter.split_text(block))
+    chunk_texts = [c for c in chunk_texts if c.strip()]
+
+    if chunk_texts:
+        vectors = embeddings.embed_documents(chunk_texts)
+        store.insert_document_chunks(document_id, chunk_texts, vectors)
+
+    return {"chunks": len(chunk_texts), "tables": len(parsed.tables)}
+
+
+@app.post("/index")
+async def index_endpoint(
+    file: UploadFile = File(...),
+    document_id: str = Form(...),
+    organization_id: str = Form(...),
+):
+    """Phase 2 ingestion. The backend creates the documents row (with org + user)
+    then posts the file here with its document_id to embed into Supabase."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No filename provided.")
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported type '{suffix}'. Allowed: {sorted(ALLOWED_EXTENSIONS)}",
+        )
+
+    dest = UPLOAD_DIR / file.filename
+    with dest.open("wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    # Idempotent re-index: clear any existing chunks/tables for this document.
+    store.delete_document_data(document_id)
+    try:
+        result = index_document(document_id, organization_id, dest, file.filename)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Indexing failed: {exc}")
+
+    return {"document_id": document_id, "filename": file.filename, **result}
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def get_history(session_id: str) -> list:
     return session_histories.setdefault(session_id, [])
@@ -231,7 +326,6 @@ CHART_KEYWORDS = (
     "line graph", "histogram", "scatter", "diagram", "draw a", "plot a",
     "show me a", "pie of", "breakdown of",
 )
-
 
 def wants_chart(question: str) -> bool:
     q = question.lower()
@@ -376,9 +470,30 @@ def parse_chart_json(raw: str) -> dict:
     return json.loads(text)
 
 
-async def run_visualization(source: str | None, instruction: str) -> dict:
-    dataset, is_tabular = build_viz_context(source)
-    if not dataset.replace("DOCUMENT TEXT:", "").strip():
+def build_viz_context_supabase(document_ids, focus_document_id) -> tuple[str, bool]:
+    """Chart context from Supabase: prefer stored tables (accurate numbers),
+    else fall back to text chunks. Scoped to the focused or accessible docs."""
+    ids = [focus_document_id] if focus_document_id else (document_ids or [])
+    parts = []
+    for t in store.tables_for_documents(ids):
+        rows = (t.get("table_data") or {}).get("rows") or []
+        if not rows:
+            continue
+        name = t.get("table_name") or t.get("sheet_name") or "table"
+        cols = list(rows[0].keys())
+        lines = [",".join(map(str, cols))]
+        for r in rows[:500]:
+            lines.append(",".join("" if r.get(c) is None else str(r.get(c)) for c in cols))
+        parts.append(f"TABLE: {name}\n" + "\n".join(lines))
+    if parts:
+        return ("TABULAR DATA:\n" + "\n\n".join(parts))[:MAX_VIZ_CHARS], True
+    chunks = store.chunks_for_documents(ids)
+    text = "DOCUMENT TEXT:\n" + "\n\n".join(c["chunk_text"] for c in chunks)
+    return text[:MAX_VIZ_CHARS], False
+
+
+async def _visualize_from_dataset(dataset: str, is_tabular: bool, instruction: str, source_label) -> dict:
+    if not dataset.replace("DOCUMENT TEXT:", "").replace("TABULAR DATA:", "").strip():
         raise HTTPException(status_code=422, detail="No document data to chart yet.")
     chain = VIZ_PROMPT | llm | StrOutputParser()
     raw = await chain.ainvoke({"dataset": dataset, "instruction": instruction})
@@ -390,9 +505,21 @@ async def run_visualization(source: str | None, instruction: str) -> dict:
             detail="Could not turn that request into a chart. Try rephrasing, "
                    "e.g. 'bar chart of total sales by region'.",
         )
-    spec["source"] = source or "all documents"
+    spec["source"] = source_label
     spec["is_tabular"] = is_tabular
     return spec
+
+
+async def run_visualization(source: str | None, instruction: str) -> dict:
+    dataset, is_tabular = build_viz_context(source)
+    return await _visualize_from_dataset(dataset, is_tabular, instruction, source or "all documents")
+
+
+async def run_visualization_supabase(instruction: str, document_ids, focus_document_id) -> dict:
+    dataset, is_tabular = build_viz_context_supabase(document_ids, focus_document_id)
+    return await _visualize_from_dataset(
+        dataset, is_tabular, instruction, focus_document_id or "accessible documents"
+    )
 
 
 # ── Dashboard metric extraction ──────────────────────────────────────────────
@@ -635,8 +762,14 @@ def markdown_to_pdf(md_text: str, out_path: Path) -> None:
     pdf.output(str(out_path))
 
 
-async def run_document_generation(instruction: str, source: str | None) -> dict:
-    context = build_doc_context(source)
+def build_doc_context_supabase(document_ids, focus_document_id) -> str:
+    """Report context from Supabase chunks, scoped to the focused/accessible docs."""
+    ids = [focus_document_id] if focus_document_id else (document_ids or [])
+    chunks = store.chunks_for_documents(ids)
+    return "\n\n".join(c["chunk_text"] for c in chunks)[:MAX_DOC_CONTEXT_CHARS]
+
+
+async def _generate_doc_from_context(context: str, instruction: str, source_label) -> dict:
     if not context.strip():
         raise HTTPException(status_code=400, detail="No document content to work from.")
 
@@ -651,12 +784,17 @@ async def run_document_generation(instruction: str, source: str | None) -> dict:
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {exc}")
 
-    return {
-        "filename": filename,
-        "title": title,
-        "markdown": md_text,
-        "source": source,
-    }
+    return {"filename": filename, "title": title, "markdown": md_text, "source": source_label}
+
+
+async def run_document_generation(instruction: str, source: str | None) -> dict:
+    return await _generate_doc_from_context(build_doc_context(source), instruction, source)
+
+
+async def run_document_generation_supabase(instruction: str, document_ids, focus_document_id) -> dict:
+    return await _generate_doc_from_context(
+        build_doc_context_supabase(document_ids, focus_document_id), instruction, focus_document_id
+    )
 
 
 def to_lc_messages(history: list[dict] | None) -> list:
@@ -674,11 +812,22 @@ def to_lc_messages(history: list[dict] | None) -> list:
     return msgs
 
 
+def retrieve_chunks(question: str, organization_id: str, document_ids=None, k: int = 5) -> list[dict]:
+    """Phase 2 retrieval: embed the question and find the nearest chunks via the
+    match_document_chunks RPC, scoped to an org and (optionally) a set of
+    accessible document ids. Returns the RPC rows."""
+    query_vec = embeddings.embed_query(question)
+    return store.match_chunks(query_vec, organization_id, document_ids=document_ids, match_count=k)
+
+
 async def run_rag_chain(
     question: str,
     session_id: str,
     source: str | None = None,
     history: list[dict] | None = None,
+    organization_id: str | None = None,
+    document_ids: list[str] | None = None,
+    focus_document_id: str | None = None,
 ):
     # If the caller supplies history (persisted in the DB), use it so memory
     # survives restarts and resuming old threads. Otherwise fall back to the
@@ -696,26 +845,38 @@ async def run_rag_chain(
         standalone = question
 
     # Step 2 — retrieve context
-    if source:
-        # Chat is focused on a specific uploaded document.
-        if wants_full_document(question):
-            # Summary / overview style request → feed the entire document.
-            docs = get_chunks_for_source(source)
-        else:
-            # Specific question → similarity search, but scoped to this document.
-            retriever = vectorstore.as_retriever(
-                search_type="similarity",
-                search_kwargs={"k": 8, "filter": {"source": source}},
-            )
-            docs = await retriever.ainvoke(standalone)
-            if not docs:  # fall back to the full document if nothing matched
-                docs = get_chunks_for_source(source)
+    retrieved: list[dict] = []
+    if organization_id:
+        # Supabase pgvector retrieval, scoped by org + the docs the user may see.
+        # A focus_document_id narrows the search to a single document.
+        ids = [focus_document_id] if focus_document_id else document_ids
+        hits = retrieve_chunks(standalone, organization_id, ids, k=8 if focus_document_id else 5)
+        context = "\n\n".join(h["chunk_text"] for h in hits)
+        retrieved = [
+            {"chunk_id": h["id"], "document_id": h["document_id"], "similarity": h["similarity"]}
+            for h in hits
+        ]
+        sources = list({h["document_id"] for h in hits})
     else:
-        retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 5})
-        docs = await retriever.ainvoke(standalone)
+        # Legacy Chroma retrieval (used until the backend passes org context).
+        if source:
+            if wants_full_document(question):
+                docs = get_chunks_for_source(source)
+            else:
+                retriever = vectorstore.as_retriever(
+                    search_type="similarity",
+                    search_kwargs={"k": 8, "filter": {"source": source}},
+                )
+                docs = await retriever.ainvoke(standalone)
+                if not docs:  # fall back to the full document if nothing matched
+                    docs = get_chunks_for_source(source)
+        else:
+            retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 5})
+            docs = await retriever.ainvoke(standalone)
+        context = format_docs(docs)
+        sources = list({d.metadata.get("source", "unknown") for d in docs})
 
     # Step 3 — generate answer (cap context length for very large documents)
-    context = format_docs(docs)
     if len(context) > MAX_CONTEXT_CHARS:
         context = context[:MAX_CONTEXT_CHARS]
 
@@ -734,8 +895,7 @@ async def run_rag_chain(
         if len(mem) > 12:
             session_histories[session_id] = mem[-12:]
 
-    sources = list({d.metadata.get("source", "unknown") for d in docs})
-    return answer, sources
+    return answer, sources, retrieved
 
 
 async def run_plain_chain(question: str, session_id: str, history: list[dict] | None = None):
@@ -766,8 +926,11 @@ def health():
 class ChatRequest(BaseModel):
     message: str
     session_id: str = "default"
-    source: str | None = None  # focus the chat on a specific uploaded document
+    source: str | None = None  # focus the chat on a specific uploaded document (legacy)
     history: list[dict] | None = None  # prior messages [{role, content}] for memory
+    organization_id: str | None = None  # set => Supabase-backed retrieval
+    document_ids: list[str] | None = None  # docs the user may see (None = whole org)
+    focus_document_id: str | None = None  # narrow chat to one document (uuid)
 
 
 class ChatResponse(BaseModel):
@@ -776,13 +939,67 @@ class ChatResponse(BaseModel):
     doc_count: int
     chart: dict | None = None  # chart/table spec when the prompt asked for one
     document: dict | None = None  # generated-document info when one was created
+    retrieved: list[dict] | None = None  # provenance: [{chunk_id, document_id, similarity}]
 
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
-    doc_count = vectorstore._collection.count()
-
     try:
+        # Phase 2: Supabase-backed, org-scoped retrieval when the backend supplies
+        # organization context. (Chart/report generation still uses the legacy
+        # path below — migrated alongside the backend document plumbing.)
+        if req.organization_id:
+            n_docs = len(req.document_ids or [])
+
+            # Generated report/PDF from the accessible/focused documents.
+            if wants_document(req.message):
+                doc = await run_document_generation_supabase(
+                    req.message, req.document_ids, req.focus_document_id
+                )
+                answer = (
+                    f"I've generated **{doc['title']}**. Download it below, "
+                    "or add it back to my knowledge base."
+                )
+                return ChatResponse(
+                    answer=answer,
+                    sources=[doc["source"]] if doc.get("source") else [],
+                    doc_count=n_docs,
+                    document=doc,
+                )
+
+            # Chart/table from the accessible/focused documents.
+            if wants_chart(req.message):
+                try:
+                    spec = await run_visualization_supabase(
+                        req.message, req.document_ids, req.focus_document_id
+                    )
+                    answer = spec.get("notes") or spec.get("title") or "Here's the chart you asked for."
+                    return ChatResponse(
+                        answer=answer,
+                        sources=[spec["source"]] if spec.get("source") else [],
+                        doc_count=n_docs,
+                        chart=spec,
+                    )
+                except HTTPException:
+                    pass  # not chartable → fall through to a normal answer
+
+            answer, sources, retrieved = await run_rag_chain(
+                req.message,
+                req.session_id,
+                history=req.history,
+                organization_id=req.organization_id,
+                document_ids=req.document_ids,
+                focus_document_id=req.focus_document_id,
+            )
+            return ChatResponse(
+                answer=answer,
+                sources=sources,
+                doc_count=len(sources),
+                retrieved=retrieved,
+            )
+
+        # ── Legacy Chroma path ──────────────────────────────────────────────────
+        doc_count = vectorstore._collection.count()
         if doc_count == 0:
             answer = await run_plain_chain(req.message, req.session_id, req.history)
             return ChatResponse(answer=answer, sources=[], doc_count=0)
@@ -822,7 +1039,7 @@ async def chat(req: ChatRequest):
             except HTTPException:
                 pass  # not chartable → continue with a normal RAG answer
 
-        answer, sources = await run_rag_chain(req.message, req.session_id, req.source, req.history)
+        answer, sources, _ = await run_rag_chain(req.message, req.session_id, source=req.source, history=req.history)
         return ChatResponse(answer=answer, sources=sources, doc_count=doc_count)
     except ChatGoogleGenerativeAIError as e:
         # Surface Gemini quota/rate-limit errors as a clean 429 instead of a 500
@@ -924,25 +1141,24 @@ async def generate_document(req: GenerateDocRequest):
 
 class IngestRequest(BaseModel):
     filename: str  # a file already present in the uploads/generated directory
+    document_id: str
+    organization_id: str
 
 
 @app.post("/ingest")
 def ingest_document(req: IngestRequest):
-    """Index a file already on disk (e.g. a generated report) into the vector
-    store so the AI can answer questions about it."""
+    """Index a file already on disk (e.g. a generated report) into Supabase under
+    the given document_id, so the AI can answer questions about it."""
     safe_name = Path(req.filename).name
     path = (UPLOAD_DIR / safe_name).resolve()
     if UPLOAD_DIR.resolve() not in path.parents or not path.is_file():
         raise HTTPException(status_code=404, detail=f"File '{safe_name}' not found")
+    store.delete_document_data(req.document_id)  # idempotent re-index
     try:
-        chunks_indexed = index_file(path, safe_name)
+        result = index_document(req.document_id, req.organization_id, path, safe_name)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-    return {
-        "filename": safe_name,
-        "chunks_indexed": chunks_indexed,
-        "total_docs": vectorstore._collection.count(),
-    }
+    return {"document_id": req.document_id, "filename": safe_name, **result}
 
 
 @app.post("/upload")
@@ -998,6 +1214,39 @@ def clear_documents():
                 pass
 
     return {"status": "cleared", "files_removed": removed}
+
+
+@app.delete("/documents/{filename}")
+def delete_document(filename: str):
+    """Remove a SINGLE document: drop its chunks from the vector store and delete
+    its original file on disk. The chunk metadata's `source` equals the filename
+    (set at index time), so we delete by that."""
+    safe_name = Path(filename).name
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+
+    # Drop this source's vectors from the Chroma collection.
+    try:
+        vectorstore._collection.delete(where={"source": safe_name})
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to remove vectors: {exc}")
+
+    # Remove the original file on disk (best-effort, path-traversal guarded).
+    file_removed = False
+    path = (UPLOAD_DIR / safe_name).resolve()
+    if UPLOAD_DIR.resolve() in path.parents and path.is_file():
+        try:
+            path.unlink()
+            file_removed = True
+        except OSError:
+            pass
+
+    return {
+        "status": "deleted",
+        "filename": safe_name,
+        "file_removed": file_removed,
+        "total_chunks": vectorstore._collection.count(),
+    }
 
 
 @app.delete("/session/{session_id}")

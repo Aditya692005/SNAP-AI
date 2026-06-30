@@ -11,7 +11,7 @@
 
 -- Prerequisites ---------------------------------------------------------------
 create extension if not exists pgcrypto;   -- gen_random_uuid()
-create extension if not exists vector;      -- VECTOR(768) for embeddings
+create extension if not exists vector;      -- VECTOR(384) for embeddings (all-MiniLM-L6-v2)
 
 -- Auto-maintain updated_at -----------------------------------------------------
 create or replace function set_updated_at()
@@ -127,6 +127,9 @@ create table users (
     email_verification_expires timestamptz,
     failed_login_attempts      int default 0,
     locked_until               timestamptz,
+    password_reset_otp         varchar(255),   -- bcrypt hash of the reset OTP
+    password_reset_expires     timestamptz,
+    password_reset_attempts    int default 0,  -- wrong-OTP tries; locks the OTP at the cap
     foreign key (organization_id) references organizations(id) on delete cascade,
     foreign key (department_id)   references departments(id)   on delete set null,
     foreign key (role_id)         references roles(id)
@@ -248,7 +251,7 @@ create table document_chunks (
     document_id uuid not null,
     chunk_index int not null,
     chunk_text  text not null,
-    embedding   vector(768),
+    embedding   vector(384),   -- matches the all-MiniLM-L6-v2 RAG model (384 dims)
     created_at  timestamptz not null default now(),
     foreign key (document_id) references documents(id) on delete cascade
 );

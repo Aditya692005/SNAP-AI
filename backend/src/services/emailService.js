@@ -67,33 +67,32 @@ async function sendVerificationEmail(email, name, verificationToken) {
   }
 }
 
-async function sendPasswordResetEmail(email, name, resetToken) {
-  const resetLink = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`;
-
+async function sendPasswordResetEmail(email, name, otp) {
   const htmlContent = `
     <h2>Password Reset Request</h2>
     <p>Hi ${name}, we received a password reset request for your account.</p>
-    <p>
-      <a href="${resetLink}" style="
-        display: inline-block;
-        padding: 10px 20px;
-        background-color: #ec4899;
-        color: white;
-        text-decoration: none;
-        border-radius: 5px;
-      ">
-        Reset Password
-      </a>
+    <p>Use this one-time password (OTP) to reset your password:</p>
+    <p style="
+      display: inline-block;
+      padding: 12px 22px;
+      background-color: #f3f4f6;
+      color: #111827;
+      font-size: 28px;
+      letter-spacing: 8px;
+      font-weight: 700;
+      border-radius: 8px;
+    ">
+      ${otp}
     </p>
-    <p>This link expires in 1 hour.</p>
-    <p>If you didn't request this, ignore this email.</p>
+    <p>This code expires in 10 minutes.</p>
+    <p>If you didn't request this, you can safely ignore this email.</p>
   `;
 
   try {
     await transporter.sendMail({
       from: process.env.EMAIL_USER,
       to: email,
-      subject: "SNAP AI Password Reset",
+      subject: "SNAP AI Password Reset OTP",
       html: htmlContent,
     });
     return true;
@@ -103,8 +102,48 @@ async function sendPasswordResetEmail(email, name, resetToken) {
   }
 }
 
+async function sendInviteEmail(email, name, token, orgName) {
+  const inviteLink = `${process.env.FRONTEND_URL}/accept-invite?token=${token}`;
+  const org = orgName ? ` to <strong>${orgName}</strong>` : "";
+
+  const htmlContent = `
+    <h2>You're invited to SNAP AI</h2>
+    <p>Hi ${name}, you've been added${org} on SNAP AI.</p>
+    <p>Set your password to activate your account:</p>
+    <p>
+      <a href="${inviteLink}" style="
+        display: inline-block;
+        padding: 10px 20px;
+        background-color: #ec4899;
+        color: white;
+        text-decoration: none;
+        border-radius: 5px;
+      ">
+        Accept Invite
+      </a>
+    </p>
+    <p>Or copy this link: ${inviteLink}</p>
+    <p>This invite expires in 7 days.</p>
+  `;
+
+  try {
+    console.log(`[EMAIL] Sending invite to: ${email}`);
+    await transporter.sendMail({
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: "You're invited to SNAP AI",
+      html: htmlContent,
+    });
+    return true;
+  } catch (err) {
+    console.error(`[EMAIL] ❌ Failed to send invite to ${email}:`, err.message);
+    return false;
+  }
+}
+
 module.exports = {
   sendVerificationEmail,
   sendPasswordResetEmail,
+  sendInviteEmail,
   generateVerificationToken,
 };

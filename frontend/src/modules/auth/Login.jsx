@@ -80,6 +80,16 @@ function Login() {
         </form>
 
         <p className="signup-text">
+          <span
+            onClick={() =>
+              navigate("/forgot-password", { state: { email: formData.email } })
+            }
+          >
+            Forgot password?
+          </span>
+        </p>
+
+        <p className="signup-text">
           Don't have an account?
           <span onClick={() => navigate("/signup")}> Sign Up</span>
         </p>
