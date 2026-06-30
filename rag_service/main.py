@@ -205,35 +205,6 @@ def format_docs(docs: list[Document]) -> str:
     return "\n\n---\n\n".join(d.page_content for d in docs)
 
 
-<<<<<<< HEAD
-async def run_rag_chain(question: str, session_id: str):
-    history = get_history(session_id)
-    retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 5})
-
-    # Step 1 — condense follow-up into standalone question if there's history
-    if history:
-        condense_chain = CONDENSE_PROMPT | llm | StrOutputParser()
-        standalone = await condense_chain.ainvoke({"chat_history": history, "question": question})
-    else:
-        standalone = question
-
-    # Step 2 — retrieve relevant chunks
-    docs = await retriever.ainvoke(standalone)
-
-    # Step 3 — generate answer
-    rag_chain = RAG_PROMPT | llm | StrOutputParser()
-    answer = await rag_chain.ainvoke({
-        "context": format_docs(docs),
-        "chat_history": history,
-        "question": question,
-    })
-
-    # Step 4 — update history (keep last 6 turns = 12 messages)
-    history.append(HumanMessage(content=question))
-    history.append(AIMessage(content=answer))
-    if len(history) > 12:
-        session_histories[session_id] = history[-12:]
-=======
 # Max characters of context fed to the model when summarizing a whole document.
 # Gemini 2.5 Flash has a very large context window; this keeps requests fast/cheap.
 MAX_CONTEXT_CHARS = 100_000
@@ -762,23 +733,11 @@ async def run_rag_chain(
         mem.append(AIMessage(content=answer))
         if len(mem) > 12:
             session_histories[session_id] = mem[-12:]
->>>>>>> f5dc9ee6498c66fb1019e58a7f8277033c752b73
 
     sources = list({d.metadata.get("source", "unknown") for d in docs})
     return answer, sources
 
 
-<<<<<<< HEAD
-async def run_plain_chain(question: str, session_id: str):
-    history = get_history(session_id)
-    plain_chain = PLAIN_PROMPT | llm | StrOutputParser()
-    answer = await plain_chain.ainvoke({"chat_history": history, "question": question})
-
-    history.append(HumanMessage(content=question))
-    history.append(AIMessage(content=answer))
-    if len(history) > 12:
-        session_histories[session_id] = history[-12:]
-=======
 async def run_plain_chain(question: str, session_id: str, history: list[dict] | None = None):
     if history is not None:
         chat_history = to_lc_messages(history)[-20:]
@@ -794,7 +753,6 @@ async def run_plain_chain(question: str, session_id: str, history: list[dict] | 
         mem.append(AIMessage(content=answer))
         if len(mem) > 12:
             session_histories[session_id] = mem[-12:]
->>>>>>> f5dc9ee6498c66fb1019e58a7f8277033c752b73
 
     return answer
 
@@ -807,38 +765,23 @@ def health():
 
 class ChatRequest(BaseModel):
     message: str
-<<<<<<< HEAD
-    session_id: Optional[str] = "default"
-=======
     session_id: str = "default"
     source: str | None = None  # focus the chat on a specific uploaded document
     history: list[dict] | None = None  # prior messages [{role, content}] for memory
->>>>>>> f5dc9ee6498c66fb1019e58a7f8277033c752b73
 
 
 class ChatResponse(BaseModel):
     answer: str
     sources: list[str]
     doc_count: int
-<<<<<<< HEAD
-=======
     chart: dict | None = None  # chart/table spec when the prompt asked for one
     document: dict | None = None  # generated-document info when one was created
->>>>>>> f5dc9ee6498c66fb1019e58a7f8277033c752b73
 
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
     doc_count = vectorstore._collection.count()
 
-<<<<<<< HEAD
-    if doc_count == 0:
-        answer = await run_plain_chain(req.message, req.session_id)
-        return ChatResponse(answer=answer, sources=[], doc_count=0)
-
-    answer, sources = await run_rag_chain(req.message, req.session_id)
-    return ChatResponse(answer=answer, sources=sources, doc_count=doc_count)
-=======
     try:
         if doc_count == 0:
             answer = await run_plain_chain(req.message, req.session_id, req.history)
@@ -1000,56 +943,34 @@ def ingest_document(req: IngestRequest):
         "chunks_indexed": chunks_indexed,
         "total_docs": vectorstore._collection.count(),
     }
->>>>>>> f5dc9ee6498c66fb1019e58a7f8277033c752b73
 
 
 @app.post("/upload")
 async def upload_document(file: UploadFile = File(...)):
-<<<<<<< HEAD
-    suffix = Path(file.filename).suffix.lower()
-=======
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided.")
 
     filename = file.filename
     suffix = Path(filename).suffix.lower()
->>>>>>> f5dc9ee6498c66fb1019e58a7f8277033c752b73
     if suffix not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported type '{suffix}'. Allowed: {list(ALLOWED_EXTENSIONS)}",
         )
 
-<<<<<<< HEAD
-    dest = UPLOAD_DIR / file.filename
-=======
     dest = UPLOAD_DIR / filename
->>>>>>> f5dc9ee6498c66fb1019e58a7f8277033c752b73
     with dest.open("wb") as f:
         shutil.copyfileobj(file.file, f)
 
     try:
-<<<<<<< HEAD
-        docs = load_file(dest)
-        chunks = splitter.split_documents(docs)
-        for chunk in chunks:
-            chunk.metadata["source"] = file.filename
-        vectorstore.add_documents(chunks)
-=======
         chunks_indexed = index_file(dest, filename)
->>>>>>> f5dc9ee6498c66fb1019e58a7f8277033c752b73
     except Exception as exc:
         dest.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=str(exc))
 
     return {
-<<<<<<< HEAD
-        "filename": file.filename,
-        "chunks_indexed": len(chunks),
-=======
         "filename": filename,
         "chunks_indexed": chunks_indexed,
->>>>>>> f5dc9ee6498c66fb1019e58a7f8277033c752b73
         "total_docs": vectorstore._collection.count(),
     }
 
@@ -1064,9 +985,6 @@ def clear_documents():
         persist_directory=str(CHROMA_DIR),
     )
     session_histories.clear()
-<<<<<<< HEAD
-    return {"status": "cleared"}
-=======
 
     # Also remove the original uploaded files and any generated reports on disk
     # so nothing lingers after a clear (GENERATED_DIR == UPLOAD_DIR).
@@ -1080,7 +998,6 @@ def clear_documents():
                 pass
 
     return {"status": "cleared", "files_removed": removed}
->>>>>>> f5dc9ee6498c66fb1019e58a7f8277033c752b73
 
 
 @app.delete("/session/{session_id}")
@@ -1089,8 +1006,6 @@ def clear_session(session_id: str):
     return {"status": "cleared", "session_id": session_id}
 
 
-<<<<<<< HEAD
-=======
 def _source_mtime(name: str) -> float:
     """Modification time of a source's file on disk (newest uploads have the
     largest mtime). Sources whose file is gone sort last."""
@@ -1100,17 +1015,12 @@ def _source_mtime(name: str) -> float:
         return 0.0
 
 
->>>>>>> f5dc9ee6498c66fb1019e58a7f8277033c752b73
 @app.get("/documents")
 def list_documents():
     count = vectorstore._collection.count()
     if count == 0:
         return {"documents": [], "total_chunks": 0}
     results = vectorstore._collection.get(include=["metadatas"])
-<<<<<<< HEAD
-    sources = list({m.get("source", "unknown") for m in results["metadatas"]})
-    return {"documents": sources, "total_chunks": count}
-=======
     metadatas = results.get("metadatas") or []
     sources = {str(m.get("source", "unknown")) for m in metadatas}
     # Newest uploaded first.
@@ -1130,4 +1040,3 @@ def download_document(filename: str):
         filename=safe_name,
         media_type="application/octet-stream",
     )
->>>>>>> f5dc9ee6498c66fb1019e58a7f8277033c752b73
