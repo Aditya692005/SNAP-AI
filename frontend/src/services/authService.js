@@ -1,20 +1,41 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
 
 export const authService = {
-  async signup(name, email, password, role) {
+  async signup(
+    name,
+    email,
+    password,
+    role,
+    organizationName,
+    description,
+    industry,
+    contactEmail,
+    country,
+    subscriptionPlan,
+  ) {
     const response = await fetch(`${API_BASE_URL}/api/auth/signup`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, email, password, role }),
+      body: JSON.stringify({
+        name,
+        email,
+        password,
+        role,
+        organizationName,
+        description,
+        industry,
+        contactEmail,
+        country,
+        subscriptionPlan,
+      }),
     });
-
     if (!response.ok) {
       const error = await response.json();
       throw new Error(error.message || "Signup failed");
     }
 
     const data = await response.json();
-    // Don't set token yet - user needs to verify email first
     localStorage.setItem("pendingEmail", email);
     return data;
   },
@@ -50,7 +71,14 @@ export const authService = {
       throw new Error(error.message || "Verification failed");
     }
 
-    return await response.json();
+    const data = await response.json();
+    if (data.token) {
+      localStorage.setItem("token", data.token);
+      localStorage.setItem("user", JSON.stringify(data.user));
+    }
+    localStorage.removeItem("pendingEmail");
+
+    return data;
   },
 
   logout() {

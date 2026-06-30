@@ -9,10 +9,27 @@
 // Signup now requires email verification before login.
 
 const bcrypt = require("bcryptjs");
-const { findByEmail, findById, createUser, verifyEmail, updateFailedLoginAttempts } = require("../models/userModel");
+const {
+  findByEmail,
+  findById,
+  createUser,
+  createOrganization,
+  createAdminRoleWithPermissions,
+  createDepartment,
+  updateRoleCreatedBy,
+  verifyEmail,
+  updateFailedLoginAttempts,
+  updateVerificationToken,
+} = require("../models/userModel");
 const { signToken } = require("../utils/token");
-const { validateLoginInput, validateSignupInput } = require("../utils/validators");
-const { sendVerificationEmail, generateVerificationToken } = require("../services/emailService");
+const {
+  validateLoginInput,
+  validateSignupInput,
+} = require("../utils/validators");
+const {
+  sendVerificationEmail,
+  generateVerificationToken,
+} = require("../services/emailService");
 const AppError = require("../utils/AppError");
 
 const SALT_ROUNDS = 10;
@@ -35,7 +52,9 @@ async function login(req, res, next) {
       throw new AppError("Invalid email or password.", 401);
     }
 
-    console.log(`[LOGIN] User found. Email verified: ${user.email_verified}, Account locked: ${user.locked_until}`);
+    console.log(
+      `[LOGIN] User found. Email verified: ${user.email_verified}, Account locked: ${user.locked_until}`,
+    );
 
     // Check if account is locked after failed attempts
     if (user.locked_until && new Date(user.locked_until) > new Date()) {
@@ -69,7 +88,12 @@ async function login(req, res, next) {
     await updateFailedLoginAttempts(user.id, 0, null);
 
     console.log(`[LOGIN] ✅ Login successful for user: ${email}`);
-    const safeUser = { id: user.id, name: user.name, email: user.email, role: user.role };
+    const safeUser = {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+    };
     const token = signToken(safeUser);
 
     return res.status(200).json({ token, user: safeUser });
@@ -81,10 +105,32 @@ async function login(req, res, next) {
 // POST /api/auth/signup
 async function signup(req, res, next) {
   try {
-    const { name, email, password, role } = req.body;
+    const {
+      name,
+      email,
+      password,
+      role,
+      organizationName,
+      description,
+      industry,
+      contactEmail,
+      country,
+      subscriptionPlan,
+    } = req.body;
     console.log(`[SIGNUP] New signup request: ${email}`);
 
-    const validationError = validateSignupInput({ name, email, password, role });
+    const validationError = validateSignupInput({
+      name,
+      email,
+      password,
+      role,
+      organizationName,
+      description,
+      industry,
+      contactEmail,
+      country,
+      subscriptionPlan,
+    });
     if (validationError) {
       throw new AppError(validationError, 400);
     }
@@ -92,38 +138,98 @@ async function signup(req, res, next) {
     const normalizedEmail = email.trim().toLowerCase();
 
     const existing = await findByEmail(normalizedEmail);
+
     if (existing) {
-      throw new AppError("An account with this email already exists.", 409);
+      if (existing.email_verified) {
+        throw new AppError("An account with this email already exists.", 409);
+      }
+
+      // Existing but not verified
+
+      const verificationToken = generateVerificationToken();
+      const verificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+      await updateVerificationToken(
+        existing.id,
+        verificationToken,
+        verificationExpires,
+      );
+
+      await sendVerificationEmail(
+        normalizedEmail,
+        existing.name,
+        verificationToken,
+      );
+
+      return res.status(200).json({
+        status: "RESENT",
+        message:
+          "Your account already exists but hasn't been verified. A new verification email has been sent.",
+      });
     }
 
-    console.log(`[SIGNUP] Creating user account for: ${normalizedEmail}`);
+    console.log(
+      `[SIGNUP] Creating organization and user account for: ${normalizedEmail}`,
+    );
     const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
     const verificationToken = generateVerificationToken();
-    // Token expires in 24 hours
     const verificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    const organization = await createOrganization({
+      name: organizationName.trim(),
+      description: description?.trim() || null,
+      industry: industry?.trim() || null,
+      contactEmail: contactEmail?.trim() || normalizedEmail,
+      country: country?.trim() || "Unknown",
+      subscriptionPlan: subscriptionPlan || "FREE",
+      status: "ACTIVE",
+    });
+
+    const createdRole = await createAdminRoleWithPermissions({
+      organizationId: organization.id,
+    });
+
+    const department = await createDepartment({
+      organizationId: organization.id,
+      name: "General",
+      description: "Default department",
+    });
 
     const newUser = await createUser({
       name: name.trim(),
       email: normalizedEmail,
       passwordHash,
-      role,
       verificationToken,
       verificationExpires,
+      organizationId: organization.id,
+      roleId: createdRole.id,
+      departmentId: department.id,
     });
 
+    await updateRoleCreatedBy(createdRole.id, newUser.id);
+
     console.log(`[SIGNUP] User created. Sending verification email...`);
-    // Send verification email
-    const emailSent = await sendVerificationEmail(normalizedEmail, name, verificationToken);
+    const emailSent = await sendVerificationEmail(
+      normalizedEmail,
+      name,
+      verificationToken,
+    );
 
     if (!emailSent) {
-      console.warn(`[SIGNUP] ⚠️  Failed to send verification email to: ${normalizedEmail}`);
+      console.warn(
+        `[SIGNUP] ⚠️  Failed to send verification email to: ${normalizedEmail}`,
+      );
     } else {
-      console.log(`[SIGNUP] ✅ Verification email sent successfully to: ${normalizedEmail}`);
+      console.log(
+        `[SIGNUP] ✅ Verification email sent successfully to: ${normalizedEmail}`,
+      );
     }
 
     return res.status(201).json({
       message: "Account created! Check your email to verify your address.",
       email: normalizedEmail,
+      organization: organization.name,
+      user: newUser,
     });
   } catch (err) {
     console.error(`[SIGNUP] ❌ Error:`, err.message);
@@ -135,25 +241,41 @@ async function signup(req, res, next) {
 async function verifyEmailToken(req, res, next) {
   try {
     const { token } = req.body;
-    console.log(`[VERIFY] Email verification request with token: ${token?.substring(0, 10)}...`);
+    console.log(
+      `[VERIFY] Email verification request with token: ${token?.substring(0, 10)}...`,
+    );
 
     if (!token) {
       throw new AppError("Verification token required.", 400);
     }
 
-    const user = await verifyEmail(token);
-    if (!user) {
+    const verifiedUser = await verifyEmail(token);
+    if (!verifiedUser) {
       console.error(`[VERIFY] ❌ Invalid or expired token`);
       throw new AppError("Invalid or expired verification token.", 400);
     }
 
-    console.log(`[VERIFY] ✅ Email verified for user ID: ${user.id}, Email: ${user.email}`);
+    const fullUser = await findById(verifiedUser.id);
+    if (!fullUser) {
+      throw new AppError("User not found after verification.", 404);
+    }
 
-    // User is now verified, return user data (they can now login)
-    const safeUser = { id: user.id, name: user.name, email: user.email, role: user.role };
-    return res.status(200).json({ 
-      message: "Email verified successfully! You can now login.",
+    console.log(
+      `[VERIFY] ✅ Email verified for user ID: ${fullUser.id}, Email: ${fullUser.email}`,
+    );
+
+    const safeUser = {
+      id: fullUser.id,
+      name: fullUser.name,
+      email: fullUser.email,
+      role: fullUser.role,
+    };
+    const authToken = signToken(safeUser);
+
+    return res.status(200).json({
+      message: "Email verified successfully!",
       user: safeUser,
+      token: authToken,
     });
   } catch (err) {
     console.error(`[VERIFY] ❌ Error:`, err.message);
