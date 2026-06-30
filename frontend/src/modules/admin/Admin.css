@@ -1,0 +1,252 @@
+.admin {
+  min-height: 100vh;
+  display: flex;
+  background:
+    radial-gradient(1100px 600px at 80% -10%, rgba(139, 92, 246, 0.12), transparent 60%),
+    #04070f;
+  color: white;
+  font-family: "IBM Plex Sans", sans-serif;
+}
+
+.admin-content {
+  flex: 1;
+  padding: 2.25rem 3rem 4rem;
+  min-width: 0;
+}
+
+.admin-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.75rem;
+  /* Leave room for the fixed profile avatar in the top-right corner. */
+  padding-right: 3.25rem;
+}
+
+.admin-eyebrow {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #a78bfa;
+  margin-bottom: 0.5rem;
+}
+
+.admin-header h1 {
+  font-size: 2.2rem;
+  margin: 0 0 0.5rem;
+  background: linear-gradient(120deg, #f8fafc, #c4b5fd 60%, #67e8f9);
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+.admin-header p {
+  color: #94a3b8;
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.admin-tabs {
+  display: inline-flex;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 11px;
+  padding: 4px;
+  gap: 3px;
+  height: fit-content;
+}
+
+.admin-tabs button {
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 8px 18px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.admin-tabs button.active {
+  background: linear-gradient(135deg, #8b5cf6, #6366f1);
+  color: white;
+}
+
+.admin-error {
+  background: rgba(248, 113, 113, 0.12);
+  border: 1px solid rgba(248, 113, 113, 0.4);
+  color: #fca5a5;
+  border-radius: 12px;
+  padding: 0.8rem 1rem;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+}
+
+.admin-empty {
+  color: #64748b;
+  text-align: center;
+  padding: 2rem 0;
+}
+
+.admin-panel {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.01));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  padding: 1.25rem 1.4rem;
+}
+
+/* ── Users table ── */
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.admin-table th {
+  text-align: left;
+  color: #94a3b8;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.admin-table td {
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  color: #e2e8f0;
+  vertical-align: middle;
+}
+
+.admin-table tr.inactive {
+  opacity: 0.5;
+}
+
+.admin-table .muted {
+  color: #94a3b8;
+}
+
+.admin-table select {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #e2e8f0;
+  border-radius: 8px;
+  padding: 5px 8px;
+  font-family: inherit;
+  font-size: 0.85rem;
+}
+
+.badge {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 9px;
+  border-radius: 999px;
+}
+
+.badge.on { background: rgba(52, 211, 153, 0.15); color: #34d399; }
+.badge.pending { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
+.badge.off { background: rgba(148, 163, 184, 0.15); color: #94a3b8; }
+
+.danger-btn {
+  background: rgba(248, 113, 113, 0.12);
+  border: 1px solid rgba(248, 113, 113, 0.4);
+  color: #fca5a5;
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.danger-btn:hover {
+  background: rgba(248, 113, 113, 0.24);
+}
+
+/* ── Departments ── */
+.dept-add {
+  display: flex;
+  gap: 0.6rem;
+  margin-bottom: 1.2rem;
+}
+
+.dept-add input {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #e2e8f0;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-family: inherit;
+  font-size: 0.9rem;
+  outline: none;
+}
+
+.dept-add input:focus {
+  border-color: #8b5cf6;
+}
+
+.dept-add button {
+  background: linear-gradient(135deg, #8b5cf6, #6366f1);
+  border: none;
+  color: white;
+  border-radius: 10px;
+  padding: 10px 18px;
+  font-weight: 600;
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+
+.dept-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.dept-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.dept-info {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.dept-name {
+  font-weight: 600;
+  color: #f1f5f9;
+}
+
+.dept-key {
+  font-size: 0.78rem;
+  color: #a78bfa;
+  font-family: monospace;
+}
+
+.dept-count {
+  font-size: 0.8rem;
+  color: #64748b;
+}
+
+@media (max-width: 800px) {
+  .admin-content { padding: 1.5rem; }
+  .admin-table { font-size: 0.82rem; }
+}

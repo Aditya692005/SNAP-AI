@@ -29,57 +29,28 @@ function validateLoginInput({ email, password }) {
 function validatePasswordStrength(password) {
   // Returns array of missing requirements, empty array if valid
   const errors = [];
-
+  
   if (password.length < 12) errors.push("At least 12 characters");
   if (!/[A-Z]/.test(password)) errors.push("One uppercase letter");
   if (!/[a-z]/.test(password)) errors.push("One lowercase letter");
   if (!/[0-9]/.test(password)) errors.push("One number");
-  if (!/[!@#$%^&*_-]/.test(password))
-    errors.push("One special character (!@#$%^&*_-)");
-
+  if (!/[!@#$%^&*_-]/.test(password)) errors.push("One special character (!@#$%^&*_-)");
+  
   return errors;
 }
 
-function validateSignupInput({
-  name,
-  email,
-  password,
-  role,
-  organizationName,
-  description,
-  industry,
-  contactEmail,
-  country,
-  subscriptionPlan,
-}) {
+// All roles an admin may assign. "org_admin" is the company-wide admin.
+// Signup no longer takes a role: org/role are derived from the email domain
+// (first user of a domain -> org_admin, everyone else -> employee).
+const ASSIGNABLE_ROLES = ["employee", "manager", "org_admin"];
+
+function validateSignupInput({ name, email, password }) {
+  // Sanitize inputs
   const sanitizedName = sanitizeInput(name);
   const sanitizedEmail = sanitizeInput(email).toLowerCase();
-  const sanitizedOrganizationName = sanitizeInput(organizationName);
-  const sanitizedDescription = sanitizeInput(description);
-  const sanitizedIndustry = sanitizeInput(industry);
-  const sanitizedContactEmail = sanitizeInput(contactEmail).toLowerCase();
-  const sanitizedCountry = sanitizeInput(country);
-  const sanitizedSubscriptionPlan = sanitizeInput(subscriptionPlan);
 
-  if (!sanitizedName || !sanitizedEmail || !password || !role) {
-    return "Name, email, password, and role are all required.";
-  }
-  if (!sanitizedOrganizationName) {
-    return "Organization name is required.";
-  }
-  if (!sanitizedContactEmail || !isValidEmail(sanitizedContactEmail)) {
-    return "Please provide a valid contact email for the organization.";
-  }
-  if (!sanitizedCountry) {
-    return "Country is required.";
-  }
-  if (
-    sanitizedSubscriptionPlan &&
-    !["FREE", "STARTER", "PRO", "ENTERPRISE"].includes(
-      sanitizedSubscriptionPlan,
-    )
-  ) {
-    return "Subscription plan must be one of: FREE, STARTER, PRO, ENTERPRISE.";
+  if (!sanitizedName || !sanitizedEmail || !password) {
+    return "Name, email, and password are all required.";
   }
   if (sanitizedName.length < 2 || sanitizedName.length > 255) {
     return "Name must be between 2 and 255 characters.";
@@ -92,11 +63,6 @@ function validateSignupInput({
   if (passwordErrors.length > 0) {
     return `Password must have: ${passwordErrors.join(", ")}.`;
   }
-
-  const allowedRoles = ["employee", "manager", "admin"];
-  if (!allowedRoles.includes(role)) {
-    return `Role must be one of: ${allowedRoles.join(", ")}.`;
-  }
   return null;
 }
 
@@ -106,4 +72,5 @@ module.exports = {
   validateSignupInput,
   validatePasswordStrength,
   sanitizeInput,
+  ASSIGNABLE_ROLES,
 };

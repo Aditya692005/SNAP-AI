@@ -1,262 +1,112 @@
 const supabase = require("../../supabase/supabase");
 
-const DEFAULT_PERMISSION_DEFINITIONS = [
-  { action: "MANAGE_ORGANIZATION", description: "Edit organization details" },
-  {
-    action: "MANAGE_USERS",
-    description: "Create, edit, deactivate and manage users",
-  },
-  {
-    action: "MANAGE_DEPARTMENTS",
-    description: "Create, edit and manage departments",
-  },
-  { action: "MANAGE_ROLES", description: "Create and manage custom roles" },
-  {
-    action: "ASSIGN_DOCUMENTS",
-    description: "Assign document upload tasks to users",
-  },
-  { action: "UPLOAD_DOCUMENTS", description: "Upload assigned documents" },
-  { action: "VIEW_DOCUMENTS", description: "View accessible documents" },
-  { action: "USE_AI_ASSISTANT", description: "Access the AI Assistant" },
-  {
-    action: "VIEW_ORGANIZATION_DASHBOARD",
-    description: "View organization wide dashboard",
-  },
-  {
-    action: "MANAGE_ORGANIZATION_DASHBOARD",
-    description: "Create and edit organization wide dashboard",
-  },
-  {
-    action: "VIEW_DEPARTMENT_DASHBOARD",
-    description: "View department wide dashboard",
-  },
-  {
-    action: "MANAGE_DEPARTMENT_DASHBOARD",
-    description: "Create and edit department wide dashboard",
-  },
-];
+// v2 users: uuid ids, organization_id (NOT NULL), role_id -> roles, and a
+// `status` column (ACTIVE / SUSPENDED / INACTIVE) in place of the old
+// `deactivated_at`. The role NAME is pulled via a join and flattened onto the
+// returned object as `role` so the rest of the app keeps working with a string.
+// NOTE: there are two FKs between users and roles (users.role_id -> roles.id
+// AND roles.created_by -> users.id), so the embed must name the exact FK
+// (users_role_id_fkey) or PostgREST errors with PGRST201 (ambiguous).
+const USER_SELECT =
+  "id, name, email, status, organization_id, department_id, role_id, email_verified, created_at, role:roles!users_role_id_fkey(name)";
+
+function flatten(u) {
+  if (!u) return u;
+  const { role, ...rest } = u;
+  return { ...rest, role: role?.name ?? null };
+}
 
 async function findByEmail(email) {
   const { data, error } = await supabase
     .from("users")
-    .select(
-      "id, name, email, password_hash, organization_id, role_id, department_id, email_verified, failed_login_attempts, locked_until, created_at",
-    )
+    .select(`${USER_SELECT}, password_hash, failed_login_attempts, locked_until`)
     .eq("email", email)
     .single();
   if (error) return null;
-
-  let role = null;
-  if (data?.role_id) {
-    const { data: roleData, error: roleError } = await supabase
-      .from("roles")
-      .select("name")
-      .eq("id", data.role_id)
-      .single();
-
-    if (!roleError && roleData) {
-      role = roleData.name;
-    }
-  }
-
-  return { ...data, role };
+  return flatten(data);
 }
 
 async function findById(id) {
   const { data, error } = await supabase
     .from("users")
-    .select(
-      "id, name, email, organization_id, role_id, department_id, email_verified, created_at",
-    )
+    .select(USER_SELECT)
     .eq("id", id)
     .single();
   if (error) return null;
-
-  let role = null;
-  if (data?.role_id) {
-    const { data: roleData, error: roleError } = await supabase
-      .from("roles")
-      .select("name")
-      .eq("id", data.role_id)
-      .single();
-
-    if (!roleError && roleData) {
-      role = roleData.name;
-    }
-  }
-
-  return { ...data, role };
-}
-
-async function createOrganization({
-  name,
-  description = null,
-  industry = null,
-  contactEmail,
-  country,
-  subscriptionPlan = "FREE",
-  status = "ACTIVE",
-}) {
-  const { data, error } = await supabase
-    .from("organizations")
-    .insert([
-      {
-        name,
-        description,
-        industry,
-        contact_email: contactEmail,
-        country,
-        subscription_plan: subscriptionPlan,
-        status,
-      },
-    ])
-    .select("id, name")
-    .single();
-
-  if (error) throw error;
-  return data;
-}
-
-async function createRole({
-  organizationId = null,
-  name,
-  description = null,
-  createdBy = null,
-}) {
-  const { data, error } = await supabase
-    .from("roles")
-    .insert([
-      {
-        organization_id: organizationId,
-        name,
-        description,
-        created_by: createdBy,
-      },
-    ])
-    .select("id, name")
-    .single();
-
-  if (error) throw error;
-  return data;
-}
-
-async function createAdminRoleWithPermissions({
-  organizationId = null,
-  createdBy = null,
-}) {
-  const role = await createRole({
-    organizationId,
-    name: "admin",
-    description: "Administrator role with full access",
-    createdBy,
-  });
-
-  const actionList = DEFAULT_PERMISSION_DEFINITIONS.map((item) => item.action);
-  const { data: existingPermissions, error: existingPermissionsError } =
-    await supabase
-      .from("permissions")
-      .select("id, action")
-      .in("action", actionList);
-
-  if (existingPermissionsError) throw existingPermissionsError;
-
-  const existingActionSet = new Set(
-    (existingPermissions || []).map((permission) => permission.action),
-  );
-  const missingPermissions = DEFAULT_PERMISSION_DEFINITIONS.filter(
-    (permission) => !existingActionSet.has(permission.action),
-  );
-
-  let availablePermissions = existingPermissions || [];
-  if (missingPermissions.length > 0) {
-    const { data: insertedPermissions, error: insertPermissionsError } =
-      await supabase
-        .from("permissions")
-        .insert(missingPermissions)
-        .select("id, action");
-
-    if (insertPermissionsError) throw insertPermissionsError;
-    availablePermissions = [
-      ...availablePermissions,
-      ...(insertedPermissions || []),
-    ];
-  }
-
-  const rolePermissionRows = availablePermissions.map((permission) => ({
-    role_id: role.id,
-    permission_id: permission.id,
-  }));
-
-  if (rolePermissionRows.length > 0) {
-    const { error: rolePermissionError } = await supabase
-      .from("role_permissions")
-      .upsert(rolePermissionRows, { onConflict: "role_id,permission_id" });
-
-    if (rolePermissionError) throw rolePermissionError;
-  }
-
-  return role;
-}
-
-async function updateRoleCreatedBy(roleId, userId) {
-  const { error } = await supabase
-    .from("roles")
-    .update({ created_by: userId })
-    .eq("id", roleId);
-
-  if (error) throw error;
-}
-
-async function createDepartment({
-  organizationId = null,
-  name,
-  description = null,
-}) {
-  const { data, error } = await supabase
-    .from("departments")
-    .insert([
-      {
-        organization_id: organizationId,
-        name,
-        description,
-      },
-    ])
-    .select("id, name")
-    .single();
-
-  if (error) throw error;
-  return data;
+  return flatten(data);
 }
 
 async function createUser({
   name,
   email,
   passwordHash,
+  organizationId,
+  roleId,
+  departmentId = null,
   verificationToken,
   verificationExpires,
-  organizationId = null,
-  roleId = null,
-  departmentId = null,
 }) {
-  const userPayload = {
-    name,
-    email,
-    password_hash: passwordHash,
-    email_verified: false,
-    email_verification_token: verificationToken,
-    email_verification_expires: verificationExpires,
-  };
-
-  if (organizationId) userPayload.organization_id = organizationId;
-  if (roleId) userPayload.role_id = roleId;
-  if (departmentId) userPayload.department_id = departmentId;
-
   const { data, error } = await supabase
     .from("users")
-    .insert([userPayload])
-    .select(
-      "id, name, email, organization_id, role_id, department_id, email_verified",
-    )
+    .insert([
+      {
+        name,
+        email,
+        password_hash: passwordHash,
+        organization_id: organizationId,
+        role_id: roleId,
+        department_id: departmentId,
+        status: "ACTIVE",
+        email_verified: false,
+        email_verification_token: verificationToken,
+        email_verification_expires: verificationExpires,
+      },
+    ])
+    .select(USER_SELECT)
+    .single();
+  if (error) throw error;
+  return flatten(data);
+}
+
+// ── Admin operations (always scoped to the admin's own organization) ──────────
+async function listUsers(organizationId) {
+  const { data, error } = await supabase
+    .from("users")
+    .select(USER_SELECT)
+    .eq("organization_id", organizationId)
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+  return (data || []).map(flatten);
+}
+
+// Patch a user's department and/or role. `fields` may contain department_id
+// and/or role_id; only provided keys are updated. The organization_id filter
+// makes it impossible to edit a user in another tenant.
+async function updateUser(id, organizationId, fields) {
+  const patch = {};
+  if ("department_id" in fields) patch.department_id = fields.department_id;
+  if ("role_id" in fields) patch.role_id = fields.role_id;
+  if (Object.keys(patch).length === 0) return null;
+  const { data, error } = await supabase
+    .from("users")
+    .update(patch)
+    .eq("id", id)
+    .eq("organization_id", organizationId)
+    .select(USER_SELECT)
+    .single();
+  if (error) throw error;
+  return flatten(data);
+}
+
+// Soft-delete: mark the account INACTIVE (login is then refused). Keeps the row
+// so uploaded documents / metrics retain their provenance.
+async function deactivateUser(id, organizationId) {
+  const { data, error } = await supabase
+    .from("users")
+    .update({ status: "INACTIVE" })
+    .eq("id", id)
+    .eq("organization_id", organizationId)
+    .select("id, name, email, status")
     .single();
   if (error) throw error;
   return data;
@@ -311,29 +161,25 @@ async function updateFailedLoginAttempts(userId, attempts, lockedUntil) {
   if (error) throw error;
 }
 
-async function updateVerificationToken(userId, token, expiresAt) {
+// Replace a user's email-verification token + expiry (used to re-issue a fresh
+// verification link when an unverified user logs in again).
+async function setVerificationToken(userId, token, expires) {
   const { error } = await supabase
     .from("users")
-    .update({
-      email_verification_token: token,
-      email_verification_expires: expiresAt,
-    })
+    .update({ email_verification_token: token, email_verification_expires: expires })
     .eq("id", userId);
-
   if (error) throw error;
 }
 
 module.exports = {
   findByEmail,
   findById,
-  createOrganization,
-  createRole,
-  createAdminRoleWithPermissions,
-  updateRoleCreatedBy,
-  createDepartment,
   createUser,
   verifyEmail,
   findByVerificationToken,
   updateFailedLoginAttempts,
-  updateVerificationToken,
+  setVerificationToken,
+  listUsers,
+  updateUser,
+  deactivateUser,
 };

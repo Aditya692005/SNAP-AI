@@ -51,7 +51,7 @@
 .signup-card {
   width: 450px;
 
-  padding: 40px 40px 96px;
+  padding: 40px;
 
   position: relative;
 
@@ -93,16 +93,9 @@
 
   line-height: 1.8;
 
-  margin-bottom: 8px;
+  margin-bottom: 30px;
 
   font-size: 1rem;
-}
-
-.trust-text {
-  text-align: center;
-  color: #64748b;
-  font-size: 0.9rem;
-  margin: 0 0 16px 0;
 }
 
 .signup-form {
@@ -117,9 +110,6 @@
 .signup-form select,
 .signup-form textarea {
   width: 100%;
-  box-sizing: border-box;
-  -webkit-box-sizing: border-box;
-  -moz-box-sizing: border-box;
 
   padding: 14px 16px;
 
@@ -127,34 +117,27 @@
 
   border: 1px solid #334155;
 
-  background: rgba(15, 23, 42, 0.95);
+  background: rgba(255, 255, 255, 0.03);
 
   color: white;
 
   font-size: 1rem;
-  font-family: inherit;
-  line-height: 1.4;
-  appearance: none;
-  -webkit-appearance: none;
-  -moz-appearance: none;
 
   outline: none;
 
   transition: all 0.3s ease;
+
+  box-sizing: border-box;
+}
+
+.signup-form textarea {
+  resize: vertical;
+  font-family: inherit;
 }
 
 .signup-form input::placeholder,
 .signup-form textarea::placeholder {
   color: #64748b;
-}
-
-.signup-form input:-webkit-autofill,
-.signup-form input:-webkit-autofill:hover,
-.signup-form input:-webkit-autofill:focus,
-.signup-form input:-webkit-autofill:active {
-  -webkit-text-fill-color: white !important;
-  -webkit-box-shadow: 0 0 0px 1000px rgba(15, 23, 42, 0.95) inset !important;
-  transition: background-color 5000s ease-in-out 0s;
 }
 
 .signup-form input:focus,
@@ -165,23 +148,29 @@
   box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.15);
 }
 
-.signup-form textarea {
-  min-height: 96px;
-  resize: vertical;
+/* Pre-signup org check + the org_admin "set up your organization" section */
+.field-hint {
+  font-size: 0.85rem;
+  color: #94a3b8;
+  margin: -4px 0 0;
+  text-align: left;
 }
 
-.signup-form select {
-  background-image:
-    linear-gradient(45deg, transparent 50%, #cbd5e1 50%),
-    linear-gradient(135deg, #cbd5e1 50%, transparent 50%);
-  background-position:
-    calc(100% - 20px) calc(1.2em),
-    calc(100% - 15px) calc(1.2em);
-  background-size:
-    5px 5px,
-    5px 5px;
-  background-repeat: no-repeat;
-  background-color: rgba(15, 23, 42, 0.95);
+.org-setup {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid #334155;
+  border-radius: 14px;
+  background: rgba(139, 92, 246, 0.06);
+}
+
+.org-setup-title {
+  margin: 0;
+  font-weight: 600;
+  color: #e2e8f0;
+  text-align: left;
 }
 
 .signup-form option {
@@ -254,8 +243,7 @@
 }
 
 @keyframes bounce {
-  0%,
-  100% {
+  0%, 100% {
     transform: translateY(0);
   }
   50% {
@@ -268,101 +256,6 @@
   font-size: 0.875rem;
   margin: -8px 0 8px 0;
   text-align: center;
-}
-
-.signup-step-indicator {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 1rem;
-  justify-content: center;
-  flex-wrap: wrap;
-}
-
-.step-pill {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.05);
-  color: #94a3b8;
-  font-size: 0.85rem;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.step-pill.active {
-  background: rgba(139, 92, 246, 0.18);
-  color: #f5f3ff;
-  border-color: rgba(139, 92, 246, 0.35);
-}
-
-.step-number {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.12);
-  font-size: 0.8rem;
-  font-weight: 700;
-}
-
-.field-group {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.input-hint {
-  color: #94a3b8;
-  font-size: 0.8rem;
-  margin-top: -4px;
-}
-
-.field-error {
-  color: #f87171;
-  font-size: 0.8rem;
-  margin: -2px 0 0 2px;
-}
-
-.password-input-wrapper {
-  position: relative;
-}
-
-.password-input-wrapper input {
-  padding-right: 58px;
-}
-
-.password-toggle {
-  position: absolute;
-  right: 10px;
-  top: 50%;
-  transform: translateY(-50%);
-  border: none;
-  background: transparent;
-  color: #a78bfa;
-  cursor: pointer;
-  font-size: 0.85rem;
-  padding: 4px;
-}
-
-.signup-actions {
-  display: flex;
-  gap: 0.75rem;
-  justify-content: flex-end;
-  width: 100%;
-  margin-top: 12px;
-  padding-top: 8px;
-  background: transparent;
-  border: none;
-  box-shadow: none;
-  z-index: 20;
-}
-
-.signup-actions .signup-btn {
-  flex: 0 0 auto;
-  min-width: 120px;
 }
 
 .password-requirements {
@@ -401,9 +294,10 @@
 }
 
 .login-text {
-  margin-top: 20px;
-  margin-bottom: 6px;
+  margin-top: 24px;
+
   text-align: center;
+
   color: #94a3b8;
 }
 

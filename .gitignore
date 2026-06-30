@@ -1,0 +1,32 @@
+# ── Secrets / env ──
+.env
+.env.*
+*/.env
+!*.env.example
+
+# ── Python (rag_service + venv) ──
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ── Node / frontend ──
+node_modules/
+dist/
+.vite/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ── RAG runtime data (generated, not source) ──
+rag_service/chroma_db/
+rag_service/uploads/
+test_documents/
+# ── OS / editor ──
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
