@@ -12,22 +12,48 @@
 // on that domain joins as an employee (department assigned later by an admin).
 
 const bcrypt = require("bcryptjs");
+const crypto = require("crypto");
 const {
   findByEmail,
   findById,
+  findAuthById,
   createUser,
   verifyEmail,
   updateFailedLoginAttempts,
   setVerificationToken,
+  updatePassword,
+  findInviteByToken,
+  completeInvite,
+  setPasswordResetOtp,
+  getResetInfoByEmail,
+  setResetAttempts,
+  clearPasswordResetOtp,
 } = require("../models/userModel");
 const { findByDomain, findByContactEmail, createOrganization } = require("../models/organizationModel");
 const { findRoleByName, getPermissionsForRole } = require("../models/roleModel");
 const { signToken } = require("../utils/token");
-const { validateLoginInput, validateSignupInput } = require("../utils/validators");
-const { sendVerificationEmail, generateVerificationToken } = require("../services/emailService");
+const {
+  validateLoginInput,
+  validateSignupInput,
+  validatePasswordStrength,
+  passwordsTooSimilar,
+  isValidEmail,
+} = require("../utils/validators");
+const {
+  sendVerificationEmail,
+  sendPasswordResetEmail,
+  generateVerificationToken,
+} = require("../services/emailService");
 const AppError = require("../utils/AppError");
 
 const SALT_ROUNDS = 10;
+const RESET_OTP_TTL_MS = 10 * 60 * 1000; // password-reset OTP valid for 10 minutes
+const MAX_RESET_ATTEMPTS = 5; // wrong-OTP tries before the code is invalidated
+
+// A cryptographically-random 6-digit one-time code.
+function generateOtp() {
+  return String(crypto.randomInt(0, 1_000_000)).padStart(6, "0");
+}
 const SUBSCRIPTION_PLANS = ["FREE", "STARTER", "PRO", "ENTERPRISE"];
 // How long an email-verification link stays valid.
 const VERIFICATION_TTL_MS = 10 * 60 * 1000; // 10 minutes
@@ -113,7 +139,8 @@ async function login(req, res, next) {
     // Not verified yet (e.g. the original link expired): issue a FRESH link and
     // stop here. Logging in again is the way to get a new verification email.
     if (!user.email_verified) {
-      console.log(`[LOGIN] ✉️  Unverified login — issuing a new verification link for: ${email}`);
+      console.log(`[LOGIN] 
+        Unverified login — issuing a new verification link for: ${email}`);
       const verificationToken = generateVerificationToken();
       const verificationExpires = new Date(Date.now() + VERIFICATION_TTL_MS);
       await setVerificationToken(user.id, verificationToken, verificationExpires);
@@ -322,4 +349,188 @@ async function getCurrentUser(req, res, next) {
   }
 }
 
-module.exports = { login, signup, verifyEmailToken, getCurrentUser, orgStatus };
+// POST /api/auth/forgot-password  { email }   (public)
+// Checks the account exists; if so, generates a 6-digit OTP, stores its hash,
+// and emails the code to THAT user's address. The OTP email is never sent for a
+// non-existent account.
+async function forgotPassword(req, res, next) {
+  try {
+    const email = String(req.body.email || "").trim().toLowerCase();
+    if (!isValidEmail(email)) {
+      throw new AppError("Please provide a valid email address.", 400);
+    }
+
+    const user = await findByEmail(email);
+    if (!user) {
+      // Per requirement: tell the user when there's no account (no OTP is sent).
+      throw new AppError("No account found for that email address.", 404);
+    }
+
+    const otp = generateOtp();
+    const otpHash = await bcrypt.hash(otp, SALT_ROUNDS);
+    const expires = new Date(Date.now() + RESET_OTP_TTL_MS);
+    await setPasswordResetOtp(user.id, otpHash, expires);
+
+    sendPasswordResetEmail(user.email, user.name, otp).catch((e) =>
+      console.error(`[FORGOT] ❌ OTP email failed for ${email}:`, e.message)
+    );
+    console.log(`[FORGOT] OTP issued for ${email}`);
+
+    return res.json({ message: "A one-time password (OTP) has been sent to your email." });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// POST /api/auth/reset-password  { email, otp, password }   (public)
+// Completes the forgot-password flow with the emailed OTP. The user did not
+// enter a current password (they forgot it), but the new password must still
+// differ from the old one.
+async function resetPassword(req, res, next) {
+  try {
+    const email = String(req.body.email || "").trim().toLowerCase();
+    const { otp, password } = req.body;
+    if (!email || !otp) throw new AppError("Email and OTP are required.", 400);
+    if (!password) throw new AppError("New password is required.", 400);
+
+    const pwErrors = validatePasswordStrength(password);
+    if (pwErrors.length > 0) {
+      throw new AppError(`Password must have: ${pwErrors.join(", ")}.`, 400);
+    }
+
+    const user = await getResetInfoByEmail(email);
+    if (!user || !user.password_reset_otp || !user.password_reset_expires) {
+      throw new AppError("No active reset request. Please request a new OTP.", 400);
+    }
+    if (new Date(user.password_reset_expires) < new Date()) {
+      await clearPasswordResetOtp(user.id);
+      throw new AppError("This OTP has expired. Please request a new one.", 400);
+    }
+    if ((user.password_reset_attempts || 0) >= MAX_RESET_ATTEMPTS) {
+      await clearPasswordResetOtp(user.id);
+      throw new AppError("Too many incorrect attempts. Please request a new OTP.", 429);
+    }
+    if (!(await bcrypt.compare(String(otp), user.password_reset_otp))) {
+      const attempts = (user.password_reset_attempts || 0) + 1;
+      const left = MAX_RESET_ATTEMPTS - attempts;
+      if (left <= 0) {
+        await clearPasswordResetOtp(user.id);
+        throw new AppError("Too many incorrect attempts. Please request a new OTP.", 429);
+      }
+      await setResetAttempts(user.id, attempts);
+      throw new AppError(`Invalid OTP. ${left} attempt(s) left.`, 400);
+    }
+
+    // New password must differ from the current one.
+    if (await bcrypt.compare(password, user.password_hash)) {
+      throw new AppError("Your new password must be different from your current password.", 400);
+    }
+
+    const hash = await bcrypt.hash(password, SALT_ROUNDS);
+    await updatePassword(user.id, hash);
+    await clearPasswordResetOtp(user.id); // single-use
+    console.log(`[RESET] ✅ Password reset for ${user.email}`);
+    return res.json({ message: "Password reset successful. You can now log in." });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// POST /api/auth/change-password  { currentPassword, newPassword }  (protected)
+// For a logged-in user: requires the current password and a sufficiently
+// different new one.
+async function changePassword(req, res, next) {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) {
+      throw new AppError("Current and new password are both required.", 400);
+    }
+
+    const user = await findAuthById(req.user.id);
+    if (!user) throw new AppError("User not found.", 404);
+
+    const currentOk = await bcrypt.compare(currentPassword, user.password_hash);
+    if (!currentOk) throw new AppError("Your current password is incorrect.", 400);
+
+    const pwErrors = validatePasswordStrength(newPassword);
+    if (pwErrors.length > 0) {
+      throw new AppError(`Password must have: ${pwErrors.join(", ")}.`, 400);
+    }
+
+    if (passwordsTooSimilar(currentPassword, newPassword)) {
+      throw new AppError("Your new password must not be similar to your current password.", 400);
+    }
+
+    const hash = await bcrypt.hash(newPassword, SALT_ROUNDS);
+    await updatePassword(user.id, hash);
+    console.log(`[CHANGE-PW] ✅ Password changed for ${user.email}`);
+    return res.json({ message: "Password changed successfully." });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// GET /api/auth/invite-info?token=...  (public)
+// Lets the accept-invite page show who the invite is for before they set a
+// password.
+async function inviteInfo(req, res, next) {
+  try {
+    const token = String(req.query.token || "");
+    const user = token ? await findInviteByToken(token) : null;
+    if (
+      !user ||
+      user.email_verified ||
+      !user.email_verification_expires ||
+      new Date(user.email_verification_expires) < new Date()
+    ) {
+      return res.json({ valid: false });
+    }
+    return res.json({ valid: true, email: user.email, name: user.name });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// POST /api/auth/accept-invite  { token, password, name? }   (public)
+// An admin-invited user sets their password and activates their account.
+async function acceptInvite(req, res, next) {
+  try {
+    const { token, password, name } = req.body;
+    if (!token) throw new AppError("Invite token is required.", 400);
+    if (!password) throw new AppError("A password is required.", 400);
+
+    const pwErrors = validatePasswordStrength(password);
+    if (pwErrors.length > 0) {
+      throw new AppError(`Password must have: ${pwErrors.join(", ")}.`, 400);
+    }
+
+    const user = await findInviteByToken(token);
+    if (!user) throw new AppError("Invalid invite link.", 400);
+    if (user.email_verified) {
+      throw new AppError("This invite was already used. Please log in.", 400);
+    }
+    if (!user.email_verification_expires || new Date(user.email_verification_expires) < new Date()) {
+      throw new AppError("This invite has expired. Ask your admin to resend it.", 400);
+    }
+
+    const hash = await bcrypt.hash(password, SALT_ROUNDS);
+    await completeInvite(user.id, hash, name && name.trim() ? name.trim() : null);
+    console.log(`[INVITE] ✅ Accepted by ${user.email}`);
+    return res.json({ message: "Account activated! You can now log in.", email: user.email });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+module.exports = {
+  login,
+  signup,
+  verifyEmailToken,
+  getCurrentUser,
+  orgStatus,
+  forgotPassword,
+  resetPassword,
+  changePassword,
+  inviteInfo,
+  acceptInvite,
+};

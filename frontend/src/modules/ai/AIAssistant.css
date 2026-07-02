@@ -525,7 +525,15 @@
   gap: 0.45rem;
 }
 
+.docs-drawer-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.4rem;
+}
+
 .docs-drawer-item {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -540,6 +548,41 @@
   font-family: inherit;
   cursor: pointer;
   transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.docs-item-status {
+  flex-shrink: 0;
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #86efac;
+  background: rgba(34, 197, 94, 0.14);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+.docs-item-status.processing {
+  color: #fcd34d;
+  background: rgba(245, 158, 11, 0.14);
+  border-color: rgba(245, 158, 11, 0.3);
+}
+
+.docs-item-remove {
+  flex-shrink: 0;
+  width: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.28);
+  border-radius: 11px;
+  color: #fca5a5;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.docs-item-remove:hover {
+  background: rgba(239, 68, 68, 0.2);
 }
 
 .docs-drawer-item:hover {
@@ -573,6 +616,13 @@
   color: #64748b;
   text-align: center;
   padding: 1.5rem 0;
+}
+
+/* Conversation rows in the chat-history drawer */
+.convs-item-date {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  color: #64748b;
 }
 
 .chart-actions {

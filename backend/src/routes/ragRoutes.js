@@ -11,6 +11,21 @@ const fetch = require("node-fetch");
 const requireAuth = require("../middleware/requireAuth");
 const { extractAndStore } = require("../services/metricsService");
 const { upsertStatus, clearAllForUser } = require("../models/metricsModel");
+const {
+  createDocument,
+  setDocumentStatus,
+  grantAccess,
+  accessibleDocumentIds,
+  findByFileName,
+  deleteAllForUser,
+} = require("../models/documentModel");
+const {
+  createConversation,
+  findConversation,
+  listMessages,
+  addMessage,
+  recordRetrievedChunks,
+} = require("../models/conversationModel");
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -18,13 +33,62 @@ const upload = multer({ storage: multer.memoryStorage() });
 const RAG_URL = process.env.RAG_SERVICE_URL || "http://localhost:8000";
 
 // ── POST /api/rag/chat ────────────────────────────────────────────────────────
-// Stateless proxy to the RAG service. Conversational memory is kept in-memory by
-// the RAG service per session_id (here, the authenticated user) — nothing is
-// persisted to the database.
+// Phase 3: persisted chat. Each turn lives in ai_conversations / ai_messages
+// (with query_retrieved_chunks provenance), and the thread's history is loaded
+// from the DB and sent to the RAG service — memory survives restarts.
+//
+// Body: { message, conversation_id?, document_ids?, source? }
+//   conversation_id — continue an existing thread; omitted => a new one is created
+//   document_ids    — the docs the user chose for this answer (subset of accessible)
+//   source          — legacy single-file focus by file name
+const MAX_HISTORY_MESSAGES = 20;
+
 router.post("/chat", requireAuth, async (req, res, next) => {
   try {
-    const { message, source } = req.body;
+    const { message, source, conversation_id, document_ids: selectedIds } = req.body;
     if (!message) return res.status(400).json({ message: "message is required" });
+    const orgId = req.user.organization_id;
+
+    // Scope retrieval to the documents this user is allowed to see. Passing an
+    // explicit (possibly empty) list means a user only ever searches their docs.
+    // When the user selected specific documents, honor the selection — but only
+    // the intersection with what they can access (no privilege escalation).
+    const accessible = await accessibleDocumentIds(req.user.id, orgId);
+    let documentIds = accessible;
+    let selected = false;
+    if (Array.isArray(selectedIds) && selectedIds.length > 0) {
+      const allowed = new Set(accessible);
+      documentIds = selectedIds.filter((id) => allowed.has(id));
+      if (documentIds.length === 0) {
+        return res.status(403).json({ message: "You don't have access to the selected documents." });
+      }
+      selected = true;
+    }
+
+    let focusDocumentId = null;
+    if (source) {
+      const doc = await findByFileName(orgId, source);
+      if (doc) focusDocumentId = doc.id;
+    } else if (selected && documentIds.length === 1) {
+      // Selecting exactly one document behaves like focusing on it.
+      focusDocumentId = documentIds[0];
+    }
+
+    // Find-or-create the thread (ownership enforced), then load its history.
+    let convo = null;
+    if (conversation_id) {
+      convo = await findConversation(conversation_id, req.user.id, orgId);
+      if (!convo) return res.status(404).json({ message: "Conversation not found." });
+    } else {
+      convo = await createConversation(orgId, req.user.id, message.slice(0, 80));
+    }
+    const history = (await listMessages(convo.id))
+      .filter((m) => m.sender_type === "USER" || m.sender_type === "AI")
+      .slice(-MAX_HISTORY_MESSAGES)
+      .map((m) => ({
+        role: m.sender_type === "USER" ? "user" : "assistant",
+        content: m.content,
+      }));
 
     const response = await fetch(`${RAG_URL}/chat`, {
       method: "POST",
@@ -32,7 +96,10 @@ router.post("/chat", requireAuth, async (req, res, next) => {
       body: JSON.stringify({
         message,
         session_id: `user_${req.user.id}`,
-        source: source || null,
+        history,
+        organization_id: orgId,
+        document_ids: documentIds,
+        focus_document_id: focusDocumentId,
       }),
     });
 
@@ -41,7 +108,33 @@ router.post("/chat", requireAuth, async (req, res, next) => {
       return res.status(response.status).json({ message: err.detail || "RAG service error" });
     }
 
-    return res.json(await response.json());
+    const data = await response.json();
+
+    // Persist the turn. Best-effort: a storage hiccup must not eat the answer.
+    try {
+      await addMessage(convo.id, "USER", message);
+      const metadata = {};
+      if (data.sources?.length) metadata.sources = data.sources;
+      if (data.chart) metadata.chart = data.chart;
+      if (data.document) metadata.document = data.document;
+      const aiMsg = await addMessage(
+        convo.id,
+        "AI",
+        data.answer,
+        Object.keys(metadata).length ? metadata : null
+      );
+      if (data.retrieved?.length) {
+        await recordRetrievedChunks(aiMsg.id, data.retrieved).catch(() => {});
+      }
+    } catch {
+      /* answer still goes back to the user */
+    }
+
+    return res.json({
+      ...data,
+      conversation_id: convo.id,
+      conversation_title: convo.title,
+    });
   } catch (err) {
     return next(err);
   }
@@ -76,36 +169,54 @@ router.post("/visualize", requireAuth, async (req, res, next) => {
 router.post("/upload", requireAuth, upload.single("file"), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ message: "file is required" });
+    const orgId = req.user.organization_id;
+    const filename = req.file.originalname;
 
-    const form = new FormData();
-    form.append("file", req.file.buffer, {
-      filename: req.file.originalname,
-      contentType: req.file.mimetype,
+    // 1) Register the document (org + uploader).
+    const doc = await createDocument(orgId, req.user.id, {
+      fileName: filename,
+      storagePath: `uploads/${filename}`,
+      mimeType: req.file.mimetype,
+      fileSize: req.file.size,
     });
 
-    const response = await fetch(`${RAG_URL}/upload`, {
+    // 2) Send the file to the RAG service to embed into Supabase (document_chunks
+    //    + document_tables) under this document_id.
+    const form = new FormData();
+    form.append("file", req.file.buffer, { filename, contentType: req.file.mimetype });
+    form.append("document_id", doc.id);
+    form.append("organization_id", orgId);
+
+    const response = await fetch(`${RAG_URL}/index`, {
       method: "POST",
       body: form,
       headers: form.getHeaders(),
     });
-
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
-      return res.status(response.status).json({ message: err.detail || "Upload failed" });
+      // Row stays PROCESSING; the file can be re-indexed later.
+      return res.status(response.status).json({ message: err.detail || "Indexing failed" });
     }
-
     const data = await response.json();
+    await setDocumentStatus(doc.id, "PROCESSED");
 
-    // Auto-extract dashboard metrics in the background so the upload response
-    // isn't blocked by an LLM call. The dashboard shows 'pending' until done.
-    const filename = data.filename || req.file.originalname;
+    // 3) Grant the uploader access to their own document.
+    await grantAccess({
+      documentId: doc.id,
+      accessType: "USER",
+      userId: req.user.id,
+      grantedByUserId: req.user.id,
+    }).catch(() => {});
+
+    // 4) Dashboard-metrics extraction still runs off the on-disk file (saved by
+    //    the RAG /index), in the background so the response isn't blocked.
     upsertStatus(req.user.id, filename, { status: "pending", included: true })
       .catch(() => {})
       .finally(() => {
         extractAndStore(req.user.id, filename).catch(() => {});
       });
 
-    return res.json(data);
+    return res.json({ document_id: doc.id, filename, ...data });
   } catch (err) {
     return next(err);
   }
@@ -118,29 +229,34 @@ router.post("/ingest", requireAuth, async (req, res, next) => {
   try {
     const { filename } = req.body;
     if (!filename) return res.status(400).json({ message: "filename is required" });
+    const orgId = req.user.organization_id;
+
+    // Register the generated file as a document, then index it into Supabase.
+    const doc = await createDocument(orgId, req.user.id, {
+      fileName: filename,
+      storagePath: `uploads/${filename}`,
+      mimeType: "application/pdf",
+    });
 
     const response = await fetch(`${RAG_URL}/ingest`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ filename }),
+      body: JSON.stringify({ filename, document_id: doc.id, organization_id: orgId }),
     });
-
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
       return res.status(response.status).json({ message: err.detail || "Ingest failed" });
     }
+    const data = await response.json();
+    await setDocumentStatus(doc.id, "PROCESSED");
+    await grantAccess({
+      documentId: doc.id,
+      accessType: "USER",
+      userId: req.user.id,
+      grantedByUserId: req.user.id,
+    }).catch(() => {});
 
-    return res.json(await response.json());
-  } catch (err) {
-    return next(err);
-  }
-});
-
-// ── GET /api/rag/documents ────────────────────────────────────────────────────
-router.get("/documents", requireAuth, async (req, res, next) => {
-  try {
-    const response = await fetch(`${RAG_URL}/documents`);
-    return res.json(await response.json());
+    return res.json({ document_id: doc.id, ...data });
   } catch (err) {
     return next(err);
   }
@@ -154,6 +270,8 @@ router.delete("/documents", requireAuth, async (req, res, next) => {
     const response = await fetch(`${RAG_URL}/documents`, { method: "DELETE" });
     const data = await response.json();
     await clearAllForUser(req.user.id);
+    // Also remove this user's Supabase documents (cascades chunks/tables/access).
+    await deleteAllForUser(req.user.id, req.user.organization_id).catch(() => {});
     return res.json(data);
   } catch (err) {
     return next(err);

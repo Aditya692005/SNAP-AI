@@ -15,6 +15,8 @@ const ragRoutes = require("./src/routes/ragRoutes");
 const dashboardRoutes = require("./src/routes/dashboardRoutes");
 const adminRoutes = require("./src/routes/adminRoutes");
 const organizationRoutes = require("./src/routes/organizationRoutes");
+const documentRoutes = require("./src/routes/documentRoutes");
+const conversationRoutes = require("./src/routes/conversationRoutes");
 const app = express();
 
 
@@ -39,6 +41,8 @@ app.use("/api/rag", ragRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/organization", organizationRoutes);
+app.use("/api/documents", documentRoutes);
+app.use("/api/conversations", conversationRoutes);
 // 404 for anything that didn't match a route above
 app.use((req, res) => {
   res.status(404).json({ message: "Not found." });

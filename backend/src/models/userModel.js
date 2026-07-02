@@ -86,6 +86,9 @@ async function updateUser(id, organizationId, fields) {
   const patch = {};
   if ("department_id" in fields) patch.department_id = fields.department_id;
   if ("role_id" in fields) patch.role_id = fields.role_id;
+  if ("status" in fields) patch.status = fields.status;
+  if ("failed_login_attempts" in fields) patch.failed_login_attempts = fields.failed_login_attempts;
+  if ("locked_until" in fields) patch.locked_until = fields.locked_until;
   if (Object.keys(patch).length === 0) return null;
   const { data, error } = await supabase
     .from("users")
@@ -110,6 +113,18 @@ async function deactivateUser(id, organizationId) {
     .single();
   if (error) throw error;
   return data;
+}
+
+// Permanently remove a user. May fail (FK) if they own documents/activity that
+// reference them with ON DELETE RESTRICT - the route translates that into a
+// friendly "deactivate instead" message.
+async function deleteUser(id, organizationId) {
+  const { error } = await supabase
+    .from("users")
+    .delete()
+    .eq("id", id)
+    .eq("organization_id", organizationId);
+  if (error) throw error;
 }
 
 async function verifyEmail(verificationToken) {
@@ -153,10 +168,98 @@ async function findByVerificationToken(token) {
   return data;
 }
 
+// ── Invitations (admin-added users set their own password via a token) ─────────
+async function findInviteByToken(token) {
+  const { data, error } = await supabase
+    .from("users")
+    .select("id, name, email, email_verified, email_verification_expires")
+    .eq("email_verification_token", token)
+    .single();
+  if (error) return null;
+  return data;
+}
+
+// An invited user accepts: set their password, mark verified, clear the token,
+// and (optionally) update their name.
+async function completeInvite(userId, passwordHash, name) {
+  const patch = {
+    password_hash: passwordHash,
+    email_verified: true,
+    email_verification_token: null,
+    email_verification_expires: null,
+  };
+  if (name) patch.name = name;
+  const { error } = await supabase.from("users").update(patch).eq("id", userId);
+  if (error) throw error;
+}
+
 async function updateFailedLoginAttempts(userId, attempts, lockedUntil) {
   const { error } = await supabase
     .from("users")
     .update({ failed_login_attempts: attempts, locked_until: lockedUntil })
+    .eq("id", userId);
+  if (error) throw error;
+}
+
+// Fetch a user incl. password_hash by id - used by the password change/reset
+// flows that must verify the current password or sign a per-user reset token.
+async function findAuthById(id) {
+  const { data, error } = await supabase
+    .from("users")
+    .select("id, name, email, password_hash")
+    .eq("id", id)
+    .single();
+  if (error) return null;
+  return data;
+}
+
+async function updatePassword(userId, passwordHash) {
+  const { error } = await supabase
+    .from("users")
+    .update({ password_hash: passwordHash })
+    .eq("id", userId);
+  if (error) throw error;
+}
+
+// ── Password reset via OTP ─────────────────────────────────────────────────────
+// Storing a fresh OTP resets the wrong-attempt counter.
+async function setPasswordResetOtp(userId, otpHash, expires) {
+  const { error } = await supabase
+    .from("users")
+    .update({
+      password_reset_otp: otpHash,
+      password_reset_expires: expires,
+      password_reset_attempts: 0,
+    })
+    .eq("id", userId);
+  if (error) throw error;
+}
+
+// Returns what the reset step needs to verify an OTP and change the password.
+async function getResetInfoByEmail(email) {
+  const { data, error } = await supabase
+    .from("users")
+    .select(
+      "id, name, email, password_hash, password_reset_otp, password_reset_expires, password_reset_attempts"
+    )
+    .eq("email", email)
+    .single();
+  if (error) return null;
+  return data;
+}
+
+async function setResetAttempts(userId, attempts) {
+  const { error } = await supabase
+    .from("users")
+    .update({ password_reset_attempts: attempts })
+    .eq("id", userId);
+  if (error) throw error;
+}
+
+async function clearPasswordResetOtp(userId) {
+  const { error } = await supabase
+    .from("users")
+    .update({ password_reset_otp: null, password_reset_expires: null, password_reset_attempts: 0 })
     .eq("id", userId);
   if (error) throw error;
 }
@@ -177,9 +280,18 @@ module.exports = {
   createUser,
   verifyEmail,
   findByVerificationToken,
+  findInviteByToken,
+  completeInvite,
   updateFailedLoginAttempts,
   setVerificationToken,
+  findAuthById,
+  updatePassword,
+  setPasswordResetOtp,
+  getResetInfoByEmail,
+  setResetAttempts,
+  clearPasswordResetOtp,
   listUsers,
   updateUser,
   deactivateUser,
+  deleteUser,
 };

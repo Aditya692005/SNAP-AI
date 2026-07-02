@@ -1,20 +1,27 @@
 import { useState } from "react";
+import { FaFolderOpen } from "react-icons/fa6";
+import { MdDashboard } from "react-icons/md";
+import { VscEditSparkle } from "react-icons/vsc";
+import { HiOutlineDocumentReport } from "react-icons/hi";
+import { GrUserAdmin } from "react-icons/gr";
+import { IoSettingsSharp } from "react-icons/io5";
+import { SiSnapcraft } from "react-icons/si";
 import { Link, useLocation } from "react-router-dom";
 import { authService } from "../services/authService";
 import "./Sidebar.css";
 
 const NAV = [
-  { to: "/dashboard", label: "Dashboard", icon: "📊" },
-  { to: "/documents", label: "Documents", icon: "📁" },
-  { to: "/ai", label: "AI Assistant", icon: "🤖" },
-  { to: "/reports", label: "Reports", icon: "📈" },
+  { to: "/dashboard", label: "Dashboard", icon: <MdDashboard /> },
+  { to: "/documents", label: "Documents", icon: <FaFolderOpen /> },
+  { to: "/ai", label: "AI Assistant", icon: <VscEditSparkle /> },
+  { to: "/reports", label: "Reports", icon: <HiOutlineDocumentReport /> },
 ];
 
 function Sidebar() {
   const location = useLocation();
   const isAdmin = authService.isAdmin();
   const [collapsed, setCollapsed] = useState(
-    () => localStorage.getItem("sidebarCollapsed") === "1"
+    () => localStorage.getItem("sidebarCollapsed") === "1",
   );
 
   function toggle() {
@@ -26,18 +33,20 @@ function Sidebar() {
   }
 
   const items = [...NAV];
-  if (isAdmin) items.push({ to: "/admin", label: "Admin", icon: "🛡️" });
-  items.push({ to: "/settings", label: "Settings", icon: "⚙️" });
+  if (isAdmin)
+    items.push({ to: "/admin", label: "Admin", icon: <GrUserAdmin /> });
+  items.push({ to: "/settings", label: "Settings", icon: <IoSettingsSharp /> });
 
   return (
     <aside className={`sidebar ${collapsed ? "collapsed" : ""}`}>
       <div className="sidebar-top">
         <div className="sidebar-logo">
-          <span className="logo-mark">S</span>
+          <span className="logo-mark">
+            <SiSnapcraft />
+          </span>
           {!collapsed && (
             <div className="logo-text">
               <h2>SNAP AI</h2>
-              <p>Enterprise AI Platform</p>
             </div>
           )}
         </div>
@@ -61,7 +70,7 @@ function Sidebar() {
             className={location.pathname === it.to ? "active" : ""}
             title={collapsed ? it.label : undefined}
           >
-            <span className="nav-icon">{it.icon}</span>
+            {it.icon && <span className="nav-icon">{it.icon}</span>}
             <span className="nav-label">{it.label}</span>
           </Link>
         ))}
