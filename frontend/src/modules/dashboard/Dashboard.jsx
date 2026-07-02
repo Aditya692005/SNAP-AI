@@ -392,6 +392,29 @@ function Dashboard() {
     }
   }
 
+  async function removeDocument(source) {
+    if (
+      !window.confirm(
+        `Remove "${source}" from the dashboard? Its extracted metrics will be deleted.`
+      )
+    ) {
+      return;
+    }
+    const prevDocs = documents;
+    setDocuments((prev) => prev.filter((d) => d.source_document !== source));
+    try {
+      await fetch(`${API_BASE}/api/dashboard/documents/${encodeURIComponent(source)}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
+      // Refresh KPIs/series now that this document's metrics are gone.
+      const mRes = await fetch(`${API_BASE}/api/dashboard/metrics`, { headers: authHeaders() });
+      if (mRes.ok) setData(await mRes.json());
+    } catch {
+      setDocuments(prevDocs); // restore on failure
+    }
+  }
+
   async function recompute() {
     setRecomputing(true);
     try {
@@ -808,17 +831,27 @@ function Dashboard() {
                   <span className="source-name">📄 {doc.source_document}</span>
                   <span className={`source-status ${doc.status}`}>{doc.status}</span>
                 </div>
-                <label className="source-toggle" title="Include this document's data in the dashboard">
-                  <input
-                    type="checkbox"
-                    checked={doc.included}
-                    onChange={(e) => toggleDocument(doc.source_document, e.target.checked)}
-                  />
-                  <span className="switch" />
-                  <span className="switch-label">
-                    {doc.included ? "Included" : "Excluded"}
-                  </span>
-                </label>
+                <div className="source-actions">
+                  <label className="source-toggle" title="Include this document's data in the dashboard">
+                    <input
+                      type="checkbox"
+                      checked={doc.included}
+                      onChange={(e) => toggleDocument(doc.source_document, e.target.checked)}
+                    />
+                    <span className="switch" />
+                    <span className="switch-label">
+                      {doc.included ? "Included" : "Excluded"}
+                    </span>
+                  </label>
+                  <button
+                    type="button"
+                    className="source-remove"
+                    title="Remove this document's data from the dashboard"
+                    onClick={() => removeDocument(doc.source_document)}
+                  >
+                    🗑 Remove
+                  </button>
+                </div>
               </div>
             ))}
           </div>

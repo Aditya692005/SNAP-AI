@@ -138,8 +138,9 @@ async function deleteChart(userId, id) {
   if (error) throw error;
 }
 
-// Wipe every stored metric/status for a user so the dashboard resets to "no data
-// yet". Display preferences (metric_prefs) are intentionally kept.
+// Wipe every stored metric/status AND pinned chart for a user so the dashboard
+// fully resets to "no data yet". Display preferences (metric_prefs) are
+// intentionally kept (they're just visibility toggles, not data).
 async function clearAllForUser(userId) {
   const { error: mErr } = await supabase
     .from("document_metrics")
@@ -151,6 +152,11 @@ async function clearAllForUser(userId) {
     .delete()
     .eq("user_id", userId);
   if (sErr) throw sErr;
+  const { error: cErr } = await supabase
+    .from("dashboard_charts")
+    .delete()
+    .eq("user_id", userId);
+  if (cErr) throw cErr;
 }
 
 module.exports = {

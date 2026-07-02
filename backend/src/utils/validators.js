@@ -66,11 +66,24 @@ function validateSignupInput({ name, email, password }) {
   return null;
 }
 
+// True when the new password is the same as, or a trivial variant of, the old
+// one (case-insensitive equality, or one string contained in the other - e.g.
+// "Passw0rd!2024" vs "Passw0rd!2024x"). Used to block barely-changed passwords.
+function passwordsTooSimilar(oldPw, newPw) {
+  if (!oldPw || !newPw) return false;
+  const a = String(oldPw).toLowerCase();
+  const b = String(newPw).toLowerCase();
+  if (a === b) return true;
+  if (a.includes(b) || b.includes(a)) return true;
+  return false;
+}
+
 module.exports = {
   isValidEmail,
   validateLoginInput,
   validateSignupInput,
   validatePasswordStrength,
+  passwordsTooSimilar,
   sanitizeInput,
   ASSIGNABLE_ROLES,
 };

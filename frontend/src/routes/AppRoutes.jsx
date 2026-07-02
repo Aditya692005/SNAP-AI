@@ -4,6 +4,9 @@ import Landing from "../modules/landing/Landing";
 import Login from "../modules/auth/Login";
 import Signup from "../modules/auth/Signup";
 import VerifyEmail from "../modules/auth/VerifyEmail";
+import ForgotPassword from "../modules/auth/ForgotPassword";
+import ChangePassword from "../modules/auth/ChangePassword";
+import AcceptInvite from "../modules/auth/AcceptInvite";
 import Dashboard from "../modules/dashboard/Dashboard";
 import Documents from "../modules/documents/Documents";
 import AIAssistant from "../modules/ai/AIAssistant";
@@ -18,7 +21,10 @@ function AppRoutes() {
       <Route path="/login" element={<Login />} />
       <Route path="/signup" element={<Signup />} />
       <Route path="/verify-email" element={<VerifyEmail />} />
+      <Route path="/forgot-password" element={<ForgotPassword />} />
+      <Route path="/accept-invite" element={<AcceptInvite />} />
 
+      <Route path="/change-password" element={<ProtectedRoute><ChangePassword /></ProtectedRoute>} />
       <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
       <Route path="/documents" element={<ProtectedRoute><Documents /></ProtectedRoute>} />
       <Route path="/ai" element={<ProtectedRoute><AIAssistant /></ProtectedRoute>} />

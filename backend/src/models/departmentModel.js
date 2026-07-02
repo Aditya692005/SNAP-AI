@@ -35,6 +35,24 @@ async function createDepartment(organizationId, name, description = null) {
   return data;
 }
 
+// Edit a department's name/description, scoped to the org so one tenant can't
+// edit another's. Only provided keys change.
+async function updateDepartment(id, organizationId, fields) {
+  const patch = {};
+  if ("name" in fields) patch.name = fields.name;
+  if ("description" in fields) patch.description = fields.description;
+  if (Object.keys(patch).length === 0) return null;
+  const { data, error } = await supabase
+    .from("departments")
+    .update(patch)
+    .eq("id", id)
+    .eq("organization_id", organizationId)
+    .select("id, name, description")
+    .single();
+  if (error) throw error;
+  return data;
+}
+
 // Number of still-active users in a department - used to block deletion of a
 // non-empty department.
 async function countUsersInDepartment(id) {
@@ -47,6 +65,26 @@ async function countUsersInDepartment(id) {
   return count || 0;
 }
 
+// Move every user from one department to another (used when deleting a dept).
+async function reassignDepartmentUsers(fromDeptId, toDeptId) {
+  const { error } = await supabase
+    .from("users")
+    .update({ department_id: toDeptId })
+    .eq("department_id", fromDeptId);
+  if (error) throw error;
+}
+
+// Deactivate the (still-active) users in a department (the alternative to
+// reassigning them when deleting a dept).
+async function deactivateDepartmentUsers(deptId) {
+  const { error } = await supabase
+    .from("users")
+    .update({ status: "INACTIVE" })
+    .eq("department_id", deptId)
+    .neq("status", "INACTIVE");
+  if (error) throw error;
+}
+
 async function deleteDepartment(id) {
   const { error } = await supabase.from("departments").delete().eq("id", id);
   if (error) throw error;
@@ -56,6 +94,9 @@ module.exports = {
   listDepartments,
   findDepartmentById,
   createDepartment,
+  updateDepartment,
   countUsersInDepartment,
+  reassignDepartmentUsers,
+  deactivateDepartmentUsers,
   deleteDepartment,
 };

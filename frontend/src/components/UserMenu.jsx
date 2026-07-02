@@ -4,7 +4,7 @@ import { authService } from "../services/authService";
 import { getTheme, toggleTheme } from "../services/theme";
 import "./UserMenu.css";
 
-const PUBLIC_PATHS = ["/", "/login", "/signup", "/verify-email"];
+const PUBLIC_PATHS = ["/", "/login", "/signup", "/verify-email", "/forgot-password", "/accept-invite"];
 
 const ROLE_LABELS = {
   employee: "Employee",
@@ -81,6 +81,16 @@ function UserMenu() {
             </div>
 
             <div className="usermenu-sep" />
+
+            <button
+              className="usermenu-theme"
+              onClick={() => {
+                setOpen(false);
+                navigate("/change-password");
+              }}
+            >
+              <span>🔑 Change password</span>
+            </button>
 
             <button className="usermenu-theme" onClick={onToggleTheme}>
               <span>{theme === "dark" ? "🌙 Dark mode" : "☀️ Light mode"}</span>

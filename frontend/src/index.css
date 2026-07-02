@@ -3,3 +3,16 @@
   padding: 0;
   box-sizing: border-box;
 }
+
+/* Native <select> dropdowns: the option popup defaults to a white background
+   but inherits the page's light text, so items are invisible on the dark theme
+   until hovered/selected. Force a readable dark popup (light theme overrides
+   this in theme.css). */
+select {
+  color: #f1f5f9;
+}
+select option,
+select optgroup {
+  background-color: #0f172a;
+  color: #f1f5f9;
+}

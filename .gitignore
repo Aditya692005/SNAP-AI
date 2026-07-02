@@ -1,32 +1,54 @@
-# ── Secrets / env ──
+# Secrets / env
 .env
 .env.*
-*/.env
-!*.env.example
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.sample
 
-# ── Python (rag_service + venv) ──
+# Node (backend + frontend)
+node_modules/
+dist/
+dist-ssr/
+build/
+.vite/
+*.local
+coverage/
+.eslintcache
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+logs/
+*.log
+
+# Python (rag_service)
 venv/
+.venv/
+env/
 __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.mypy_cache/
 .ipynb_checkpoints/
 
-# ── Node / frontend ──
-node_modules/
-dist/
-.vite/
-npm-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
-# ── RAG runtime data (generated, not source) ──
+# RAG runtime data (generated, not source)
+chroma_db/
 rag_service/chroma_db/
+uploads/
 rag_service/uploads/
 test_documents/
-# ── OS / editor ──
+
+# OS / editor
 .DS_Store
 Thumbs.db
 *.swp
+*.swo
 .idea/
 .vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
