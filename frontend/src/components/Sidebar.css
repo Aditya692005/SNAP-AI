@@ -19,7 +19,9 @@
 
   font-family: "IBM Plex Sans", sans-serif;
 
-  transition: width 0.2s ease, padding 0.2s ease;
+  transition:
+    width 0.2s ease,
+    padding 0.2s ease;
 }
 
 .sidebar.collapsed {
@@ -140,15 +142,10 @@
   align-items: center;
   gap: 0.85rem;
 
-  transition: background 0.2s ease, color 0.2s ease, transform 0.2s ease;
-}
-
-.nav-icon {
-  font-size: 1.15rem;
-  width: 1.5rem;
-  text-align: center;
-  flex-shrink: 0;
-  line-height: 1;
+  transition:
+    background 0.2s ease,
+    color 0.2s ease,
+    transform 0.2s ease;
 }
 
 .nav-label {

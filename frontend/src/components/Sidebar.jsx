@@ -4,17 +4,17 @@ import { authService } from "../services/authService";
 import "./Sidebar.css";
 
 const NAV = [
-  { to: "/dashboard", label: "Dashboard", icon: "📊" },
-  { to: "/documents", label: "Documents", icon: "📁" },
-  { to: "/ai", label: "AI Assistant", icon: "🤖" },
-  { to: "/reports", label: "Reports", icon: "📈" },
+  { to: "/dashboard", label: "Dashboard" },
+  { to: "/documents", label: "Documents" },
+  { to: "/ai", label: "AI Assistant" },
+  { to: "/reports", label: "Reports" },
 ];
 
 function Sidebar() {
   const location = useLocation();
   const isAdmin = authService.isAdmin();
   const [collapsed, setCollapsed] = useState(
-    () => localStorage.getItem("sidebarCollapsed") === "1"
+    () => localStorage.getItem("sidebarCollapsed") === "1",
   );
 
   function toggle() {
@@ -26,8 +26,8 @@ function Sidebar() {
   }
 
   const items = [...NAV];
-  if (isAdmin) items.push({ to: "/admin", label: "Admin", icon: "🛡️" });
-  items.push({ to: "/settings", label: "Settings", icon: "⚙️" });
+  if (isAdmin) items.push({ to: "/admin", label: "Admin" });
+  items.push({ to: "/settings", label: "Settings" });
 
   return (
     <aside className={`sidebar ${collapsed ? "collapsed" : ""}`}>
@@ -61,7 +61,6 @@ function Sidebar() {
             className={location.pathname === it.to ? "active" : ""}
             title={collapsed ? it.label : undefined}
           >
-            <span className="nav-icon">{it.icon}</span>
             <span className="nav-label">{it.label}</span>
           </Link>
         ))}
