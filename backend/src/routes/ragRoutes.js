@@ -9,11 +9,8 @@ const FormData = require("form-data");
 const fetch = require("node-fetch");
 
 const requireAuth = require("../middleware/requireAuth");
-<<<<<<< HEAD
-=======
 const { extractAndStore } = require("../services/metricsService");
 const { upsertStatus, clearAllForUser } = require("../models/metricsModel");
->>>>>>> f5dc9ee6498c66fb1019e58a7f8277033c752b73
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -21,18 +18,12 @@ const upload = multer({ storage: multer.memoryStorage() });
 const RAG_URL = process.env.RAG_SERVICE_URL || "http://localhost:8000";
 
 // ── POST /api/rag/chat ────────────────────────────────────────────────────────
-<<<<<<< HEAD
-router.post("/chat", requireAuth, async (req, res, next) => {
-  try {
-    const { message, session_id } = req.body;
-=======
 // Stateless proxy to the RAG service. Conversational memory is kept in-memory by
 // the RAG service per session_id (here, the authenticated user) — nothing is
 // persisted to the database.
 router.post("/chat", requireAuth, async (req, res, next) => {
   try {
     const { message, source } = req.body;
->>>>>>> f5dc9ee6498c66fb1019e58a7f8277033c752b73
     if (!message) return res.status(400).json({ message: "message is required" });
 
     const response = await fetch(`${RAG_URL}/chat`, {
@@ -40,12 +31,8 @@ router.post("/chat", requireAuth, async (req, res, next) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         message,
-<<<<<<< HEAD
-        session_id: session_id || `user_${req.user.id}`,
-=======
         session_id: `user_${req.user.id}`,
         source: source || null,
->>>>>>> f5dc9ee6498c66fb1019e58a7f8277033c752b73
       }),
     });
 
@@ -60,8 +47,6 @@ router.post("/chat", requireAuth, async (req, res, next) => {
   }
 });
 
-<<<<<<< HEAD
-=======
 // ── POST /api/rag/visualize ───────────────────────────────────────────────────
 // Asks the RAG service to turn an uploaded document's data into a chart/table
 // specification (JSON) that the frontend renders and lets the user download.
@@ -87,7 +72,6 @@ router.post("/visualize", requireAuth, async (req, res, next) => {
   }
 });
 
->>>>>>> f5dc9ee6498c66fb1019e58a7f8277033c752b73
 // ── POST /api/rag/upload ──────────────────────────────────────────────────────
 router.post("/upload", requireAuth, upload.single("file"), async (req, res, next) => {
   try {
@@ -110,8 +94,6 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
       return res.status(response.status).json({ message: err.detail || "Upload failed" });
     }
 
-<<<<<<< HEAD
-=======
     const data = await response.json();
 
     // Auto-extract dashboard metrics in the background so the upload response
@@ -148,7 +130,6 @@ router.post("/ingest", requireAuth, async (req, res, next) => {
       return res.status(response.status).json({ message: err.detail || "Ingest failed" });
     }
 
->>>>>>> f5dc9ee6498c66fb1019e58a7f8277033c752b73
     return res.json(await response.json());
   } catch (err) {
     return next(err);
@@ -166,12 +147,6 @@ router.get("/documents", requireAuth, async (req, res, next) => {
 });
 
 // ── DELETE /api/rag/documents ─────────────────────────────────────────────────
-<<<<<<< HEAD
-router.delete("/documents", requireAuth, async (req, res, next) => {
-  try {
-    const response = await fetch(`${RAG_URL}/documents`, { method: "DELETE" });
-    return res.json(await response.json());
-=======
 // Clears the RAG vector store + files on disk, AND wipes this user's stored
 // dashboard metrics so the dashboard resets to "no data yet".
 router.delete("/documents", requireAuth, async (req, res, next) => {
@@ -214,7 +189,6 @@ router.get("/download/:filename", requireAuth, async (req, res, next) => {
 
     // node-fetch v2 returns a Node stream; pipe it straight to the response.
     return response.body.pipe(res);
->>>>>>> f5dc9ee6498c66fb1019e58a7f8277033c752b73
   } catch (err) {
     return next(err);
   }

@@ -15,17 +15,6 @@
   max-height: 100vh;
 }
 
-<<<<<<< HEAD
-/* ── Header ── */
-.ai-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 1rem;
-  flex-shrink: 0;
-}
-
-=======
 /* Header title group */
 .ai-header-title {
   display: flex;
@@ -44,7 +33,6 @@
   padding-right: 3.25rem;
 }
 
->>>>>>> f5dc9ee6498c66fb1019e58a7f8277033c752b73
 .ai-header h1 {
   font-size: 2rem;
   margin-bottom: 0.25rem;
@@ -105,8 +93,6 @@
   color: white;
 }
 
-<<<<<<< HEAD
-=======
 .clear-docs-btn {
   background: rgba(248, 113, 113, 0.1);
   border: 1px solid rgba(248, 113, 113, 0.35);
@@ -129,7 +115,6 @@
   cursor: not-allowed;
 }
 
->>>>>>> f5dc9ee6498c66fb1019e58a7f8277033c752b73
 /* ── Doc chip list ── */
 .doc-list {
   display: flex;
@@ -146,8 +131,6 @@
   padding: 4px 12px;
   font-size: 0.8rem;
   color: #c4b5fd;
-<<<<<<< HEAD
-=======
   font-family: inherit;
   cursor: pointer;
   transition: background 0.15s ease, border-color 0.15s ease;
@@ -201,7 +184,6 @@
 .focus-clear:hover {
   background: rgba(255, 255, 255, 0.1);
   color: #fff;
->>>>>>> f5dc9ee6498c66fb1019e58a7f8277033c752b73
 }
 
 /* ── Messages ── */
@@ -271,11 +253,6 @@
   background: rgba(139, 92, 246, 0.1);
   border: 1px solid rgba(139, 92, 246, 0.2);
   border-radius: 999px;
-<<<<<<< HEAD
-  padding: 2px 10px;
-  color: #a78bfa;
-  font-size: 0.75rem;
-=======
   padding: 3px 10px;
   color: #a78bfa;
   font-size: 0.75rem;
@@ -292,7 +269,6 @@
 
 .source-chip:active {
   transform: translateY(1px);
->>>>>>> f5dc9ee6498c66fb1019e58a7f8277033c752b73
 }
 
 /* ── Typing indicator ── */
@@ -383,8 +359,6 @@
   cursor: not-allowed;
 }
 
-<<<<<<< HEAD
-=======
 /* ── Generated-document card (rendered inside an assistant bubble) ── */
 .doc-card {
   margin-top: 0.75rem;
@@ -666,7 +640,6 @@
   background: rgba(255, 255, 255, 0.03);
 }
 
->>>>>>> f5dc9ee6498c66fb1019e58a7f8277033c752b73
 @media (max-width: 900px) {
   .ai-content {
     padding: 1.5rem 1rem 0;
@@ -680,8 +653,6 @@
   .chat-bubble {
     max-width: 90%;
   }
-<<<<<<< HEAD
-=======
 }
 
 /* ── Markdown-rendered assistant responses ── */
@@ -802,5 +773,4 @@
   border: none;
   border-top: 1px solid rgba(255, 255, 255, 0.1);
   margin: 1em 0;
->>>>>>> f5dc9ee6498c66fb1019e58a7f8277033c752b73
 }
