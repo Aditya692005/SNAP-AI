@@ -618,6 +618,13 @@
   padding: 1.5rem 0;
 }
 
+/* Conversation rows in the chat-history drawer */
+.convs-item-date {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  color: #64748b;
+}
+
 .chart-actions {
   display: flex;
   gap: 0.5rem;

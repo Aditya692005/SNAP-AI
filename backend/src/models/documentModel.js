@@ -147,6 +147,18 @@ async function accessibleDocumentIds(userId, organizationId) {
   return [...ids];
 }
 
+// Distinct file names this user uploaded (drives the dashboard's document list
+// + recompute now that the RAG service no longer keeps a Chroma source index).
+async function listUploadedFileNames(userId, organizationId) {
+  const { data, error } = await supabase
+    .from("documents")
+    .select("file_name")
+    .eq("organization_id", organizationId)
+    .eq("uploaded_by_user_id", userId);
+  if (error) throw error;
+  return [...new Set((data || []).map((d) => d.file_name))];
+}
+
 async function listAccessibleDocuments(userId, organizationId) {
   const ids = await accessibleDocumentIds(userId, organizationId);
   if (ids.length === 0) return [];
@@ -169,4 +181,5 @@ module.exports = {
   grantAccess,
   accessibleDocumentIds,
   listAccessibleDocuments,
+  listUploadedFileNames,
 };

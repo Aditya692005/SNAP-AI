@@ -29,14 +29,20 @@ function AIAssistant() {
   const [clearing, setClearing] = useState(false);
   const [docList, setDocList] = useState([]);
   const [showDocs, setShowDocs] = useState(false);
-  const [activeDoc, setActiveDoc] = useState(null);
+  // Docs the user picked for the AI to answer from (empty = search everything).
+  const [selectedDocIds, setSelectedDocIds] = useState([]);
+  // Persisted chat threads (Phase 3).
+  const [conversationId, setConversationId] = useState(null);
+  const [conversations, setConversations] = useState([]);
+  const [showHistory, setShowHistory] = useState(false);
 
   const bottomRef = useRef(null);
   const fileRef = useRef(null);
 
-  // ── on mount: load docs ──────────────────────────────────────────────────────
+  // ── on mount: load docs + past conversations ─────────────────────────────────
   useEffect(() => {
     fetchDocs();
+    fetchConversations();
   }, []);
 
   useEffect(() => {
@@ -55,6 +61,82 @@ function AIAssistant() {
     } catch {
       // silently ignore — backend may not be up yet
     }
+  }
+
+  // ── persisted conversations (Phase 3) ─────────────────────────────────────────
+  async function fetchConversations() {
+    try {
+      const res = await fetch(`${API_BASE}/api/conversations`, {
+        headers: authHeaders(),
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      setConversations(data.conversations || []); // [{ id, title, created_at }]
+    } catch {
+      // silently ignore — backend may not be up yet
+    }
+  }
+
+  // Load a past thread's messages (with their saved sources/charts/documents).
+  async function loadConversation(id) {
+    try {
+      const res = await fetch(`${API_BASE}/api/conversations/${id}`, {
+        headers: authHeaders(),
+      });
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(e.message || "Could not load the conversation");
+      }
+      const data = await res.json();
+      const mapped = (data.messages || [])
+        .filter((m) => m.sender_type !== "SYSTEM")
+        .map((m) =>
+          m.sender_type === "USER"
+            ? { role: "user", text: m.content }
+            : {
+                role: "assistant",
+                text: m.content,
+                sources: m.metadata?.sources || [],
+                chart: m.metadata?.chart || undefined,
+                document: m.metadata?.document || undefined,
+              }
+        );
+      setMessages([GREETING, ...mapped]);
+      setConversationId(id);
+      setShowHistory(false);
+    } catch (err) {
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", text: `❌ ${err.message}`, error: true },
+      ]);
+    }
+  }
+
+  async function deleteConversation(id) {
+    if (!window.confirm("Delete this conversation? This cannot be undone.")) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/conversations/${id}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(e.message || "Delete failed");
+      }
+      setConversations((prev) => prev.filter((c) => c.id !== id));
+      if (conversationId === id) newChat();
+    } catch (err) {
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", text: `❌ ${err.message}`, error: true },
+      ]);
+    }
+  }
+
+  function newChat() {
+    setConversationId(null);
+    setMessages([GREETING]);
+    setShowHistory(false);
   }
 
   // ── remove ONE document everywhere (vector store + DB + Supabase + dashboard) ──
@@ -76,7 +158,7 @@ function AIAssistant() {
         throw new Error(e.message || "Remove failed");
       }
       setDocList((prev) => prev.filter((x) => x.id !== d.id));
-      if (activeDoc === d.file_name) setActiveDoc(null);
+      setSelectedDocIds((prev) => prev.filter((id) => id !== d.id));
       setMessages((prev) => [
         ...prev,
         {
@@ -107,7 +189,8 @@ function AIAssistant() {
         headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify({
           message: text,
-          source: activeDoc || undefined,
+          conversation_id: conversationId || undefined,
+          document_ids: selectedDocIds.length > 0 ? selectedDocIds : undefined,
         }),
       });
 
@@ -117,6 +200,18 @@ function AIAssistant() {
       }
 
       const data = await res.json();
+      // First turn of a new thread — remember it and add it to the history list.
+      if (data.conversation_id && data.conversation_id !== conversationId) {
+        setConversationId(data.conversation_id);
+        setConversations((prev) => [
+          {
+            id: data.conversation_id,
+            title: data.conversation_title || text.slice(0, 80),
+            created_at: new Date().toISOString(),
+          },
+          ...prev,
+        ]);
+      }
       setMessages((prev) => [
         ...prev,
         {
@@ -169,7 +264,7 @@ function AIAssistant() {
     for (const file of files) {
       try {
         const data = await uploadOne(file);
-        succeeded.push({ filename: data.filename, chunks: data.chunks });
+        succeeded.push({ filename: data.filename, chunks: data.chunks, documentId: data.document_id });
       } catch (err) {
         failed.push({ filename: file.name, error: err.message });
       } finally {
@@ -177,10 +272,10 @@ function AIAssistant() {
       }
     }
 
-    // Focus the chat on the new doc only when a single one was uploaded;
+    // Select the new doc only when a single one was uploaded;
     // multi-uploads keep the chat searching across everything.
-    if (succeeded.length === 1 && failed.length === 0) {
-      setActiveDoc(succeeded[0].filename);
+    if (succeeded.length === 1 && failed.length === 0 && succeeded[0].documentId) {
+      setSelectedDocIds([succeeded[0].documentId]);
     }
 
     const lines = [];
@@ -199,7 +294,7 @@ function AIAssistant() {
     if (succeeded.length === 1 && failed.length === 0) {
       lines.push(
         "",
-        'I\'m now focused on this document. Try *"Give me a summary of this document"* or any question about it.'
+        'I\'ve selected this document for our chat. Try *"Give me a summary of this document"* or any question about it.'
       );
     }
 
@@ -234,7 +329,7 @@ function AIAssistant() {
         throw new Error(err.message || "Clear failed");
       }
       setDocList([]);
-      setActiveDoc(null);
+      setSelectedDocIds([]);
       setShowDocs(false);
       setMessages((prev) => [
         ...prev,
@@ -329,12 +424,12 @@ function AIAssistant() {
       }
       const data = await res.json();
       await fetchDocs();
-      setActiveDoc(filename); // focus the chat on the newly added report
+      if (data.document_id) setSelectedDocIds([data.document_id]); // chat with the new report
       setMessages((prev) => [
         ...prev,
         {
           role: "assistant",
-          text: `✅ Added **${filename}** to my knowledge base (${data.chunks} chunks). I'm now focused on it — ask me anything about it.`,
+          text: `✅ Added **${filename}** to my knowledge base (${data.chunks} chunks). I've selected it for our chat — ask me anything about it.`,
         },
       ]);
     } catch (err) {
@@ -365,10 +460,30 @@ function AIAssistant() {
           </div>
 
           <div className="ai-header-actions">
+            <button
+              className="docs-toggle-btn"
+              onClick={newChat}
+              title="Start a new conversation"
+            >
+              ＋ New chat
+            </button>
+            <button
+              className="docs-toggle-btn"
+              onClick={() => {
+                setShowDocs(false);
+                setShowHistory((v) => !v);
+              }}
+              title="Past conversations"
+            >
+              {showHistory ? "Hide history" : "History"}
+            </button>
             {docList.length > 0 && (
               <button
                 className="docs-toggle-btn"
-                onClick={() => setShowDocs((v) => !v)}
+                onClick={() => {
+                  setShowHistory(false);
+                  setShowDocs((v) => !v);
+                }}
               >
                 {showDocs ? "Hide docs" : "Show docs"}
               </button>
@@ -405,17 +520,23 @@ function AIAssistant() {
           </div>
         </div>
 
-        {/* Active document focus banner */}
-        {activeDoc && (
+        {/* Selected-documents banner — confirms which docs answers will use */}
+        {selectedDocIds.length > 0 && (
           <div className="focus-banner">
             <span>
-              🎯 Focused on <strong>{activeDoc}</strong> — answers will use this document.
+              🎯 Answering from{" "}
+              <strong>
+                {docList
+                  .filter((d) => selectedDocIds.includes(d.id))
+                  .map((d) => d.file_name)
+                  .join(", ") || `${selectedDocIds.length} selected document(s)`}
+              </strong>
             </span>
             <button
               type="button"
               className="focus-clear"
-              onClick={() => setActiveDoc(null)}
-              title="Clear focus (search all documents)"
+              onClick={() => setSelectedDocIds([])}
+              title="Clear selection (search all documents)"
             >
               ✕ Clear
             </button>
@@ -504,8 +625,8 @@ function AIAssistant() {
             <textarea
               rows={1}
               placeholder={
-                activeDoc
-                  ? `Ask about ${activeDoc}, request a chart, or "generate a report on this"…`
+                selectedDocIds.length > 0
+                  ? `Ask about the selected document${selectedDocIds.length > 1 ? "s" : ""}, request a chart, or "generate a report"…`
                   : "Ask anything — request a chart or \"generate a report\" to get a PDF…"
               }
               value={input}
@@ -520,17 +641,20 @@ function AIAssistant() {
         </div>
       </main>
 
-      {/* Documents drawer — newest uploaded first; click a doc to focus the chat */}
+      {/* Documents drawer — newest uploaded first; click a doc to select it */}
       <div
-        className={`docs-overlay ${showDocs ? "open" : ""}`}
-        onClick={() => setShowDocs(false)}
+        className={`docs-overlay ${showDocs || showHistory ? "open" : ""}`}
+        onClick={() => {
+          setShowDocs(false);
+          setShowHistory(false);
+        }}
       />
       <aside className={`docs-drawer ${showDocs ? "open" : ""}`} aria-hidden={!showDocs}>
         <div className="docs-drawer-header">
           <div>
             <h2>Documents</h2>
             <span className="docs-drawer-hint">
-              {docList.length} uploaded · click to focus · 🗑 to remove everywhere
+              {docList.length} uploaded · click to select for the chat · 🗑 to remove everywhere
             </span>
           </div>
           <button
@@ -550,22 +674,26 @@ function AIAssistant() {
               <div key={d.id} className="docs-drawer-row">
                 <button
                   type="button"
-                  className={`docs-drawer-item ${activeDoc === d.file_name ? "active" : ""}`}
+                  className={`docs-drawer-item ${selectedDocIds.includes(d.id) ? "active" : ""}`}
                   onClick={() =>
-                    setActiveDoc(activeDoc === d.file_name ? null : d.file_name)
+                    setSelectedDocIds((prev) =>
+                      prev.includes(d.id)
+                        ? prev.filter((id) => id !== d.id)
+                        : [...prev, d.id]
+                    )
                   }
                   title={
-                    activeDoc === d.file_name
-                      ? "Click to unfocus"
-                      : `Focus chat on ${d.file_name}`
+                    selectedDocIds.includes(d.id)
+                      ? "Click to deselect"
+                      : `Use ${d.file_name} for the chat`
                   }
                 >
                   <span className="docs-item-name">📄 {d.file_name}</span>
                   <span className={`docs-item-status ${(d.status || "").toLowerCase()}`}>
                     {d.status === "PROCESSED" ? "ready" : (d.status || "").toLowerCase()}
                   </span>
-                  {activeDoc === d.file_name && (
-                    <span className="docs-item-focus">focused</span>
+                  {selectedDocIds.includes(d.id) && (
+                    <span className="docs-item-focus">selected</span>
                   )}
                 </button>
                 <button
@@ -573,6 +701,59 @@ function AIAssistant() {
                   className="docs-item-remove"
                   onClick={() => removeDocument(d)}
                   title="Remove from AI, database, and dashboard"
+                >
+                  🗑
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </aside>
+
+      {/* Chat-history drawer — persisted conversations; click one to resume it */}
+      <aside className={`docs-drawer ${showHistory ? "open" : ""}`} aria-hidden={!showHistory}>
+        <div className="docs-drawer-header">
+          <div>
+            <h2>Chat history</h2>
+            <span className="docs-drawer-hint">
+              {conversations.length} conversation{conversations.length === 1 ? "" : "s"} · click to
+              resume · 🗑 to delete
+            </span>
+          </div>
+          <button
+            className="docs-drawer-close"
+            onClick={() => setShowHistory(false)}
+            aria-label="Close chat history"
+          >
+            ✕
+          </button>
+        </div>
+
+        {conversations.length === 0 ? (
+          <div className="docs-empty">No conversations yet — say hi!</div>
+        ) : (
+          <div className="docs-drawer-list">
+            {conversations.map((c) => (
+              <div key={c.id} className="docs-drawer-row">
+                <button
+                  type="button"
+                  className={`docs-drawer-item ${conversationId === c.id ? "active" : ""}`}
+                  onClick={() => loadConversation(c.id)}
+                  title={`Resume "${c.title || "Untitled"}"`}
+                >
+                  <span className="docs-item-name">💬 {c.title || "Untitled"}</span>
+                  <span className="convs-item-date">
+                    {c.created_at ? new Date(c.created_at).toLocaleDateString() : ""}
+                  </span>
+                  {conversationId === c.id && (
+                    <span className="docs-item-focus">current</span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  className="docs-item-remove"
+                  onClick={() => deleteConversation(c.id)}
+                  title="Delete this conversation"
                 >
                   🗑
                 </button>

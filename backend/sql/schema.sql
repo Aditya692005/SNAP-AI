@@ -237,6 +237,7 @@ create table ai_messages (
     conversation_id uuid not null,
     sender_type     varchar(20) not null,
     content         text not null,
+    metadata        jsonb,         -- AI-reply extras: {sources, chart, document}
     created_at      timestamptz not null default now(),
     constraint chk_sender_type
         check (sender_type in ('USER', 'AI', 'SYSTEM')),

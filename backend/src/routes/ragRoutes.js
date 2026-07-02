@@ -19,6 +19,13 @@ const {
   findByFileName,
   deleteAllForUser,
 } = require("../models/documentModel");
+const {
+  createConversation,
+  findConversation,
+  listMessages,
+  addMessage,
+  recordRetrievedChunks,
+} = require("../models/conversationModel");
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -26,23 +33,62 @@ const upload = multer({ storage: multer.memoryStorage() });
 const RAG_URL = process.env.RAG_SERVICE_URL || "http://localhost:8000";
 
 // ── POST /api/rag/chat ────────────────────────────────────────────────────────
-// Stateless proxy to the RAG service. Conversational memory is kept in-memory by
-// the RAG service per session_id (here, the authenticated user) — nothing is
-// persisted to the database.
+// Phase 3: persisted chat. Each turn lives in ai_conversations / ai_messages
+// (with query_retrieved_chunks provenance), and the thread's history is loaded
+// from the DB and sent to the RAG service — memory survives restarts.
+//
+// Body: { message, conversation_id?, document_ids?, source? }
+//   conversation_id — continue an existing thread; omitted => a new one is created
+//   document_ids    — the docs the user chose for this answer (subset of accessible)
+//   source          — legacy single-file focus by file name
+const MAX_HISTORY_MESSAGES = 20;
+
 router.post("/chat", requireAuth, async (req, res, next) => {
   try {
-    const { message, source } = req.body;
+    const { message, source, conversation_id, document_ids: selectedIds } = req.body;
     if (!message) return res.status(400).json({ message: "message is required" });
     const orgId = req.user.organization_id;
 
     // Scope retrieval to the documents this user is allowed to see. Passing an
     // explicit (possibly empty) list means a user only ever searches their docs.
-    const documentIds = await accessibleDocumentIds(req.user.id, orgId);
+    // When the user selected specific documents, honor the selection — but only
+    // the intersection with what they can access (no privilege escalation).
+    const accessible = await accessibleDocumentIds(req.user.id, orgId);
+    let documentIds = accessible;
+    let selected = false;
+    if (Array.isArray(selectedIds) && selectedIds.length > 0) {
+      const allowed = new Set(accessible);
+      documentIds = selectedIds.filter((id) => allowed.has(id));
+      if (documentIds.length === 0) {
+        return res.status(403).json({ message: "You don't have access to the selected documents." });
+      }
+      selected = true;
+    }
+
     let focusDocumentId = null;
     if (source) {
       const doc = await findByFileName(orgId, source);
       if (doc) focusDocumentId = doc.id;
+    } else if (selected && documentIds.length === 1) {
+      // Selecting exactly one document behaves like focusing on it.
+      focusDocumentId = documentIds[0];
     }
+
+    // Find-or-create the thread (ownership enforced), then load its history.
+    let convo = null;
+    if (conversation_id) {
+      convo = await findConversation(conversation_id, req.user.id, orgId);
+      if (!convo) return res.status(404).json({ message: "Conversation not found." });
+    } else {
+      convo = await createConversation(orgId, req.user.id, message.slice(0, 80));
+    }
+    const history = (await listMessages(convo.id))
+      .filter((m) => m.sender_type === "USER" || m.sender_type === "AI")
+      .slice(-MAX_HISTORY_MESSAGES)
+      .map((m) => ({
+        role: m.sender_type === "USER" ? "user" : "assistant",
+        content: m.content,
+      }));
 
     const response = await fetch(`${RAG_URL}/chat`, {
       method: "POST",
@@ -50,6 +96,7 @@ router.post("/chat", requireAuth, async (req, res, next) => {
       body: JSON.stringify({
         message,
         session_id: `user_${req.user.id}`,
+        history,
         organization_id: orgId,
         document_ids: documentIds,
         focus_document_id: focusDocumentId,
@@ -61,7 +108,33 @@ router.post("/chat", requireAuth, async (req, res, next) => {
       return res.status(response.status).json({ message: err.detail || "RAG service error" });
     }
 
-    return res.json(await response.json());
+    const data = await response.json();
+
+    // Persist the turn. Best-effort: a storage hiccup must not eat the answer.
+    try {
+      await addMessage(convo.id, "USER", message);
+      const metadata = {};
+      if (data.sources?.length) metadata.sources = data.sources;
+      if (data.chart) metadata.chart = data.chart;
+      if (data.document) metadata.document = data.document;
+      const aiMsg = await addMessage(
+        convo.id,
+        "AI",
+        data.answer,
+        Object.keys(metadata).length ? metadata : null
+      );
+      if (data.retrieved?.length) {
+        await recordRetrievedChunks(aiMsg.id, data.retrieved).catch(() => {});
+      }
+    } catch {
+      /* answer still goes back to the user */
+    }
+
+    return res.json({
+      ...data,
+      conversation_id: convo.id,
+      conversation_title: convo.title,
+    });
   } catch (err) {
     return next(err);
   }
@@ -184,16 +257,6 @@ router.post("/ingest", requireAuth, async (req, res, next) => {
     }).catch(() => {});
 
     return res.json({ document_id: doc.id, ...data });
-  } catch (err) {
-    return next(err);
-  }
-});
-
-// ── GET /api/rag/documents ────────────────────────────────────────────────────
-router.get("/documents", requireAuth, async (req, res, next) => {
-  try {
-    const response = await fetch(`${RAG_URL}/documents`);
-    return res.json(await response.json());
   } catch (err) {
     return next(err);
   }

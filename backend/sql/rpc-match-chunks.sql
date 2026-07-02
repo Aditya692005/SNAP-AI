@@ -1,18 +1,14 @@
 -- ============================================================================
--- SNAP-AI - Move document_chunks embeddings to vector(384) + recreate the
--- pgvector similarity-search RPC. Safe to run while document_chunks is empty.
+-- SNAP-AI - document_chunks embeddings = vector(384) + the pgvector
+-- similarity-search RPC (which returns file_name for downloadable sources).
+--
+-- Paste the whole file into the Supabase SQL editor. Safe to re-run: the column
+-- change is a no-op once it's already vector(384), and the index/function are
+-- recreated. If the column is already 384 you can run only part (2) below.
 -- ============================================================================
 
--- 1) Resize the embedding column (the ivfflat index must be dropped first,
---    since it's bound to the column type).
-drop index if exists idx_document_chunks_embedding;
-
-alter table document_chunks
-    alter column embedding type vector(384);
-
-
--- 1) Resize the embedding column (the ivfflat index must be dropped first,
---    since it's bound to the column type).
+-- 1) Ensure the embedding column is vector(384). The ivfflat index is bound to
+--    the column type, so drop it first, then recreate.
 drop index if exists idx_document_chunks_embedding;
 
 alter table document_chunks
@@ -27,7 +23,11 @@ create index idx_document_chunks_embedding
 --      * p_organization_id - hard tenant boundary (always required)
 --      * p_document_ids     - optional uuid[] the caller may see (NULL = whole org)
 --    similarity = 1 - cosine_distance (1.0 identical, 0 orthogonal).
-create or replace function match_document_chunks(
+-- DROP first: the return type includes file_name, and Postgres won't let CREATE
+-- OR REPLACE change an existing function's return columns.
+drop function if exists match_document_chunks(vector, uuid, int, uuid[]);
+
+create function match_document_chunks(
     query_embedding   vector(384),
     p_organization_id uuid,
     match_count       int     default 5,
@@ -36,6 +36,7 @@ create or replace function match_document_chunks(
 returns table (
     id          uuid,
     document_id uuid,
+    file_name   text,
     chunk_index int,
     chunk_text  text,
     similarity  float
@@ -46,6 +47,7 @@ as $$
     select
         dc.id,
         dc.document_id,
+        d.file_name,
         dc.chunk_index,
         dc.chunk_text,
         1 - (dc.embedding <=> query_embedding) as similarity

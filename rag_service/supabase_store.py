@@ -72,6 +72,14 @@ def match_chunks(query_embedding, organization_id: str, document_ids=None, match
     return res.data or []
 
 
+def file_names_for_documents(document_ids) -> list[str]:
+    """Distinct file names for a set of document ids (for citing sources)."""
+    if not document_ids:
+        return []
+    res = sb().table("documents").select("file_name").in_("id", document_ids).execute()
+    return list({str(r["file_name"]) for r in (res.data or []) if r.get("file_name")})
+
+
 def tables_for_documents(document_ids) -> list[dict]:
     """Stored tabular data for a set of documents (for accurate chart data)."""
     if not document_ids:
