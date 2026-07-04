@@ -53,7 +53,11 @@ router.post("/chat", requireAuth, async (req, res, next) => {
     // explicit (possibly empty) list means a user only ever searches their docs.
     // When the user selected specific documents, honor the selection — but only
     // the intersection with what they can access (no privilege escalation).
-    const accessible = await accessibleDocumentIds(req.user.id, orgId);
+    // Dept-sharers (managers/admins) also see docs shared to sub-departments of
+    // the department they govern — same rule as GET /api/documents.
+    const accessible = await accessibleDocumentIds(req.user.id, orgId, {
+      subtreeDepartments: (req.user.permissions || []).includes("SHARE_DEPARTMENT_DOCUMENTS"),
+    });
     let documentIds = accessible;
     let selected = false;
     if (Array.isArray(selectedIds) && selectedIds.length > 0) {

@@ -15,8 +15,8 @@
 const fetch = require("node-fetch");
 const { findMessageById, listMessages } = require("../models/conversationModel");
 const {
-  getOrCreateDefaultDashboard,
-  listWidgets,
+  getWidgetForUser,
+  listWidgetsForUser,
   updateWidget,
 } = require("../models/dashboardModel");
 
@@ -61,9 +61,7 @@ async function regenerateSpec(instruction, source) {
 // Regenerate ONE widget's chart from fresh data and clear its stale flag.
 // Returns the updated widget. Throws if it can't be refreshed (no link/instruction).
 async function refreshWidget(userId, organizationId, widgetId) {
-  const dashboard = await getOrCreateDefaultDashboard(userId, organizationId);
-  const widgets = await listWidgets(dashboard.id);
-  const widget = widgets.find((w) => w.id === widgetId);
+  const widget = await getWidgetForUser(userId, widgetId);
   if (!widget) {
     const e = new Error("Widget not found");
     e.status = 404;
@@ -82,7 +80,7 @@ async function refreshWidget(userId, organizationId, widgetId) {
   const config = { ...(widget.config || {}), spec };
   delete config.stale;
   delete config.stale_source;
-  return updateWidget(dashboard.id, widgetId, { config });
+  return updateWidget(widget.personal_dashboard_id, widgetId, { config });
 }
 
 // After a same-named file is re-uploaded, flag every widget charted from that
@@ -90,15 +88,14 @@ async function refreshWidget(userId, organizationId, widgetId) {
 // Returns the number of widgets flagged.
 async function markWidgetsStaleForSource(userId, organizationId, source) {
   try {
-    const dashboard = await getOrCreateDefaultDashboard(userId, organizationId);
-    const widgets = await listWidgets(dashboard.id);
+    const widgets = await listWidgetsForUser(userId);
     let flagged = 0;
     for (const w of widgets) {
       if (w.widget_type !== "ai_chart" || !w.ai_message_id) continue;
       const recovered = await recoverRequest(w.ai_message_id);
       if (!recovered || !recovered.sources.includes(source)) continue;
       const config = { ...(w.config || {}), stale: true, stale_source: source };
-      await updateWidget(dashboard.id, w.id, { config });
+      await updateWidget(w.personal_dashboard_id, w.id, { config });
       flagged += 1;
     }
     return flagged;

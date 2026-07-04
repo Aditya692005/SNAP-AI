@@ -283,6 +283,52 @@ export const adminService = {
   },
 };
 
+// Documents + tiered sharing (share button shows only for docs you uploaded;
+// the backend enforces per-tier permissions).
+export const documentService = {
+  async list() {
+    return (
+      (await handle(await fetch(`${API_BASE_URL}/api/documents`, { headers: authHeaders() })))
+        .documents || []
+    );
+  },
+  // { user_id, can: {user, department, organization}, users: [...], departments: [...] }
+  async shareTargets() {
+    return handle(
+      await fetch(`${API_BASE_URL}/api/documents/share-targets`, { headers: authHeaders() })
+    );
+  },
+  // payload: { access_type, user_id?|department_id?, expires_at? }
+  async share(documentId, payload) {
+    return handle(
+      await fetch(`${API_BASE_URL}/api/documents/${documentId}/share`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(payload),
+      })
+    );
+  },
+  async listAccess(documentId) {
+    return (
+      (
+        await handle(
+          await fetch(`${API_BASE_URL}/api/documents/${documentId}/access`, {
+            headers: authHeaders(),
+          })
+        )
+      ).access || []
+    );
+  },
+  async revokeAccess(documentId, accessId) {
+    return handle(
+      await fetch(`${API_BASE_URL}/api/documents/${documentId}/access/${accessId}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      })
+    );
+  },
+};
+
 // Organization details (read for everyone; edit requires MANAGE_ORGANIZATION).
 export const organizationService = {
   async get() {

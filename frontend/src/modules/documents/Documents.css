@@ -192,6 +192,241 @@
   background: rgba(255, 255, 255, 0.12);
 }
 
+/* ── Share button on a document row ──────────────────────────────────────── */
+.share-button {
+  min-width: 110px;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  padding: 10px 18px;
+  background: rgba(255, 255, 255, 0.08);
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.share-button:hover {
+  background: rgba(255, 255, 255, 0.12);
+  transform: translateY(-2px);
+}
+
+/* ── Share dialog ─────────────────────────────────────────────────────────── */
+.share-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 7, 19, 0.7);
+  z-index: 40;
+}
+
+.share-dialog {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(560px, calc(100vw - 2rem));
+  max-height: min(80vh, 720px);
+  overflow-y: auto;
+  background: #0b1222;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 20px;
+  padding: 1.5rem 2rem;
+  z-index: 41;
+  color: white;
+}
+
+.share-dialog-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.share-dialog-header h2 {
+  font-size: 1.3rem;
+  margin-bottom: 0.3rem;
+}
+
+.share-dialog-sub {
+  color: #94a3b8;
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.share-close {
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 1.1rem;
+  cursor: pointer;
+}
+
+.share-close:hover {
+  color: white;
+}
+
+.share-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.share-tiers {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.share-tier {
+  border: 1px solid #334155;
+  border-radius: 999px;
+  padding: 8px 16px;
+  background: transparent;
+  color: #94a3b8;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.share-tier.active {
+  background: linear-gradient(135deg, #ec4899, #8b5cf6);
+  border-color: transparent;
+  color: white;
+}
+
+.share-form select,
+.share-expiry input[type="date"] {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid #334155;
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: white;
+  font-size: 0.95rem;
+}
+
+.share-form select option {
+  background: #0b1222;
+}
+
+.share-org-note {
+  color: #94a3b8;
+  font-size: 0.95rem;
+}
+
+.share-expiry {
+  display: flex;
+  gap: 1.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  color: #cbd5e1;
+  font-size: 0.95rem;
+}
+
+.share-expiry label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+
+.share-submit {
+  align-self: flex-start;
+  min-width: 130px;
+  border: none;
+  border-radius: 10px;
+  padding: 10px 22px;
+  background: linear-gradient(135deg, #ec4899, #8b5cf6);
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.share-submit:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 20px rgba(236, 72, 153, 0.3);
+}
+
+.share-submit:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.share-error,
+.share-notice {
+  margin-top: 0.75rem;
+  font-size: 0.92rem;
+}
+
+.share-error {
+  color: #f87171;
+}
+
+.share-notice {
+  color: #4ade80;
+}
+
+/* ── "Shared with" list ───────────────────────────────────────────────────── */
+.share-access {
+  margin-top: 1.5rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 1rem;
+}
+
+.share-access h3 {
+  font-size: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.share-access-empty {
+  color: #94a3b8;
+  font-size: 0.92rem;
+}
+
+.share-access-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.6rem 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.share-access-row:last-child {
+  border-bottom: none;
+}
+
+.share-access-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.share-access-target {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.share-access-expiry {
+  color: #94a3b8;
+  font-size: 0.85rem;
+}
+
+.share-revoke {
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  border-radius: 10px;
+  padding: 6px 14px;
+  background: rgba(239, 68, 68, 0.12);
+  color: #f87171;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.share-revoke:hover {
+  background: rgba(239, 68, 68, 0.22);
+}
+
 @media (max-width: 900px) {
   .documents-content {
     padding: 1.5rem;
@@ -207,5 +442,9 @@
     justify-content: flex-start;
 
     width: 100%;
+  }
+
+  .share-dialog {
+    padding: 1.25rem;
   }
 }

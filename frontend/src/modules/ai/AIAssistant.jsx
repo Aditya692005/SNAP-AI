@@ -355,6 +355,9 @@ function AIAssistant() {
   // the dashboard can regenerate the chart against fresh data on re-upload.
   async function pinChart(spec, aiMessageId) {
     try {
+      // Pin to whichever dashboard the user last had open (persisted by the
+      // Dashboard page). Omitted/unknown → the server falls back to the default.
+      const activeDashboardId = localStorage.getItem("activeDashboardId") || null;
       const res = await fetch(`${API_BASE}/api/dashboard/widgets`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -363,6 +366,7 @@ function AIAssistant() {
           title: spec.title || null,
           config: { spec },
           ai_message_id: aiMessageId || null,
+          dashboard_id: activeDashboardId,
         }),
       });
       if (!res.ok) {

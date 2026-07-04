@@ -1,16 +1,8 @@
 import { useEffect, useState } from "react";
 import Sidebar from "../../components/Sidebar";
+import ShareDialog from "./ShareDialog";
+import { documentService } from "../../services/authService";
 import "./Documents.css";
-
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
-
-function getToken() {
-  return localStorage.getItem("token");
-}
-
-function authHeaders() {
-  return { Authorization: `Bearer ${getToken()}` };
-}
 
 // Human-readable status + badge style for a document's processing state.
 function statusLabel(status) {
@@ -25,33 +17,42 @@ function Documents() {
   const [docs, setDocs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // Share tiers + pick-lists for the current user, from /api/documents/share-targets.
+  const [targets, setTargets] = useState(null);
+  const [shareDoc, setShareDoc] = useState(null); // doc whose share dialog is open
 
   // Load only the documents this user can access (the backend scopes
-  // /api/documents to the caller's own uploads + granted access).
+  // /api/documents to the caller's own uploads + granted access), plus what
+  // they're allowed to share to.
   useEffect(() => {
     let cancelled = false;
-    async function fetchDocs() {
+    async function fetchAll() {
       try {
-        const res = await fetch(`${API_BASE}/api/documents`, {
-          headers: authHeaders(),
-        });
-        if (!res.ok) {
-          const e = await res.json().catch(() => ({}));
-          throw new Error(e.message || "Could not load your documents.");
+        const [documents, shareTargets] = await Promise.all([
+          documentService.list(),
+          documentService.shareTargets().catch(() => null),
+        ]);
+        if (!cancelled) {
+          setDocs(documents);
+          setTargets(shareTargets);
         }
-        const data = await res.json();
-        if (!cancelled) setDocs(data.documents || []);
       } catch (err) {
         if (!cancelled) setError(err.message);
       } finally {
         if (!cancelled) setLoading(false);
       }
     }
-    fetchDocs();
+    fetchAll();
     return () => {
       cancelled = true;
     };
   }, []);
+
+  // Share button shows on documents this user uploaded, or on every document
+  // for org_admins. The backend re-enforces all of this server-side.
+  function canShare(d) {
+    return targets && (targets.is_admin || d.uploaded_by_user_id === targets.user_id);
+  }
 
   return (
     <div className="documents-layout">
@@ -114,6 +115,16 @@ function Documents() {
                     <span className={`status ${badge.className}`}>
                       {badge.text}
                     </span>
+                    {canShare(d) && (
+                      <button
+                        type="button"
+                        className="share-button"
+                        onClick={() => setShareDoc(d)}
+                        title="Share this document (read-only)"
+                      >
+                        ⤴ Share
+                      </button>
+                    )}
                   </div>
                 </div>
               );
@@ -121,6 +132,14 @@ function Documents() {
           </div>
         </div>
       </main>
+
+      {shareDoc && (
+        <ShareDialog
+          doc={shareDoc}
+          targets={targets}
+          onClose={() => setShareDoc(null)}
+        />
+      )}
     </div>
   );
 }
