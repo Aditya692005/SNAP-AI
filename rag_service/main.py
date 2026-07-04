@@ -257,6 +257,50 @@ def wants_document(question: str) -> bool:
     return bool(DOC_RE.search(question))
 
 
+# Meta/conversational questions are answerable from the chat itself (or are just
+# small talk) and don't draw on the uploaded documents — so citing document
+# sources for them would be misleading. These get a normal answer with NO
+# sources. Kept specific to avoid swallowing genuine document questions (e.g.
+# "what time period does the data cover?" must NOT match "what time is it").
+META_KEYWORDS = (
+    "last question i asked", "last question i've asked", "my last question",
+    "my previous question", "previous question i asked", "what did i just ask",
+    "what did i ask you", "what was my last", "what did i say",
+    "my last message", "repeat my question",
+    "what time is it", "what's the time", "what is the time", "current time",
+    "current date", "today's date", "what's today's date",
+    "what is today's date", "what day is it",
+    "what is your name", "what's your name", "who are you",
+    "what can you do", "what do you do",
+    "repeat that", "say that again", "what did you just say",
+    "what did we talk about", "what have we discussed",
+)
+
+
+def is_meta_question(question: str) -> bool:
+    q = question.lower()
+    return any(k in q for k in META_KEYWORDS)
+
+
+# Phrases signalling the user wants a chart built from data the AI ALREADY
+# presented (a table/answer whose sources were already cited), rather than a
+# fresh look at the documents — e.g. "make a bar graph of the above table". A
+# chart that merely re-plots already-cited data is just a graphical view of that
+# answer, so it shouldn't re-cite the same sources.
+PRIOR_OUTPUT_KEYWORDS = (
+    "the above", "above table", "above data", "that table", "this table",
+    "that data", "this data", "the previous table", "previous table",
+    "table you gave", "table you showed", "table you provided",
+    "you just gave", "you just showed", "based on that", "of that table",
+    "from that table", "the same table", "same data", "that graph",
+)
+
+
+def references_prior_output(question: str) -> bool:
+    q = question.lower()
+    return any(k in q for k in PRIOR_OUTPUT_KEYWORDS)
+
+
 # ── Visualization helpers ────────────────────────────────────────────────────
 # Max characters of dataset preview fed to the model when building a chart spec.
 MAX_VIZ_CHARS = 60_000
@@ -859,6 +903,13 @@ async def chat(req: ChatRequest):
 
         n_docs = len(req.document_ids or [])
 
+        # Meta/conversational questions ("what was my last question?", "what time
+        # is it?") are answered from the chat itself, not the documents — so give a
+        # normal answer with NO sources cited.
+        if is_meta_question(req.message):
+            answer = await run_plain_chain(req.message, req.session_id, req.history)
+            return ChatResponse(answer=answer, sources=[], doc_count=0)
+
         # Generated report/PDF from the accessible/focused documents.
         if wants_document(req.message):
             doc, source_files = await run_document_generation_supabase(
@@ -877,7 +928,11 @@ async def chat(req: ChatRequest):
                     req.message, req.organization_id, req.document_ids, req.focus_document_id
                 )
                 answer = spec.get("notes") or spec.get("title") or "Here's the chart you asked for."
-                return ChatResponse(answer=answer, sources=source_files, doc_count=n_docs, chart=spec)
+                # A chart that merely re-plots data the AI already presented (and
+                # cited) is just a graphical view of that answer — don't re-cite
+                # the same sources for it.
+                sources = [] if references_prior_output(req.message) else source_files
+                return ChatResponse(answer=answer, sources=sources, doc_count=n_docs, chart=spec)
             except HTTPException:
                 pass  # not chartable → fall through to a normal answer
 
