@@ -55,6 +55,22 @@ async function listWidgets(dashboardId) {
   return data || [];
 }
 
+// The earliest widget on this dashboard pinned from a given AI message, or null.
+// Used to keep pinning idempotent: re-pinning the same chart returns the
+// existing widget instead of creating a duplicate. Tolerant of pre-existing
+// duplicates (returns the first) rather than erroring like .single() would.
+async function findWidgetByMessage(dashboardId, aiMessageId) {
+  const { data, error } = await supabase
+    .from("dashboard_widgets")
+    .select(WIDGET_FIELDS)
+    .eq("personal_dashboard_id", dashboardId)
+    .eq("ai_message_id", aiMessageId)
+    .order("created_at", { ascending: true })
+    .limit(1);
+  if (error) throw error;
+  return (data && data[0]) || null;
+}
+
 async function addWidget(
   dashboardId,
   { widget_type, title, config, position_x, position_y, width, height, ai_message_id }
@@ -114,6 +130,7 @@ async function listWidgetsForUser(userId) {
 module.exports = {
   getOrCreateDefaultDashboard,
   listWidgets,
+  findWidgetByMessage,
   addWidget,
   updateWidget,
   deleteWidget,

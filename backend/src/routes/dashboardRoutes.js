@@ -17,6 +17,7 @@ const {
 const {
   getOrCreateDefaultDashboard,
   listWidgets,
+  findWidgetByMessage,
   addWidget,
   updateWidget,
   deleteWidget,
@@ -183,6 +184,14 @@ router.post("/widgets", requireAuth, async (req, res, next) => {
       return res.status(400).json({ message: "config (object) is required" });
     }
     const dashboard = await getOrCreateDefaultDashboard(req.user.id, req.user.organization_id);
+
+    // Idempotent pin: if this chart (same AI message) is already on the
+    // dashboard, return the existing widget instead of adding a duplicate.
+    if (ai_message_id) {
+      const existing = await findWidgetByMessage(dashboard.id, ai_message_id);
+      if (existing) return res.status(200).json(existing);
+    }
+
     const widget = await addWidget(dashboard.id, {
       widget_type,
       title: title ?? null,

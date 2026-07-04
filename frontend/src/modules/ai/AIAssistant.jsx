@@ -369,11 +369,15 @@ function AIAssistant() {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.message || "Could not pin chart");
       }
+      // 200 = it was already pinned (idempotent); 201 = newly added.
+      const alreadyPinned = res.status === 200;
       setMessages((prev) => [
         ...prev,
         {
           role: "assistant",
-          text: "📌 Added that chart to your dashboard — open the **Dashboard** to see it.",
+          text: alreadyPinned
+            ? "📌 That chart is already on your **Dashboard** — no duplicate added."
+            : "📌 Added that chart to your dashboard — open the **Dashboard** to see it.",
         },
       ]);
     } catch (err) {
