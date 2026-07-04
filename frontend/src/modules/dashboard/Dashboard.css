@@ -504,6 +504,88 @@
   white-space: nowrap;
 }
 
+.ghost-btn.small.danger {
+  border-color: rgba(248, 113, 113, 0.35);
+  color: #fca5a5;
+}
+.ghost-btn.small.danger:hover:not(:disabled) {
+  background: rgba(248, 113, 113, 0.16);
+}
+
+/* ── Dashboard tabs ─────────────────────────────────────── */
+.dashboard-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding-bottom: 0.75rem;
+}
+
+.dash-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.4rem 0.9rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #cbd5e1;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.dash-tab:hover {
+  background: rgba(139, 92, 246, 0.12);
+  color: #f8fafc;
+}
+
+.dash-tab.active {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.28), rgba(99, 102, 241, 0.28));
+  border-color: rgba(139, 92, 246, 0.55);
+  color: #fff;
+}
+
+.dash-tab.new {
+  border-style: dashed;
+  color: #a5b4fc;
+}
+
+.dash-tab-input,
+.dash-rename-input {
+  padding: 0.4rem 0.9rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(139, 92, 246, 0.55);
+  color: #f8fafc;
+  font-size: 0.85rem;
+  outline: none;
+  min-width: 12rem;
+}
+
+.dash-tab-input::placeholder,
+.dash-rename-input::placeholder {
+  color: #64748b;
+}
+
+.dash-tab-badge {
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #94a3b8;
+}
+
+.dashboard-board-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+}
+
 /* ── Welcome / empty ────────────────────────────────────── */
 .welcome-card {
   background: rgba(255, 255, 255, 0.04);

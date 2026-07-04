@@ -44,6 +44,77 @@ async function getOrCreateDefaultDashboard(userId, organizationId) {
   return won;
 }
 
+// All of a user's personal dashboards, default first then oldest-first. Ensures
+// the default exists so the list is never empty.
+async function listDashboards(userId, organizationId) {
+  await getOrCreateDefaultDashboard(userId, organizationId);
+  const { data, error } = await supabase
+    .from("personal_dashboards")
+    .select(DASHBOARD_FIELDS)
+    .eq("user_id", userId)
+    .order("is_default", { ascending: false })
+    .order("created_at", { ascending: true });
+  if (error) throw error;
+  return data || [];
+}
+
+// Create an additional (non-default) personal dashboard.
+async function createDashboard(userId, organizationId, name) {
+  const { data, error } = await supabase
+    .from("personal_dashboards")
+    .insert({
+      user_id: userId,
+      organization_id: organizationId,
+      name: (name || "Untitled dashboard").slice(0, 255),
+      is_default: false,
+    })
+    .select(DASHBOARD_FIELDS)
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+// One dashboard by id, scoped to its owner (null if not owned). Ownership check
+// for every per-dashboard operation.
+async function getDashboardForUser(userId, dashboardId) {
+  const { data, error } = await supabase
+    .from("personal_dashboards")
+    .select(DASHBOARD_FIELDS)
+    .eq("id", dashboardId)
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
+// Rename a dashboard the user owns; returns the updated row (null if not owned).
+async function renameDashboard(userId, dashboardId, name) {
+  const { data, error } = await supabase
+    .from("personal_dashboards")
+    .update({ name: (name || "Untitled dashboard").slice(0, 255), updated_at: new Date().toISOString() })
+    .eq("id", dashboardId)
+    .eq("user_id", userId)
+    .select(DASHBOARD_FIELDS)
+    .maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
+// Delete a non-default dashboard the user owns (its widgets cascade). The
+// default dashboard can't be deleted — returns false if the row didn't match
+// (not owned, or is_default).
+async function deleteDashboard(userId, dashboardId) {
+  const { data, error } = await supabase
+    .from("personal_dashboards")
+    .delete()
+    .eq("id", dashboardId)
+    .eq("user_id", userId)
+    .eq("is_default", false)
+    .select("id");
+  if (error) throw error;
+  return (data || []).length > 0;
+}
+
 async function listWidgets(dashboardId) {
   const { data, error } = await supabase
     .from("dashboard_widgets")
@@ -115,6 +186,24 @@ async function deleteWidget(dashboardId, widgetId) {
   if (error) throw error;
 }
 
+// One widget by id, scoped to its owner across ALL their dashboards (null if
+// not owned). Lets per-widget routes/refresh authorize by user without first
+// knowing which dashboard the widget lives on. The returned row includes
+// personal_dashboard_id (in WIDGET_FIELDS) so callers can scope the follow-up
+// update/delete to the right dashboard.
+async function getWidgetForUser(userId, widgetId) {
+  const { data, error } = await supabase
+    .from("dashboard_widgets")
+    .select(`${WIDGET_FIELDS}, personal_dashboards!inner(user_id)`)
+    .eq("id", widgetId)
+    .eq("personal_dashboards.user_id", userId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) return null;
+  delete data.personal_dashboards; // strip the join artifact
+  return data;
+}
+
 // Widgets for a user (across their personal dashboard) whose source AI message
 // referenced a given document filename. Used by the re-upload refresh to mark
 // affected charts stale. Joins through ai_messages.metadata.sources.
@@ -129,8 +218,14 @@ async function listWidgetsForUser(userId) {
 
 module.exports = {
   getOrCreateDefaultDashboard,
+  listDashboards,
+  createDashboard,
+  getDashboardForUser,
+  renameDashboard,
+  deleteDashboard,
   listWidgets,
   findWidgetByMessage,
+  getWidgetForUser,
   addWidget,
   updateWidget,
   deleteWidget,

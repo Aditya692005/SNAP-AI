@@ -16,8 +16,14 @@ const {
 } = require("../models/metricsModel");
 const {
   getOrCreateDefaultDashboard,
+  listDashboards,
+  createDashboard,
+  getDashboardForUser,
+  renameDashboard,
+  deleteDashboard,
   listWidgets,
   findWidgetByMessage,
+  getWidgetForUser,
   addWidget,
   updateWidget,
   deleteWidget,
@@ -158,34 +164,118 @@ router.get("/metrics", requireAuth, async (req, res, next) => {
   }
 });
 
-// ── Widgets ───────────────────────────────────────────────────────────────────
-// A widget is a pinned AI chart (widget_type "ai_chart", config {spec}). All
-// routes operate on the caller's default personal dashboard, created on demand.
+// ── Dashboards ──────────────────────────────────────────────────────────────
+// A user can keep several personal dashboards to organise their pinned charts.
+// One is the (undeletable) default; the rest are freely created/renamed/deleted.
 
-// GET /api/dashboard/widgets — list the user's widgets.
-router.get("/widgets", requireAuth, async (req, res, next) => {
+// GET /api/dashboard/dashboards — list the user's personal dashboards.
+router.get("/dashboards", requireAuth, async (req, res, next) => {
   try {
-    const dashboard = await getOrCreateDefaultDashboard(req.user.id, req.user.organization_id);
-    return res.json({ widgets: await listWidgets(dashboard.id) });
+    const dashboards = await listDashboards(req.user.id, req.user.organization_id);
+    return res.json({ dashboards });
   } catch (err) {
     return next(err);
   }
 });
 
-// POST /api/dashboard/widgets — pin a widget (from the AI Assistant).
+// POST /api/dashboard/dashboards — create a new (non-default) dashboard.
+router.post("/dashboards", requireAuth, async (req, res, next) => {
+  try {
+    const name = (req.body?.name || "").trim();
+    if (!name) return res.status(400).json({ message: "name is required" });
+    const dashboard = await createDashboard(req.user.id, req.user.organization_id, name);
+    return res.status(201).json(dashboard);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// PATCH /api/dashboard/dashboards/:id — rename a dashboard.
+router.patch("/dashboards/:id", requireAuth, async (req, res, next) => {
+  try {
+    const name = (req.body?.name || "").trim();
+    if (!name) return res.status(400).json({ message: "name is required" });
+    const dashboard = await renameDashboard(req.user.id, req.params.id, name);
+    if (!dashboard) return res.status(404).json({ message: "Dashboard not found" });
+    return res.json(dashboard);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// DELETE /api/dashboard/dashboards/:id — delete a non-default dashboard (its
+// widgets cascade). The default dashboard can't be removed.
+router.delete("/dashboards/:id", requireAuth, async (req, res, next) => {
+  try {
+    const deleted = await deleteDashboard(req.user.id, req.params.id);
+    if (!deleted) {
+      return res
+        .status(400)
+        .json({ message: "Can't delete this dashboard (default dashboards are permanent)." });
+    }
+    return res.json({ deleted: true });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// ── Widgets ───────────────────────────────────────────────────────────────────
+// A widget is a pinned AI chart (widget_type "ai_chart", config {spec}). Widget
+// routes target a specific dashboard: list/add take a dashboard_id (defaulting
+// to the user's default dashboard); per-widget routes authorize by owner across
+// all the user's dashboards.
+
+// Resolve the dashboard a request targets, enforcing ownership. `dashboard_id`
+// may be absent (→ default dashboard). Throws a 404-tagged error if the given
+// id isn't one of the user's dashboards.
+async function resolveDashboard(req, dashboardId) {
+  if (!dashboardId) {
+    return getOrCreateDefaultDashboard(req.user.id, req.user.organization_id);
+  }
+  const dashboard = await getDashboardForUser(req.user.id, dashboardId);
+  if (!dashboard) {
+    const e = new Error("Dashboard not found");
+    e.status = 404;
+    throw e;
+  }
+  return dashboard;
+}
+
+// GET /api/dashboard/widgets?dashboard_id= — list one dashboard's widgets.
+router.get("/widgets", requireAuth, async (req, res, next) => {
+  try {
+    const dashboard = await resolveDashboard(req, req.query.dashboard_id);
+    return res.json({ dashboard_id: dashboard.id, widgets: await listWidgets(dashboard.id) });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ message: err.message });
+    return next(err);
+  }
+});
+
+// POST /api/dashboard/widgets — pin a widget (from the AI Assistant). Optional
+// dashboard_id in the body chooses which dashboard to pin to.
 router.post("/widgets", requireAuth, async (req, res, next) => {
   try {
-    const { widget_type, title, config, position_x, position_y, width, height, ai_message_id } =
-      req.body || {};
+    const {
+      widget_type,
+      title,
+      config,
+      position_x,
+      position_y,
+      width,
+      height,
+      ai_message_id,
+      dashboard_id,
+    } = req.body || {};
     if (widget_type !== "ai_chart") {
       return res.status(400).json({ message: 'widget_type must be "ai_chart"' });
     }
     if (!config || typeof config !== "object") {
       return res.status(400).json({ message: "config (object) is required" });
     }
-    const dashboard = await getOrCreateDefaultDashboard(req.user.id, req.user.organization_id);
+    const dashboard = await resolveDashboard(req, dashboard_id);
 
-    // Idempotent pin: if this chart (same AI message) is already on the
+    // Idempotent pin: if this chart (same AI message) is already on the SAME
     // dashboard, return the existing widget instead of adding a duplicate.
     if (ai_message_id) {
       const existing = await findWidgetByMessage(dashboard.id, ai_message_id);
@@ -204,33 +294,44 @@ router.post("/widgets", requireAuth, async (req, res, next) => {
     });
     return res.status(201).json(widget);
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ message: err.message });
     return next(err);
   }
 });
 
-// PATCH /api/dashboard/widgets/:id — update a widget (title/config/position).
+// PATCH /api/dashboard/widgets/:id — update a widget (title/config/position, or
+// move it to another dashboard via dashboard_id). Authorized by owner.
 router.patch("/widgets/:id", requireAuth, async (req, res, next) => {
   try {
-    const dashboard = await getOrCreateDefaultDashboard(req.user.id, req.user.organization_id);
+    const widget = await getWidgetForUser(req.user.id, req.params.id);
+    if (!widget) return res.status(404).json({ message: "Widget not found" });
+
     const allowed = {};
     for (const k of ["title", "config", "position_x", "position_y", "width", "height"]) {
       if (k in (req.body || {})) allowed[k] = req.body[k];
     }
+    // Move to another of the user's dashboards.
+    if (req.body?.dashboard_id && req.body.dashboard_id !== widget.personal_dashboard_id) {
+      const target = await getDashboardForUser(req.user.id, req.body.dashboard_id);
+      if (!target) return res.status(404).json({ message: "Target dashboard not found" });
+      allowed.personal_dashboard_id = target.id;
+    }
     if (Object.keys(allowed).length === 0) {
       return res.status(400).json({ message: "no updatable fields provided" });
     }
-    const widget = await updateWidget(dashboard.id, req.params.id, allowed);
-    return res.json(widget);
+    const updated = await updateWidget(widget.personal_dashboard_id, req.params.id, allowed);
+    return res.json(updated);
   } catch (err) {
     return next(err);
   }
 });
 
-// DELETE /api/dashboard/widgets/:id — remove a widget.
+// DELETE /api/dashboard/widgets/:id — remove a widget (any of the user's dashboards).
 router.delete("/widgets/:id", requireAuth, async (req, res, next) => {
   try {
-    const dashboard = await getOrCreateDefaultDashboard(req.user.id, req.user.organization_id);
-    await deleteWidget(dashboard.id, req.params.id);
+    const widget = await getWidgetForUser(req.user.id, req.params.id);
+    if (!widget) return res.status(404).json({ message: "Widget not found" });
+    await deleteWidget(widget.personal_dashboard_id, req.params.id);
     return res.json({ deleted: true });
   } catch (err) {
     return next(err);

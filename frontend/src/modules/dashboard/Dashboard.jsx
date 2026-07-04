@@ -16,32 +16,146 @@ function authHeaders() {
 // appears when the user explicitly pins a chart. When a document is re-uploaded
 // with new data, charts built from it are flagged stale (config.stale) and the
 // user can refresh them on demand.
+//
+// A user can keep several dashboards to organise their pins. The one they last
+// had open is remembered in localStorage so pinning from the AI Assistant lands
+// on the same board.
+const ACTIVE_KEY = "activeDashboardId";
+
 function Dashboard() {
+  const [dashboards, setDashboards] = useState([]);
+  const [activeId, setActiveId] = useState(null);
   const [widgets, setWidgets] = useState([]);
   const [documents, setDocuments] = useState([]);
   const [org, setOrg] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshingId, setRefreshingId] = useState(null);
   const [sourcesOpen, setSourcesOpen] = useState(false);
+  const [creating, setCreating] = useState(false); // inline "new dashboard" input
+  const [renaming, setRenaming] = useState(false); // inline rename of active board
+  const [draftName, setDraftName] = useState("");
 
   useEffect(() => {
-    refresh();
+    loadDashboards();
+    refreshDocuments();
     organizationService.get().then(setOrg).catch(() => {});
   }, []);
 
-  async function refresh() {
+  // Fetch this dashboard's widgets whenever the active board changes, and
+  // remember the choice so the AI Assistant pins to the same board.
+  useEffect(() => {
+    if (!activeId) return;
+    localStorage.setItem(ACTIVE_KEY, activeId);
+    refreshWidgets(activeId);
+  }, [activeId]);
+
+  const active = dashboards.find((d) => d.id === activeId) || null;
+
+  async function loadDashboards() {
+    try {
+      const res = await fetch(`${API_BASE}/api/dashboard/dashboards`, { headers: authHeaders() });
+      if (!res.ok) return;
+      const list = (await res.json()).dashboards || [];
+      setDashboards(list);
+      const stored = localStorage.getItem(ACTIVE_KEY);
+      const pick =
+        list.find((d) => d.id === stored) || list.find((d) => d.is_default) || list[0];
+      setActiveId(pick ? pick.id : null);
+    } catch {
+      // leave empty state
+    }
+  }
+
+  async function refreshWidgets(id) {
     setLoading(true);
     try {
-      const [wRes, dRes] = await Promise.all([
-        fetch(`${API_BASE}/api/dashboard/widgets`, { headers: authHeaders() }),
-        fetch(`${API_BASE}/api/dashboard/documents`, { headers: authHeaders() }),
-      ]);
-      if (wRes.ok) setWidgets((await wRes.json()).widgets || []);
-      if (dRes.ok) setDocuments((await dRes.json()).documents || []);
+      const res = await fetch(`${API_BASE}/api/dashboard/widgets?dashboard_id=${id}`, {
+        headers: authHeaders(),
+      });
+      if (res.ok) setWidgets((await res.json()).widgets || []);
     } catch {
-      // leave empty states
+      // leave empty state
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function refreshDocuments() {
+    try {
+      const res = await fetch(`${API_BASE}/api/dashboard/documents`, { headers: authHeaders() });
+      if (res.ok) setDocuments((await res.json()).documents || []);
+    } catch {
+      // leave empty state
+    }
+  }
+
+  function refresh() {
+    if (activeId) refreshWidgets(activeId);
+    refreshDocuments();
+  }
+
+  async function createDashboard(name) {
+    const clean = (name || "").trim();
+    if (!clean) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/dashboard/dashboards`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ name: clean }),
+      });
+      if (!res.ok) throw new Error();
+      const created = await res.json();
+      setDashboards((prev) => [...prev, created]);
+      setActiveId(created.id); // jump to the new board
+      setCreating(false);
+      setDraftName("");
+    } catch {
+      window.alert("Could not create the dashboard.");
+    }
+  }
+
+  async function renameDashboard(d, name) {
+    const clean = (name || "").trim();
+    if (!clean || clean === d.name) {
+      setRenaming(false);
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/dashboard/dashboards/${d.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ name: clean }),
+      });
+      if (!res.ok) throw new Error();
+      const updated = await res.json();
+      setDashboards((prev) => prev.map((x) => (x.id === d.id ? updated : x)));
+      setRenaming(false);
+    } catch {
+      window.alert("Could not rename the dashboard.");
+    }
+  }
+
+  async function deleteDashboard(d) {
+    if (d.is_default) return;
+    if (
+      !window.confirm(`Delete "${d.name}"? Every chart pinned to it will be removed.`)
+    ) {
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/dashboard/dashboards/${d.id}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
+      if (!res.ok) throw new Error();
+      const remaining = dashboards.filter((x) => x.id !== d.id);
+      setDashboards(remaining);
+      if (activeId === d.id) {
+        const fallback = remaining.find((x) => x.is_default) || remaining[0];
+        setActiveId(fallback ? fallback.id : null);
+      }
+    } catch {
+      window.alert("Could not delete the dashboard.");
     }
   }
 
@@ -152,6 +266,88 @@ function Dashboard() {
             </button>
           </div>
         </div>
+
+        {/* Dashboard tabs — switch between the user's personal dashboards */}
+        <div className="dashboard-tabs">
+          {dashboards.map((d) => (
+            <button
+              key={d.id}
+              className={`dash-tab ${d.id === activeId ? "active" : ""}`}
+              onClick={() => setActiveId(d.id)}
+            >
+              <span className="dash-tab-name">{d.name}</span>
+              {d.is_default && <span className="dash-tab-badge">default</span>}
+            </button>
+          ))}
+
+          {creating ? (
+            <input
+              className="dash-tab-input"
+              autoFocus
+              placeholder="Dashboard name…"
+              value={draftName}
+              onChange={(e) => setDraftName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") createDashboard(draftName);
+                if (e.key === "Escape") {
+                  setCreating(false);
+                  setDraftName("");
+                }
+              }}
+              onBlur={() => {
+                setCreating(false);
+                setDraftName("");
+              }}
+            />
+          ) : (
+            <button
+              className="dash-tab new"
+              onClick={() => {
+                setDraftName("");
+                setCreating(true);
+              }}
+              title="New dashboard"
+            >
+              + New
+            </button>
+          )}
+        </div>
+
+        {active && (
+          <div className="dashboard-board-actions">
+            {renaming ? (
+              <input
+                className="dash-rename-input"
+                autoFocus
+                value={draftName}
+                onChange={(e) => setDraftName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") renameDashboard(active, draftName);
+                  if (e.key === "Escape") setRenaming(false);
+                }}
+                onBlur={() => renameDashboard(active, draftName)}
+              />
+            ) : (
+              <button
+                className="ghost-btn small"
+                onClick={() => {
+                  setDraftName(active.name);
+                  setRenaming(true);
+                }}
+              >
+                ✎ Rename
+              </button>
+            )}
+            {!active.is_default && !renaming && (
+              <button
+                className="ghost-btn small danger"
+                onClick={() => deleteDashboard(active)}
+              >
+                🗑 Delete
+              </button>
+            )}
+          </div>
+        )}
 
         {loading && <div className="dashboard-empty">Loading dashboard…</div>}
 
