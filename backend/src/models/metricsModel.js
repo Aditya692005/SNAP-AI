@@ -21,6 +21,7 @@ async function replaceDocumentMetrics(userId, source, metrics) {
       source_document: source,
       metric: m.metric,
       department: m.department ?? null,
+      kind: m.kind ?? null,
       period: m.period ?? null,
       value: m.value,
       currency: m.currency ?? null,
@@ -74,33 +75,24 @@ async function getIncludedMetrics(userId) {
 
   const { data, error } = await supabase
     .from("document_metrics")
-    .select("source_document, metric, department, period, value, currency, category, confidence")
+    .select("source_document, metric, department, kind, period, value, currency, category, confidence")
     .eq("user_id", userId);
   if (error) throw error;
 
   return (data || []).filter((m) => !excluded.has(m.source_document));
 }
 
-// ── Metric display preferences (which metrics show on the dashboard) ──────────
-// Visibility is independent of extraction: hidden metrics are still extracted
-// and kept up to date from uploads, just not rendered until the user enables them.
-async function listMetricPrefs(userId) {
+// The status row for one (user, document), or null if the document is new to
+// this user. Used to detect a re-upload of a same-named file.
+async function getStatus(userId, source) {
   const { data, error } = await supabase
-    .from("metric_prefs")
-    .select("metric, visible")
-    .eq("user_id", userId);
+    .from("document_status")
+    .select("source_document, included, status, updated_at")
+    .eq("user_id", userId)
+    .eq("source_document", source)
+    .maybeSingle();
   if (error) throw error;
-  return data || [];
-}
-
-async function setMetricVisible(userId, metric, visible) {
-  const { error } = await supabase
-    .from("metric_prefs")
-    .upsert(
-      { user_id: userId, metric, visible, updated_at: new Date().toISOString() },
-      { onConflict: "user_id,metric" }
-    );
-  if (error) throw error;
+  return data || null;
 }
 
 async function deleteDocument(userId, source) {
@@ -108,39 +100,10 @@ async function deleteDocument(userId, source) {
   await supabase.from("document_status").delete().eq("user_id", userId).eq("source_document", source);
 }
 
-// ── Pinned charts (AI-generated charts the user displays on the dashboard) ────
-async function listCharts(userId) {
-  const { data, error } = await supabase
-    .from("dashboard_charts")
-    .select("id, title, spec, created_at")
-    .eq("user_id", userId)
-    .order("created_at", { ascending: false });
-  if (error) throw error;
-  return data || [];
-}
-
-async function addChart(userId, title, spec) {
-  const { data, error } = await supabase
-    .from("dashboard_charts")
-    .insert({ user_id: userId, title: title ?? null, spec })
-    .select("id, title, spec, created_at")
-    .single();
-  if (error) throw error;
-  return data;
-}
-
-async function deleteChart(userId, id) {
-  const { error } = await supabase
-    .from("dashboard_charts")
-    .delete()
-    .eq("user_id", userId)
-    .eq("id", id);
-  if (error) throw error;
-}
-
-// Wipe every stored metric/status AND pinned chart for a user so the dashboard
-// fully resets to "no data yet". Display preferences (metric_prefs) are
-// intentionally kept (they're just visibility toggles, not data).
+// Wipe every stored metric/status for a user so the dashboard fully resets to
+// "no data yet". Dashboard widgets (the pinned charts a user chose to display)
+// are a separate concern - see dashboardModel.js - and are left alone here
+// since they aren't extracted data.
 async function clearAllForUser(userId) {
   const { error: mErr } = await supabase
     .from("document_metrics")
@@ -152,11 +115,6 @@ async function clearAllForUser(userId) {
     .delete()
     .eq("user_id", userId);
   if (sErr) throw sErr;
-  const { error: cErr } = await supabase
-    .from("dashboard_charts")
-    .delete()
-    .eq("user_id", userId);
-  if (cErr) throw cErr;
 }
 
 module.exports = {
@@ -164,12 +122,8 @@ module.exports = {
   upsertStatus,
   setIncluded,
   listStatuses,
+  getStatus,
   getIncludedMetrics,
-  listMetricPrefs,
-  setMetricVisible,
-  listCharts,
-  addChart,
-  deleteChart,
   deleteDocument,
   clearAllForUser,
 };

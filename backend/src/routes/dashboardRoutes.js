@@ -12,26 +12,24 @@ const {
   getIncludedMetrics,
   listStatuses,
   setIncluded,
-  listMetricPrefs,
-  setMetricVisible,
-  listCharts,
-  addChart,
-  deleteChart,
   deleteDocument,
 } = require("../models/metricsModel");
+const {
+  getOrCreateDefaultDashboard,
+  listWidgets,
+  addWidget,
+  updateWidget,
+  deleteWidget,
+} = require("../models/dashboardModel");
 const {
   findByFileName: findDocByName,
   deleteDocument: deleteDocumentRow,
   listUploadedFileNames,
 } = require("../models/documentModel");
-const { extractAndStore } = require("../services/metricsService");
+const { refreshWidget } = require("../services/widgetRefreshService");
 
 const router = express.Router();
 const RAG_URL = process.env.RAG_SERVICE_URL || "http://localhost:8000";
-
-// Metrics shown by default before a user customizes their dashboard. Every other
-// catalogued metric is still extracted/stored — just hidden until enabled.
-const DEFAULT_VISIBLE = new Set(["revenue", "sales", "profit", "expenditure"]);
 
 // Turn a period label ("2024", "2024-03", "2024-Q2") into a sortable number.
 function periodKey(period) {
@@ -99,26 +97,14 @@ function buildKpi(metrics, metric, currency) {
     : null;
 }
 
-// Resolve a per-metric visibility map from stored prefs, falling back to the
-// app defaults for metrics the user hasn't explicitly set.
-function visibilityMap(prefs) {
-  const map = {};
-  for (const p of prefs) map[p.metric] = p.visible;
-  return (metric) => (metric in map ? map[metric] : DEFAULT_VISIBLE.has(metric));
-}
-
 // ── GET /api/dashboard/metrics ────────────────────────────────────────────────
 // Returns computed KPIs / series / breakdowns for EVERY metric present in the
-// user's included documents, each tagged with its department and a `visible`
-// flag. Hidden metrics are still returned (already extracted) so the client can
-// reveal them instantly when toggled on — display is purely a client concern.
+// user's included documents, each tagged with its department and value kind.
+// Which of these actually renders is decided by the widgets on the dashboard;
+// this endpoint just supplies the live numbers.
 router.get("/metrics", requireAuth, async (req, res, next) => {
   try {
-    const [metrics, prefs] = await Promise.all([
-      getIncludedMetrics(req.user.id),
-      listMetricPrefs(req.user.id),
-    ]);
-    const isVisible = visibilityMap(prefs);
+    const metrics = await getIncludedMetrics(req.user.id);
 
     // Most common currency wins for display.
     const currencyCounts = {};
@@ -128,18 +114,20 @@ router.get("/metrics", requireAuth, async (req, res, next) => {
     const currency =
       Object.entries(currencyCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
 
-    // Distinct metric keys actually present, plus the department each maps to.
+    // Distinct metric keys actually present, plus the department/kind each maps to.
     const present = [...new Set(metrics.map((r) => r.metric))];
     const departments = {};
+    const kinds = {};
     for (const r of metrics) {
       if (r.department && !departments[r.metric]) departments[r.metric] = r.department;
+      if (r.kind && !kinds[r.metric]) kinds[r.metric] = r.kind;
     }
 
     const kpis = present
       .map((m) => {
         const kpi = buildKpi(metrics, m, currency);
         if (!kpi) return null;
-        return { ...kpi, department: departments[m] || null, visible: isVisible(m) };
+        return { ...kpi, department: departments[m] || null, kind: kinds[m] || null };
       })
       .filter(Boolean);
 
@@ -159,7 +147,7 @@ router.get("/metrics", requireAuth, async (req, res, next) => {
       series,
       breakdowns,
       departments,
-      visibility: present.reduce((acc, m) => ((acc[m] = isVisible(m)), acc), {}),
+      kinds,
       sources,
       currency,
       has_data: metrics.length > 0,
@@ -169,63 +157,85 @@ router.get("/metrics", requireAuth, async (req, res, next) => {
   }
 });
 
-// ── GET /api/dashboard/metric-prefs ───────────────────────────────────────────
-// The user's explicit per-metric display preferences (sparse: missing metrics
-// fall back to the app default on the client).
-router.get("/metric-prefs", requireAuth, async (req, res, next) => {
+// ── Widgets ───────────────────────────────────────────────────────────────────
+// A widget is a pinned AI chart (widget_type "ai_chart", config {spec}). All
+// routes operate on the caller's default personal dashboard, created on demand.
+
+// GET /api/dashboard/widgets — list the user's widgets.
+router.get("/widgets", requireAuth, async (req, res, next) => {
   try {
-    const prefs = await listMetricPrefs(req.user.id);
-    const map = {};
-    for (const p of prefs) map[p.metric] = p.visible;
-    return res.json({ prefs: map });
+    const dashboard = await getOrCreateDefaultDashboard(req.user.id, req.user.organization_id);
+    return res.json({ widgets: await listWidgets(dashboard.id) });
   } catch (err) {
     return next(err);
   }
 });
 
-// ── PATCH /api/dashboard/metric-prefs/:metric ─────────────────────────────────
-// Show/hide one metric on the dashboard. Does not affect extraction.
-router.patch("/metric-prefs/:metric", requireAuth, async (req, res, next) => {
+// POST /api/dashboard/widgets — pin a widget (from the AI Assistant).
+router.post("/widgets", requireAuth, async (req, res, next) => {
   try {
-    const { visible } = req.body;
-    if (typeof visible !== "boolean") {
-      return res.status(400).json({ message: "visible (boolean) is required" });
+    const { widget_type, title, config, position_x, position_y, width, height, ai_message_id } =
+      req.body || {};
+    if (widget_type !== "ai_chart") {
+      return res.status(400).json({ message: 'widget_type must be "ai_chart"' });
     }
-    await setMetricVisible(req.user.id, req.params.metric, visible);
-    return res.json({ metric: req.params.metric, visible });
-  } catch (err) {
-    return next(err);
-  }
-});
-
-// ── Pinned charts ─────────────────────────────────────────────────────────────
-// Charts/tables the user generated in the AI Assistant and chose to display.
-router.get("/charts", requireAuth, async (req, res, next) => {
-  try {
-    return res.json({ charts: await listCharts(req.user.id) });
-  } catch (err) {
-    return next(err);
-  }
-});
-
-router.post("/charts", requireAuth, async (req, res, next) => {
-  try {
-    const { spec } = req.body;
-    if (!spec || typeof spec !== "object") {
-      return res.status(400).json({ message: "spec (object) is required" });
+    if (!config || typeof config !== "object") {
+      return res.status(400).json({ message: "config (object) is required" });
     }
-    const chart = await addChart(req.user.id, spec.title || null, spec);
-    return res.status(201).json(chart);
+    const dashboard = await getOrCreateDefaultDashboard(req.user.id, req.user.organization_id);
+    const widget = await addWidget(dashboard.id, {
+      widget_type,
+      title: title ?? null,
+      config,
+      position_x,
+      position_y,
+      width,
+      height,
+      ai_message_id: ai_message_id ?? null,
+    });
+    return res.status(201).json(widget);
   } catch (err) {
     return next(err);
   }
 });
 
-router.delete("/charts/:id", requireAuth, async (req, res, next) => {
+// PATCH /api/dashboard/widgets/:id — update a widget (title/config/position).
+router.patch("/widgets/:id", requireAuth, async (req, res, next) => {
   try {
-    await deleteChart(req.user.id, req.params.id);
+    const dashboard = await getOrCreateDefaultDashboard(req.user.id, req.user.organization_id);
+    const allowed = {};
+    for (const k of ["title", "config", "position_x", "position_y", "width", "height"]) {
+      if (k in (req.body || {})) allowed[k] = req.body[k];
+    }
+    if (Object.keys(allowed).length === 0) {
+      return res.status(400).json({ message: "no updatable fields provided" });
+    }
+    const widget = await updateWidget(dashboard.id, req.params.id, allowed);
+    return res.json(widget);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// DELETE /api/dashboard/widgets/:id — remove a widget.
+router.delete("/widgets/:id", requireAuth, async (req, res, next) => {
+  try {
+    const dashboard = await getOrCreateDefaultDashboard(req.user.id, req.user.organization_id);
+    await deleteWidget(dashboard.id, req.params.id);
     return res.json({ deleted: true });
   } catch (err) {
+    return next(err);
+  }
+});
+
+// POST /api/dashboard/widgets/:id/refresh — regenerate a stale chart against the
+// latest data (reruns the LLM via /visualize). Manual, so cost is user-triggered.
+router.post("/widgets/:id/refresh", requireAuth, async (req, res, next) => {
+  try {
+    const widget = await refreshWidget(req.user.id, req.user.organization_id, req.params.id);
+    return res.json(widget);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ message: err.message });
     return next(err);
   }
 });
@@ -297,32 +307,6 @@ router.delete("/documents/:source", requireAuth, async (req, res, next) => {
       /* RAG unavailable — dashboard data already removed */
     }
     return res.json({ deleted: true });
-  } catch (err) {
-    return next(err);
-  }
-});
-
-// ── POST /api/dashboard/recompute ─────────────────────────────────────────────
-// Re-extract metrics for one document (body { source }) or every indexed
-// document. Runs synchronously so the client can refresh when it returns.
-router.post("/recompute", requireAuth, async (req, res, next) => {
-  try {
-    let sources = [];
-    if (req.body && req.body.source) {
-      sources = [req.body.source];
-    } else {
-      sources = await listUploadedFileNames(req.user.id, req.user.organization_id);
-    }
-
-    let processed = 0;
-    let metricsFound = 0;
-    for (const source of sources) {
-      const result = await extractAndStore(req.user.id, source);
-      processed += 1;
-      metricsFound += result.count;
-    }
-
-    return res.json({ processed, metrics_found: metricsFound });
   } catch (err) {
     return next(err);
   }

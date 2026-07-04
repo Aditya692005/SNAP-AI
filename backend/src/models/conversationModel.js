@@ -78,6 +78,25 @@ async function listMessages(conversationId) {
   return data || [];
 }
 
+// One message by id (with its conversation + metadata), or null. Used by the
+// widget refresh to recover the chart spec's source and originating request.
+async function findMessageById(id) {
+  let { data, error } = await supabase
+    .from("ai_messages")
+    .select("id, conversation_id, sender_type, content, metadata, created_at")
+    .eq("id", id)
+    .maybeSingle();
+  if (error && error.code === MISSING_COLUMN) {
+    ({ data, error } = await supabase
+      .from("ai_messages")
+      .select("id, conversation_id, sender_type, content, created_at")
+      .eq("id", id)
+      .maybeSingle());
+  }
+  if (error) throw error;
+  return data || null;
+}
+
 async function addMessage(conversationId, senderType, content, metadata = null) {
   const row = {
     conversation_id: conversationId,
@@ -117,6 +136,7 @@ module.exports = {
   findConversation,
   deleteConversation,
   listMessages,
+  findMessageById,
   addMessage,
   recordRetrievedChunks,
 };

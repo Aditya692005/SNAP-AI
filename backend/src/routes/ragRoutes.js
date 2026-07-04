@@ -9,8 +9,8 @@ const FormData = require("form-data");
 const fetch = require("node-fetch");
 
 const requireAuth = require("../middleware/requireAuth");
-const { extractAndStore } = require("../services/metricsService");
-const { upsertStatus, clearAllForUser } = require("../models/metricsModel");
+const { markWidgetsStaleForSource } = require("../services/widgetRefreshService");
+const { upsertStatus, getStatus, clearAllForUser } = require("../models/metricsModel");
 const {
   createDocument,
   setDocumentStatus,
@@ -111,6 +111,7 @@ router.post("/chat", requireAuth, async (req, res, next) => {
     const data = await response.json();
 
     // Persist the turn. Best-effort: a storage hiccup must not eat the answer.
+    let aiMessageId = null;
     try {
       await addMessage(convo.id, "USER", message);
       const metadata = {};
@@ -123,6 +124,7 @@ router.post("/chat", requireAuth, async (req, res, next) => {
         data.answer,
         Object.keys(metadata).length ? metadata : null
       );
+      aiMessageId = aiMsg.id;
       if (data.retrieved?.length) {
         await recordRetrievedChunks(aiMsg.id, data.retrieved).catch(() => {});
       }
@@ -134,6 +136,7 @@ router.post("/chat", requireAuth, async (req, res, next) => {
       ...data,
       conversation_id: convo.id,
       conversation_title: convo.title,
+      message_id: aiMessageId, // lets the client pin this chart as a widget
     });
   } catch (err) {
     return next(err);
@@ -208,13 +211,17 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
       grantedByUserId: req.user.id,
     }).catch(() => {});
 
-    // 4) Dashboard-metrics extraction still runs off the on-disk file (saved by
-    //    the RAG /index), in the background so the response isn't blocked.
-    upsertStatus(req.user.id, filename, { status: "pending", included: true })
-      .catch(() => {})
-      .finally(() => {
-        extractAndStore(req.user.id, filename).catch(() => {});
-      });
+    // 4) Record the document's dashboard status. Metric extraction is NOT run on
+    //    upload — the dashboard shows only pinned AI charts, so there's no metrics
+    //    view to feed and we don't want to spend an LLM call per upload. If a file
+    //    of the same name was uploaded before, this is an UPDATE: flag any pinned
+    //    charts built from it as stale so the user can refresh them (their Refresh
+    //    button reruns /visualize against the now-updated on-disk file).
+    const isReupload = !!(await getStatus(req.user.id, filename).catch(() => null));
+    upsertStatus(req.user.id, filename, { status: "ready", included: true }).catch(() => {});
+    if (isReupload) {
+      markWidgetsStaleForSource(req.user.id, orgId, filename).catch(() => {});
+    }
 
     return res.json({ document_id: doc.id, filename, ...data });
   } catch (err) {

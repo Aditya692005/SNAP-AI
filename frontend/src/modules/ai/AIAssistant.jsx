@@ -94,6 +94,7 @@ function AIAssistant() {
           m.sender_type === "USER"
             ? { role: "user", text: m.content }
             : {
+                id: m.id,
                 role: "assistant",
                 text: m.content,
                 sources: m.metadata?.sources || [],
@@ -215,6 +216,7 @@ function AIAssistant() {
       setMessages((prev) => [
         ...prev,
         {
+          id: data.message_id, // DB ai_messages.id — lets a pinned chart link back
           role: "assistant",
           text: data.answer,
           sources: data.sources || [],
@@ -349,12 +351,19 @@ function AIAssistant() {
   }
 
   // ── pin a generated chart/table to the dashboard ─────────────────────────────
-  async function pinChart(spec) {
+  // aiMessageId links the pinned widget back to the message that produced it, so
+  // the dashboard can regenerate the chart against fresh data on re-upload.
+  async function pinChart(spec, aiMessageId) {
     try {
-      const res = await fetch(`${API_BASE}/api/dashboard/charts`, {
+      const res = await fetch(`${API_BASE}/api/dashboard/widgets`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({ spec }),
+        body: JSON.stringify({
+          widget_type: "ai_chart",
+          title: spec.title || null,
+          config: { spec },
+          ai_message_id: aiMessageId || null,
+        }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -364,7 +373,7 @@ function AIAssistant() {
         ...prev,
         {
           role: "assistant",
-          text: "📌 Added that chart to your dashboard — open the **Dashboard** to see it under *Pinned charts*.",
+          text: "📌 Added that chart to your dashboard — open the **Dashboard** to see it.",
         },
       ]);
     } catch (err) {
@@ -564,7 +573,7 @@ function AIAssistant() {
               ) : (
                 <div className="bubble-text">{msg.text}</div>
               )}
-              {msg.chart && <ChartBlock spec={msg.chart} onPin={pinChart} />}
+              {msg.chart && <ChartBlock spec={msg.chart} onPin={() => pinChart(msg.chart, msg.id)} />}
               {msg.document && (
                 <div className="doc-card">
                   <div className="doc-card-info">

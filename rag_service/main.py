@@ -40,7 +40,7 @@ if not GOOGLE_API_KEY:
 
 # Model is configurable so you can switch to one with available quota without
 # code changes (each Gemini model has its own free-tier daily request limit).
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.0-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 UPLOAD_DIR = Path("./uploads")
@@ -430,68 +430,39 @@ async def run_visualization_supabase(instruction: str, organization_id, document
 
 
 # ── Dashboard metric extraction ──────────────────────────────────────────────
-# Department-specific metric catalog the dashboard understands. Maps each
-# canonical metric key to the department it belongs to. The prompt maps synonyms
-# onto these keys. Extraction runs for ALL of these regardless of what the user
-# has chosen to display on their dashboard.
-METRIC_CATALOG = {
-    # Finance
-    "revenue": "finance",
-    "profit": "finance",
-    "expenditure": "finance",
-    "cash_flow": "finance",
-    # Sales
-    "sales": "sales",
-    "units_sold": "sales",
-    "new_customers": "sales",
-    "average_deal_size": "sales",
-    # Marketing
-    "marketing_spend": "marketing",
-    "leads": "marketing",
-    "conversion_rate": "marketing",
-    "website_traffic": "marketing",
-    # Human Resources
-    "headcount": "hr",
-    "attrition_rate": "hr",
-    "new_hires": "hr",
-    "training_cost": "hr",
-    # Operations
-    "production_output": "operations",
-    "defect_rate": "operations",
-    "inventory": "operations",
-    "on_time_delivery": "operations",
-}
-CANONICAL_METRICS = tuple(METRIC_CATALOG.keys())
+# Open-ended: the LLM proposes its own metric key/department/kind from whatever
+# the document actually contains, rather than picking from a fixed catalog. This
+# lets any team's metrics (deployment_frequency, churn, NPS, ...) surface without
+# a code change. The department is a cosmetic grouping tag, never a filter.
+_METRIC_SLUG_RE = re.compile(r"[^a-z0-9]+")
 
-# Human-readable enumeration of allowed keys grouped by department, fed to the
-# model so it knows exactly which metric keys it may emit.
-_CATALOG_BY_DEPT: dict[str, list[str]] = {}
-for _k, _d in METRIC_CATALOG.items():
-    _CATALOG_BY_DEPT.setdefault(_d, []).append(_k)
-ALLOWED_METRICS_TEXT = "\n".join(
-    f"- {dept}: {', '.join(keys)}" for dept, keys in _CATALOG_BY_DEPT.items()
-)
+
+def slugify_metric(name: str) -> str:
+    """Turn the free-text key the LLM proposed into a stable snake_case key
+    (e.g. "Total Revenue!" -> "total_revenue")."""
+    return _METRIC_SLUG_RE.sub("_", name.strip().lower()).strip("_")
+
+
+# The value kinds the dashboard knows how to format. Anything else falls back to
+# a plain number.
+_ALLOWED_KINDS = {"currency", "percent", "count", "number"}
 
 METRICS_PROMPT = ChatPromptTemplate.from_messages([
     ("system",
-     "You extract department-specific business metrics from a document for a "
+     "You extract quantitative business metrics from a document for a "
      "dashboard. Return STRICT JSON only: a JSON ARRAY of metric objects, "
      "nothing else.\n\n"
-     "Allowed metric keys, grouped by department:\n"
-     f"{ALLOWED_METRICS_TEXT}\n\n"
-     "Map common synonyms onto these keys, e.g.: expenses/costs->expenditure, "
-     "net income/earnings->profit, turnover/total revenue->revenue, "
-     "operating cash->cash_flow, units/quantity sold->units_sold, "
-     "new accounts->new_customers, ad spend/campaign budget->marketing_spend, "
-     "MQLs/prospects->leads, conv. rate/close rate->conversion_rate, "
-     "visits/sessions->website_traffic, employees/staff->headcount, "
-     "turnover rate/churn (staff)->attrition_rate, recruits->new_hires, "
-     "output/production volume->production_output, defects/scrap->defect_rate, "
-     "stock on hand->inventory, OTD/on-time %->on_time_delivery.\n\n"
+     "Name each metric yourself based on what the document contains - you are "
+     "NOT limited to a fixed list. Use a short, generic snake_case key for the "
+     "concept (e.g. revenue, marketing_spend, deployment_frequency, "
+     "net_promoter_score) and reuse the same key for the same concept across "
+     "data points so it aggregates cleanly.\n\n"
      "Each object:\n"
      "{{\n"
-     '  "metric": one of the allowed keys above,\n'
-     '  "department": the department that key belongs to,\n'
+     '  "metric": short snake_case key naming the concept,\n'
+     '  "department": best-guess domain grouping (finance, sales, marketing, '
+     "hr, operations, engineering, ... or a new one if none fit),\n"
+     '  "kind": one of "currency","percent","count","number",\n'
      '  "period": "YYYY" | "YYYY-MM" | "YYYY-Qn", or null if none stated,\n'
      '  "value": a plain number (no commas, currency symbols, %, or units),\n'
      '  "currency": ISO code like "USD" if known, else null,\n'
@@ -501,8 +472,9 @@ METRICS_PROMPT = ChatPromptTemplate.from_messages([
      "Rules:\n"
      "- Use ONLY numbers present in the document; never invent values.\n"
      "- Emit one object per (metric, period, category) data point you find.\n"
-     "- For rates/percentages emit the plain number (e.g. 12.5 for 12.5%).\n"
-     "- Ignore anything that does not map to an allowed key.\n"
+     "- For rates/percentages set kind=\"percent\" and emit the plain number "
+     "(e.g. 12.5 for 12.5%); for money set kind=\"currency\".\n"
+     "- Only extract genuine quantitative metrics; skip prose and identifiers.\n"
      "- If the document contains no such metrics, return [].\n"
      "- Output ONLY the JSON array."),
     ("human", "DOCUMENT:\n{dataset}"),
@@ -524,9 +496,13 @@ def parse_json_array(raw: str) -> list:
 
 
 def normalize_metric(raw: dict) -> dict | None:
-    """Validate/normalize one extracted metric; drop anything unusable."""
-    metric = str(raw.get("metric", "")).strip().lower()
-    if metric not in CANONICAL_METRICS:
+    """Validate/normalize one extracted metric; drop anything unusable.
+
+    Open-ended: the metric key/department/kind come from the LLM's own output
+    (slugified/defaulted here), not from a fixed catalog. Only a non-empty key
+    and a numeric value are required."""
+    metric = slugify_metric(str(raw.get("metric", "")))
+    if not metric:
         return None
     value_raw = raw.get("value")
     if value_raw is None:
@@ -538,13 +514,18 @@ def normalize_metric(raw: dict) -> dict | None:
     period = raw.get("period")
     category = raw.get("category")
     currency = raw.get("currency")
+    department = str(raw.get("department") or "general").strip().lower() or "general"
+    kind = str(raw.get("kind") or "number").strip().lower()
+    if kind not in _ALLOWED_KINDS:
+        kind = "number"
     try:
         confidence = float(raw.get("confidence", 0.5))
     except (TypeError, ValueError):
         confidence = 0.5
     return {
         "metric": metric,
-        "department": METRIC_CATALOG[metric],
+        "department": department,
+        "kind": kind,
         "period": str(period) if period not in (None, "") else None,
         "value": value,
         "currency": str(currency) if currency else None,
