@@ -8,6 +8,11 @@ import "./AIAssistant.css";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
 
+// The thread the user last had open, so navigating away and back (which unmounts
+// this component and clears its in-memory messages) reopens the same
+// conversation instead of dropping the user on a blank chat.
+const ACTIVE_CONVO_KEY = "activeConversationId";
+
 const GREETING = {
   role: "assistant",
   text: "Hi! I'm SNAP AI. Upload documents and ask me anything — including \"show me a bar chart of sales by region\" to generate charts, or \"generate a report summarizing this document\" to create a downloadable PDF.",
@@ -55,10 +60,13 @@ function AIAssistant() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }
 
-  // ── on mount: load docs + past conversations ─────────────────────────────────
+  // ── on mount: load docs + past conversations, and reopen the last thread ──────
   useEffect(() => {
     fetchDocs();
     fetchConversations();
+    // Restore the conversation the user last had open (survives navigation).
+    const saved = localStorage.getItem(ACTIVE_CONVO_KEY);
+    if (saved) loadConversation(saved, { silent: true });
   }, []);
 
   useEffect(() => {
@@ -94,7 +102,9 @@ function AIAssistant() {
   }
 
   // Load a past thread's messages (with their saved sources/charts/documents).
-  async function loadConversation(id) {
+  // `silent` is used by the on-mount restore so a since-deleted thread doesn't
+  // pop an error toast — it just clears the stale pointer and shows a fresh chat.
+  async function loadConversation(id, { silent = false } = {}) {
     try {
       const res = await fetch(`${API_BASE}/api/conversations/${id}`, {
         headers: authHeaders(),
@@ -120,9 +130,11 @@ function AIAssistant() {
         );
       setMessages([GREETING, ...mapped]);
       setConversationId(id);
+      localStorage.setItem(ACTIVE_CONVO_KEY, id);
       setShowHistory(false);
     } catch (err) {
-      notify(err.message, "error");
+      localStorage.removeItem(ACTIVE_CONVO_KEY); // drop a stale/deleted pointer
+      if (!silent) notify(err.message, "error");
     }
   }
 
@@ -149,6 +161,7 @@ function AIAssistant() {
     setConversationId(null);
     setMessages([GREETING]);
     setShowHistory(false);
+    localStorage.removeItem(ACTIVE_CONVO_KEY);
   }
 
   // ── remove ONE document everywhere (vector store + DB + Supabase + dashboard) ──
@@ -274,6 +287,10 @@ function AIAssistant() {
           },
           ...prev,
         ]);
+      }
+      // Remember the open thread so navigating away and back reopens it.
+      if (data.conversation_id) {
+        localStorage.setItem(ACTIVE_CONVO_KEY, data.conversation_id);
       }
       setMessages((prev) => [
         ...prev,

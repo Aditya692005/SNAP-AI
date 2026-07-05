@@ -40,7 +40,7 @@ if not GOOGLE_API_KEY:
 
 # Model is configurable so you can switch to one with available quota without
 # code changes (each Gemini model has its own free-tier daily request limit).
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 UPLOAD_DIR = Path("./uploads")

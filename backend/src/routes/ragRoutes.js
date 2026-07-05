@@ -94,6 +94,13 @@ router.post("/chat", requireAuth, async (req, res, next) => {
         content: m.content,
       }));
 
+    // Persist the user's question BEFORE the (slow) LLM call. If the client
+    // navigates away before the answer returns, the request still completes
+    // here, so the question is never lost from the thread — reopening the
+    // conversation shows it, and the answer once it's saved below. History was
+    // built above from prior messages, so this new one isn't double-counted.
+    await addMessage(convo.id, "USER", message).catch(() => {});
+
     const response = await fetch(`${RAG_URL}/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -114,10 +121,10 @@ router.post("/chat", requireAuth, async (req, res, next) => {
 
     const data = await response.json();
 
-    // Persist the turn. Best-effort: a storage hiccup must not eat the answer.
+    // Persist the AI answer (the question was already saved above). Best-effort:
+    // a storage hiccup must not eat the answer.
     let aiMessageId = null;
     try {
-      await addMessage(convo.id, "USER", message);
       const metadata = {};
       if (data.sources?.length) metadata.sources = data.sources;
       if (data.chart) metadata.chart = data.chart;
