@@ -994,15 +994,31 @@ class RetrievePreviewRequest(BaseModel):
     document_ids: list[str] | None = None  # docs the user may see
 
 
+# Retrieval-preview thresholds. Cosine similarities from all-MiniLM-L6-v2 are
+# not absolutely calibrated (score ranges shift with query wording/length), so
+# we filter RELATIVELY to each query's top hit rather than by a fixed cutoff:
+#   • REL_MARGIN — keep a doc only if its best chunk is within this of the top
+#     doc's best chunk. If the top doc leads the runner-up by more than this,
+#     the runner-up is dropped and the answer auto-scopes to the clear winner.
+#   • ABS_FLOOR — a low junk guard: drop docs whose best chunk is below this even
+#     if they'd survive the relative filter (guards against an all-weak match set).
+#   • MAX_PREVIEW_DOCS — never surface more than this many.
+# A query is "ambiguous" (→ show the picker) only when 2+ docs survive with
+# similar scores; otherwise the client answers directly without a picker step.
+PREVIEW_REL_MARGIN = 0.06
+PREVIEW_ABS_FLOOR = 0.30
+MAX_PREVIEW_DOCS = 4
+
+
 @app.post("/retrieve-preview")
 async def retrieve_preview(req: RetrievePreviewRequest):
     """The documents /chat WOULD draw on for this question: the same scoped
-    vector search, stopped before the LLM — so the client can show the user
-    which documents matched and let them trim the set before answering.
-    Meta/conversational questions return no documents (chat answers those
-    without retrieval)."""
+    vector search, stopped before the LLM. Returns the matched documents plus an
+    `ambiguous` flag telling the client whether a human still needs to
+    disambiguate (several close matches) or one document clearly wins (answer
+    straight away). Meta/conversational questions return no documents."""
     if not req.document_ids or is_meta_question(req.message):
-        return {"documents": []}
+        return {"documents": [], "ambiguous": False}
 
     hits = retrieve_chunks(req.message, req.organization_id, req.document_ids, k=10)
 
@@ -1014,15 +1030,29 @@ async def retrieve_preview(req: RetrievePreviewRequest):
         if did not in best or sim > best[did]:
             best[did] = sim
     if not best:
-        return {"documents": []}
+        return {"documents": [], "ambiguous": False}
 
-    names = {str(d["id"]): d.get("file_name") for d in store.documents_by_ids(list(best))}
+    ranked = sorted(best.items(), key=lambda kv: kv[1], reverse=True)
+    top_sim = ranked[0][1]
+    # Relative filter around the top hit, with an absolute junk floor, then cap.
+    kept = [
+        (did, sim)
+        for did, sim in ranked
+        if sim >= PREVIEW_ABS_FLOOR and sim >= top_sim - PREVIEW_REL_MARGIN
+    ][:MAX_PREVIEW_DOCS]
+    if not kept:
+        return {"documents": [], "ambiguous": False}
+
+    names = {str(d["id"]): d.get("file_name") for d in store.documents_by_ids([d for d, _ in kept])}
     documents = [
         {"id": did, "file_name": names.get(did) or "unknown", "similarity": round(sim, 4)}
-        for did, sim in sorted(best.items(), key=lambda kv: kv[1], reverse=True)
+        for did, sim in kept
         if did in names  # skip ids whose documents row has vanished
     ]
-    return {"documents": documents}
+    # Ambiguous only when 2+ close matches remain — embeddings can't tell near
+    # duplicates (e.g. "Q2 report" vs "Q3 report") apart, so the user decides.
+    ambiguous = len(documents) >= 2
+    return {"documents": documents, "ambiguous": ambiguous}
 
 
 class VisualizeRequest(BaseModel):

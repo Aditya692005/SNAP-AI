@@ -179,10 +179,11 @@ function AIAssistant() {
 
   // ── send chat message ──────────────────────────────────────────────────────
   // Two-phase send: first ask the backend which documents the question matches
-  // (a vector search, no LLM), show them as a picker so the user can trim the
-  // set, then answer from the confirmed documents only. Skipped when the user
-  // already picked docs in the drawer, when nothing matches (plain chat), or
-  // when the preview fails (best-effort — never blocks the answer).
+  // (a vector search, no LLM). The picker is shown ONLY when the match is
+  // ambiguous (several documents with similar scores) — when one document
+  // clearly wins the answer is scoped to it automatically, saving a click.
+  // Skipped entirely when the user already picked docs in the drawer, when
+  // nothing matches (plain chat), or when the preview fails (best-effort).
   async function sendMessage() {
     const text = input.trim();
     if (!text || loading) return;
@@ -197,22 +198,36 @@ function AIAssistant() {
 
     setLoading(true);
     let docs = [];
+    let ambiguous = false;
+    let previewOk = false;
     try {
       const res = await fetch(`${API_BASE}/api/rag/chat/preview`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify({ message: text }),
       });
-      if (res.ok) docs = (await res.json()).documents || [];
+      if (res.ok) {
+        const data = await res.json();
+        docs = data.documents || [];
+        ambiguous = !!data.ambiguous;
+        previewOk = true;
+      }
     } catch {
       /* preview unavailable — fall through and answer normally */
     }
     setLoading(false);
 
-    if (docs.length === 0) {
+    // Nothing matched, or preview failed → answer over everything the user can see.
+    if (!previewOk || docs.length === 0) {
       await askAI(text, undefined);
       return;
     }
+    // One clear winner (or a single match) → answer scoped to it, no picker.
+    if (!ambiguous) {
+      await askAI(text, docs.map((d) => d.id));
+      return;
+    }
+    // Several close matches → let the user disambiguate.
     setMessages((prev) => [
       ...prev,
       {
