@@ -49,3 +49,13 @@ alter table document_access add constraint chk_access_target check (
  or (access_type = 'USER'         and user_id       is not null and role_id       is null     and department_id is null)
  or (access_type = 'ORGANIZATION' and role_id       is null     and department_id is null     and user_id is null)
 );
+
+-- Cleanup: uploads used to self-grant the uploader USER access to their own
+-- document. Ownership (documents.uploaded_by_user_id) already covers that, and
+-- these rows made uploaders show up in their own "Shared with" list. The
+-- backend no longer creates them; remove the ones that exist.
+delete from document_access da
+using documents d
+where d.id = da.document_id
+  and da.access_type = 'USER'
+  and da.user_id = d.uploaded_by_user_id;

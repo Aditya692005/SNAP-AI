@@ -149,6 +149,9 @@ router.post("/:id/share", async (req, res, next) => {
       if (!target || target.organization_id !== orgId) {
         throw new AppError("User not found in your organization.", 400);
       }
+      if (user_id === doc.uploaded_by_user_id) {
+        throw new AppError("That user uploaded this document and already has access.", 400);
+      }
     } else if (access_type === "DEPARTMENT") {
       if (!hasPerm(req, "SHARE_DEPARTMENT_DOCUMENTS")) {
         throw new AppError("You do not have permission to share documents with a department.", 403);
@@ -222,7 +225,12 @@ router.get("/:id/access", async (req, res, next) => {
     if (!canManageDocument(req, doc)) {
       throw new AppError("You can only view sharing for documents you uploaded.", 403);
     }
-    return res.json({ access: await listDocumentAccess(doc.id) });
+    // Older uploads self-granted the uploader USER access; that's ownership,
+    // not a share, so keep it out of the "Shared with" list.
+    const access = (await listDocumentAccess(doc.id)).filter(
+      (a) => !(a.access_type === "USER" && a.user?.id === doc.uploaded_by_user_id)
+    );
+    return res.json({ access });
   } catch (err) {
     return next(err);
   }

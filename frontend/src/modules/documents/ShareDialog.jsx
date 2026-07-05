@@ -142,11 +142,14 @@ function ShareDialog({ doc, targets, onClose }) {
             {tier === "USER" && (
               <select value={targetId} onChange={(e) => setTargetId(e.target.value)}>
                 <option value="">Select a person…</option>
-                {(targets.users || []).map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.name} ({u.email})
-                  </option>
-                ))}
+                {(targets.users || [])
+                  // The uploader owns the doc — sharing it to them is a no-op.
+                  .filter((u) => u.id !== doc.uploaded_by_user_id)
+                  .map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.name} ({u.email})
+                    </option>
+                  ))}
               </select>
             )}
 
