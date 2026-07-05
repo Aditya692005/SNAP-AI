@@ -65,6 +65,13 @@
   color: #94a3b8;
 }
 
+.section-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
 .documents-list {
   display: flex;
 
@@ -176,10 +183,16 @@
   background: linear-gradient(135deg, #ec4899, #8b5cf6);
 }
 
-.upload-button:hover {
+.upload-button:hover:not(:disabled) {
   transform: translateY(-2px);
 
   box-shadow: 0 8px 20px rgba(236, 72, 153, 0.3);
+}
+
+.upload-button:disabled {
+  opacity: 0.6;
+
+  cursor: default;
 }
 
 .replace-btn {
@@ -208,6 +221,29 @@
 .share-button:hover {
   background: rgba(255, 255, 255, 0.12);
   transform: translateY(-2px);
+}
+
+/* ── Delete button on a document row ─────────────────────────────────────── */
+.delete-button {
+  min-width: 110px;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  border-radius: 10px;
+  padding: 10px 18px;
+  background: rgba(239, 68, 68, 0.12);
+  color: #f87171;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.delete-button:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.22);
+  transform: translateY(-2px);
+}
+
+.delete-button:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 /* ── Share dialog ─────────────────────────────────────────────────────────── */

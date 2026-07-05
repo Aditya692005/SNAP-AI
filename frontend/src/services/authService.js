@@ -327,6 +327,29 @@ export const documentService = {
       })
     );
   },
+  // Upload ONE file into the RAG pipeline (indexes it + creates the documents
+  // row). No Content-Type header — the browser sets the multipart boundary.
+  async upload(file) {
+    const form = new FormData();
+    form.append("file", file);
+    return handle(
+      await fetch(`${API_BASE_URL}/api/rag/upload`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
+        body: form,
+      })
+    );
+  },
+  // Remove a document everywhere (DB row, RAG vectors/file, dashboard metrics).
+  // Allowed for the uploader or an org_admin — the backend enforces it.
+  async remove(documentId) {
+    return handle(
+      await fetch(`${API_BASE_URL}/api/documents/${documentId}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      })
+    );
+  },
 };
 
 // Organization details (read for everyone; edit requires MANAGE_ORGANIZATION).
