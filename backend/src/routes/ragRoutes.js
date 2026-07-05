@@ -14,7 +14,6 @@ const { upsertStatus, getStatus, clearAllForUser } = require("../models/metricsM
 const {
   createDocument,
   setDocumentStatus,
-  grantAccess,
   accessibleDocumentIds,
   findByFileName,
   deleteAllForUser,
@@ -206,16 +205,11 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
     }
     const data = await response.json();
     await setDocumentStatus(doc.id, "PROCESSED");
+    // No document_access self-grant: the uploader can already see their own
+    // documents via uploaded_by_user_id, and a grant row would (wrongly) show
+    // them in the document's "Shared with" list.
 
-    // 3) Grant the uploader access to their own document.
-    await grantAccess({
-      documentId: doc.id,
-      accessType: "USER",
-      userId: req.user.id,
-      grantedByUserId: req.user.id,
-    }).catch(() => {});
-
-    // 4) Record the document's dashboard status. Metric extraction is NOT run on
+    // 3) Record the document's dashboard status. Metric extraction is NOT run on
     //    upload — the dashboard shows only pinned AI charts, so there's no metrics
     //    view to feed and we don't want to spend an LLM call per upload. If a file
     //    of the same name was uploaded before, this is an UPDATE: flag any pinned
@@ -260,12 +254,6 @@ router.post("/ingest", requireAuth, async (req, res, next) => {
     }
     const data = await response.json();
     await setDocumentStatus(doc.id, "PROCESSED");
-    await grantAccess({
-      documentId: doc.id,
-      accessType: "USER",
-      userId: req.user.id,
-      grantedByUserId: req.user.id,
-    }).catch(() => {});
 
     return res.json({ document_id: doc.id, ...data });
   } catch (err) {

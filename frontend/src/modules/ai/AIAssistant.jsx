@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import Sidebar from "../../components/Sidebar";
+import ToastStack from "../../components/Toast";
 import ChartBlock from "./ChartBlock";
 import "./AIAssistant.css";
 
@@ -35,9 +36,21 @@ function AIAssistant() {
   const [conversationId, setConversationId] = useState(null);
   const [conversations, setConversations] = useState([]);
   const [showHistory, setShowHistory] = useState(false);
+  // Transient popup notifications (auto-dismiss after a few seconds).
+  const [toasts, setToasts] = useState([]);
 
   const bottomRef = useRef(null);
   const fileRef = useRef(null);
+  const toastIdRef = useRef(0);
+
+  function notify(text, type = "success") {
+    const id = ++toastIdRef.current;
+    setToasts((prev) => [...prev, { id, text, type }]);
+  }
+
+  function dismissToast(id) {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }
 
   // ── on mount: load docs + past conversations ─────────────────────────────────
   useEffect(() => {
@@ -106,10 +119,7 @@ function AIAssistant() {
       setConversationId(id);
       setShowHistory(false);
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", text: `❌ ${err.message}`, error: true },
-      ]);
+      notify(err.message, "error");
     }
   }
 
@@ -126,11 +136,9 @@ function AIAssistant() {
       }
       setConversations((prev) => prev.filter((c) => c.id !== id));
       if (conversationId === id) newChat();
+      notify("Conversation deleted.");
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", text: `❌ ${err.message}`, error: true },
-      ]);
+      notify(err.message, "error");
     }
   }
 
@@ -160,18 +168,9 @@ function AIAssistant() {
       }
       setDocList((prev) => prev.filter((x) => x.id !== d.id));
       setSelectedDocIds((prev) => prev.filter((id) => id !== d.id));
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          text: `🗑️ Removed **${d.file_name}** from the AI, vector store, database, and dashboard metrics.`,
-        },
-      ]);
+      notify(`Removed "${d.file_name}" from the AI, database, and dashboard.`);
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", text: `❌ ${err.message}`, error: true },
-      ]);
+      notify(err.message, "error");
     }
   }
 
@@ -280,30 +279,25 @@ function AIAssistant() {
       setSelectedDocIds([succeeded[0].documentId]);
     }
 
-    const lines = [];
-    if (succeeded.length > 0) {
-      lines.push(
-        `✅ Indexed ${succeeded.length} document${succeeded.length > 1 ? "s" : ""}:`,
-        ...succeeded.map((s) => `- **${s.filename}** — ${s.chunks} chunks`)
+    if (succeeded.length === 1 && failed.length === 0) {
+      notify(
+        `Indexed "${succeeded[0].filename}" (${succeeded[0].chunks} chunks) — selected for this chat.`
+      );
+    } else if (succeeded.length > 0) {
+      notify(
+        `Indexed ${succeeded.length} documents:\n${succeeded
+          .map((s) => s.filename)
+          .join(", ")}`
       );
     }
     if (failed.length > 0) {
-      lines.push(
-        `❌ ${failed.length} failed:`,
-        ...failed.map((f) => `- **${f.filename}** — ${f.error}`)
+      notify(
+        `${failed.length} upload${failed.length > 1 ? "s" : ""} failed:\n${failed
+          .map((f) => `${f.filename} — ${f.error}`)
+          .join("\n")}`,
+        "error"
       );
     }
-    if (succeeded.length === 1 && failed.length === 0) {
-      lines.push(
-        "",
-        'I\'ve selected this document for our chat. Try *"Give me a summary of this document"* or any question about it.'
-      );
-    }
-
-    setMessages((prev) => [
-      ...prev,
-      { role: "assistant", text: lines.join("\n"), error: succeeded.length === 0 },
-    ]);
 
     fetchDocs();
     setUploading(false);
@@ -333,18 +327,9 @@ function AIAssistant() {
       setDocList([]);
       setSelectedDocIds([]);
       setShowDocs(false);
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          text: "🗑️ Cleared all documents and reset the dashboard metrics. Upload new documents to start again.",
-        },
-      ]);
+      notify("Cleared all documents and reset the dashboard metrics.");
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", text: `❌ ${err.message}`, error: true },
-      ]);
+      notify(err.message, "error");
     } finally {
       setClearing(false);
     }
@@ -375,20 +360,13 @@ function AIAssistant() {
       }
       // 200 = it was already pinned (idempotent); 201 = newly added.
       const alreadyPinned = res.status === 200;
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          text: alreadyPinned
-            ? "📌 That chart is already on your **Dashboard** — no duplicate added."
-            : "📌 Added that chart to your dashboard — open the **Dashboard** to see it.",
-        },
-      ]);
+      notify(
+        alreadyPinned
+          ? "That chart is already on your Dashboard — no duplicate added."
+          : "Added that chart to your dashboard."
+      );
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", text: `❌ ${err.message}`, error: true },
-      ]);
+      notify(err.message, "error");
     }
   }
 
@@ -420,10 +398,7 @@ function AIAssistant() {
       a.remove();
       URL.revokeObjectURL(url);
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", text: `❌ Could not download "${filename}": ${err.message}`, error: true },
-      ]);
+      notify(`Could not download "${filename}": ${err.message}`, "error");
     }
   }
 
@@ -442,18 +417,11 @@ function AIAssistant() {
       const data = await res.json();
       await fetchDocs();
       if (data.document_id) setSelectedDocIds([data.document_id]); // chat with the new report
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          text: `✅ Added **${filename}** to my knowledge base (${data.chunks} chunks). I've selected it for our chat — ask me anything about it.`,
-        },
-      ]);
+      notify(
+        `Added "${filename}" to the knowledge base (${data.chunks} chunks) — selected for this chat.`
+      );
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", text: `❌ ${err.message}`, error: true },
-      ]);
+      notify(err.message, "error");
     }
   }
 
@@ -461,6 +429,7 @@ function AIAssistant() {
   return (
     <div className="ai-layout">
       <Sidebar />
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
 
       <main className="ai-content">
         {/* Header */}

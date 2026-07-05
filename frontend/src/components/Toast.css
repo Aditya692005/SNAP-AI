@@ -1,0 +1,70 @@
+/* Transient notification popups (dark theme is the default, like the rest of the app) */
+
+.toast-stack {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 260px;
+  max-width: 400px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: #1e293b;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  color: #f1f5f9;
+  font-size: 0.875rem;
+  line-height: 1.45;
+  box-shadow: 0 12px 32px -8px rgba(0, 0, 0, 0.45);
+  animation: toast-in 0.18s ease-out;
+}
+
+.toast.success { border-left: 4px solid #22c55e; }
+.toast.error { border-left: 4px solid #ef4444; }
+
+.toast-icon {
+  flex-shrink: 0;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.toast-text {
+  flex: 1;
+  white-space: pre-line;
+  word-break: break-word;
+}
+
+.toast-close {
+  flex-shrink: 0;
+  margin-left: 4px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  opacity: 0.6;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  cursor: pointer;
+}
+.toast-close:hover { opacity: 1; }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Light theme */
+html[data-theme="light"] .toast {
+  background: #ffffff;
+  border-color: #e2e8f0;
+  color: #0f172a;
+  box-shadow: 0 12px 32px -8px rgba(15, 23, 42, 0.25);
+}
