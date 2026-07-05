@@ -31,6 +31,21 @@ async function setDocumentStatus(id, status) {
   if (error) throw error;
 }
 
+// Reset an existing documents row for a re-upload of the same file: back to
+// PROCESSING with the new file's size/type. The id is kept so the RAG service's
+// per-document cleanup replaces the old chunks/tables instead of duplicating.
+async function resetDocumentForReupload(id, { mimeType, fileSize }) {
+  const { error } = await supabase
+    .from("documents")
+    .update({
+      status: "PROCESSING",
+      mime_type: mimeType ?? null,
+      file_size: fileSize ?? null,
+    })
+    .eq("id", id);
+  if (error) throw error;
+}
+
 async function findDocumentById(id) {
   const { data, error } = await supabase
     .from("documents")
@@ -46,7 +61,7 @@ async function findDocumentById(id) {
 async function findByFileName(organizationId, fileName) {
   const { data, error } = await supabase
     .from("documents")
-    .select("id, file_name")
+    .select("id, file_name, uploaded_by_user_id")
     .eq("organization_id", organizationId)
     .eq("file_name", fileName)
     .order("created_at", { ascending: false })
@@ -250,6 +265,7 @@ async function listAccessibleDocuments(userId, organizationId, opts = {}) {
 module.exports = {
   createDocument,
   setDocumentStatus,
+  resetDocumentForReupload,
   findDocumentById,
   findByFileName,
   deleteDocument,

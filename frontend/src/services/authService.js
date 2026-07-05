@@ -167,8 +167,13 @@ export const authService = {
 
 async function handle(res) {
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.message || "Request failed");
+    const body = await res.json().catch(() => ({}));
+    const err = new Error(body.message || "Request failed");
+    // Machine-readable details (e.g. code "DUPLICATE_FILENAME" + can_overwrite
+    // on uploads) so callers can offer a resolution instead of just a message.
+    err.code = body.code;
+    err.canOverwrite = body.can_overwrite;
+    throw err;
   }
   return res.json();
 }
@@ -329,9 +334,12 @@ export const documentService = {
   },
   // Upload ONE file into the RAG pipeline (indexes it + creates the documents
   // row). No Content-Type header — the browser sets the multipart boundary.
-  async upload(file) {
+  // A same-named document rejects with code "DUPLICATE_FILENAME" unless
+  // { overwrite: true } confirms updating the existing document in place.
+  async upload(file, { overwrite = false } = {}) {
     const form = new FormData();
     form.append("file", file);
+    if (overwrite) form.append("overwrite", "true");
     return handle(
       await fetch(`${API_BASE_URL}/api/rag/upload`, {
         method: "POST",

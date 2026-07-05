@@ -77,6 +77,48 @@ function Documents() {
     return targets && (targets.is_admin || d.uploaded_by_user_id === targets.user_id);
   }
 
+  // "report.pdf" → "report (1).pdf" — starting suggestion for the rename prompt.
+  function suggestRename(name) {
+    const dot = name.lastIndexOf(".");
+    const base = dot > 0 ? name.slice(0, dot) : name;
+    const ext = dot > 0 ? name.slice(dot) : "";
+    return `${base} (1)${ext}`;
+  }
+
+  // Upload one file; when a document with the same name already exists, ask the
+  // user to update the existing document or rename the new file (re-checked, so
+  // a rename that collides again just asks again).
+  async function uploadResolvingDuplicates(file) {
+    try {
+      return await documentService.upload(file);
+    } catch (err) {
+      if (err.code !== "DUPLICATE_FILENAME") throw err;
+
+      if (err.canOverwrite) {
+        const update = window.confirm(
+          `A document named "${file.name}" already exists.\n\n` +
+            "OK — update the existing document with this file (charts built from it can be refreshed).\n" +
+            "Cancel — keep both by renaming the new file."
+        );
+        if (update) return documentService.upload(file, { overwrite: true });
+      } else {
+        window.alert(
+          `"${file.name}" was already uploaded by someone else in your organization — give your file a different name.`
+        );
+      }
+
+      const newName = window.prompt(
+        `New name for "${file.name}":`,
+        suggestRename(file.name)
+      );
+      if (!newName || !newName.trim() || newName.trim() === file.name) {
+        throw new Error("upload cancelled", { cause: err });
+      }
+      const renamed = new File([file], newName.trim(), { type: file.type });
+      return uploadResolvingDuplicates(renamed);
+    }
+  }
+
   // Upload one or more documents into the AI pipeline. The backend accepts a
   // single file per request, so we upload sequentially (same as the AI page).
   async function handleUpload(e) {
@@ -90,10 +132,12 @@ function Documents() {
     const failed = [];
     for (const file of files) {
       try {
-        const data = await documentService.upload(file);
+        const data = await uploadResolvingDuplicates(file);
         succeeded.push(data.filename || file.name);
       } catch (err) {
-        failed.push({ filename: file.name, error: err.message });
+        if (err.message !== "upload cancelled") {
+          failed.push({ filename: file.name, error: err.message });
+        }
       } finally {
         setUploadProgress((p) => (p ? { ...p, done: p.done + 1 } : p));
       }

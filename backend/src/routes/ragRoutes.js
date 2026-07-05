@@ -14,6 +14,7 @@ const { upsertStatus, getStatus, clearAllForUser } = require("../models/metricsM
 const {
   createDocument,
   setDocumentStatus,
+  resetDocumentForReupload,
   accessibleDocumentIds,
   findByFileName,
   deleteAllForUser,
@@ -177,14 +178,43 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
     if (!req.file) return res.status(400).json({ message: "file is required" });
     const orgId = req.user.organization_id;
     const filename = req.file.originalname;
+    const overwrite = req.body?.overwrite === "true";
 
-    // 1) Register the document (org + uploader).
-    const doc = await createDocument(orgId, req.user.id, {
-      fileName: filename,
-      storagePath: `uploads/${filename}`,
-      mimeType: req.file.mimetype,
-      fileSize: req.file.size,
-    });
+    // 1) Register the document (org + uploader). A same-named document may
+    //    already exist — the on-disk file, vectors, and dashboard metrics all
+    //    key on the filename, so uploading it again is an UPDATE of that
+    //    document, never a silent duplicate. Unless the client already
+    //    confirmed the update (overwrite=true), reply 409 so it can ask the
+    //    user to update the existing document or rename the new file.
+    //    Updating follows the delete rule: only the uploader or an org_admin.
+    const existing = await findByFileName(orgId, filename);
+    let doc = existing;
+    if (existing) {
+      const canOverwrite =
+        existing.uploaded_by_user_id === req.user.id || req.user.role === "org_admin";
+      if (!canOverwrite || !overwrite) {
+        return res.status(409).json({
+          code: "DUPLICATE_FILENAME",
+          can_overwrite: canOverwrite,
+          message: canOverwrite
+            ? `A document named "${filename}" already exists.`
+            : `"${filename}" was already uploaded by someone else in your organization — rename your file to upload it.`,
+        });
+      }
+      // Reuse the row: the RAG service clears this document_id's old
+      // chunks/tables before re-indexing, so the content is replaced in place.
+      await resetDocumentForReupload(existing.id, {
+        mimeType: req.file.mimetype,
+        fileSize: req.file.size,
+      });
+    } else {
+      doc = await createDocument(orgId, req.user.id, {
+        fileName: filename,
+        storagePath: `uploads/${filename}`,
+        mimeType: req.file.mimetype,
+        fileSize: req.file.size,
+      });
+    }
 
     // 2) Send the file to the RAG service to embed into Supabase (document_chunks
     //    + document_tables) under this document_id.
@@ -237,11 +267,24 @@ router.post("/ingest", requireAuth, async (req, res, next) => {
     const orgId = req.user.organization_id;
 
     // Register the generated file as a document, then index it into Supabase.
-    const doc = await createDocument(orgId, req.user.id, {
-      fileName: filename,
-      storagePath: `uploads/${filename}`,
-      mimeType: "application/pdf",
-    });
+    // "Add to AI" clicked twice for the same report reuses the existing row
+    // (re-indexing replaces its chunks) instead of creating a duplicate.
+    const existing = await findByFileName(orgId, filename);
+    let doc = existing;
+    if (existing) {
+      if (existing.uploaded_by_user_id !== req.user.id && req.user.role !== "org_admin") {
+        return res.status(409).json({
+          message: `"${filename}" already belongs to another user in your organization.`,
+        });
+      }
+      await resetDocumentForReupload(existing.id, { mimeType: "application/pdf" });
+    } else {
+      doc = await createDocument(orgId, req.user.id, {
+        fileName: filename,
+        storagePath: `uploads/${filename}`,
+        mimeType: "application/pdf",
+      });
+    }
 
     const response = await fetch(`${RAG_URL}/ingest`, {
       method: "POST",
