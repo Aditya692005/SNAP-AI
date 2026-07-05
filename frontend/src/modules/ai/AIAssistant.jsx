@@ -38,6 +38,9 @@ function AIAssistant() {
   const [showHistory, setShowHistory] = useState(false);
   // Transient popup notifications (auto-dismiss after a few seconds).
   const [toasts, setToasts] = useState([]);
+  // "Pin to dashboard" picker: { spec, aiMessageId, dashboards } while choosing.
+  const [pinPicker, setPinPicker] = useState(null);
+  const [pinningTo, setPinningTo] = useState(null); // dashboard id being pinned to
 
   const bottomRef = useRef(null);
   const fileRef = useRef(null);
@@ -175,14 +178,59 @@ function AIAssistant() {
   }
 
   // ── send chat message ──────────────────────────────────────────────────────
+  // Two-phase send: first ask the backend which documents the question matches
+  // (a vector search, no LLM), show them as a picker so the user can trim the
+  // set, then answer from the confirmed documents only. Skipped when the user
+  // already picked docs in the drawer, when nothing matches (plain chat), or
+  // when the preview fails (best-effort — never blocks the answer).
   async function sendMessage() {
     const text = input.trim();
     if (!text || loading) return;
 
     setMessages((prev) => [...prev, { role: "user", text }]);
     setInput("");
-    setLoading(true);
 
+    if (selectedDocIds.length > 0 || docList.length === 0) {
+      await askAI(text, selectedDocIds.length > 0 ? selectedDocIds : undefined);
+      return;
+    }
+
+    setLoading(true);
+    let docs = [];
+    try {
+      const res = await fetch(`${API_BASE}/api/rag/chat/preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ message: text }),
+      });
+      if (res.ok) docs = (await res.json()).documents || [];
+    } catch {
+      /* preview unavailable — fall through and answer normally */
+    }
+    setLoading(false);
+
+    if (docs.length === 0) {
+      await askAI(text, undefined);
+      return;
+    }
+    setMessages((prev) => [
+      ...prev,
+      {
+        role: "assistant",
+        picker: {
+          question: text,
+          docs,
+          checked: docs.map((d) => d.id),
+          status: "open", // open → done | cancelled
+        },
+      },
+    ]);
+  }
+
+  // Ask the AI for the actual answer, searching only `documentIds` (undefined =
+  // everything the user can access).
+  async function askAI(text, documentIds) {
+    setLoading(true);
     try {
       const res = await fetch(`${API_BASE}/api/rag/chat`, {
         method: "POST",
@@ -190,7 +238,7 @@ function AIAssistant() {
         body: JSON.stringify({
           message: text,
           conversation_id: conversationId || undefined,
-          document_ids: selectedDocIds.length > 0 ? selectedDocIds : undefined,
+          document_ids: documentIds,
         }),
       });
 
@@ -232,6 +280,40 @@ function AIAssistant() {
     } finally {
       setLoading(false);
     }
+  }
+
+  // ── document picker (confirm which docs the answer may use) ──────────────────
+  function setPickerChecked(index, docId, on) {
+    setMessages((prev) =>
+      prev.map((m, i) =>
+        i === index && m.picker
+          ? {
+              ...m,
+              picker: {
+                ...m.picker,
+                checked: on
+                  ? [...m.picker.checked, docId]
+                  : m.picker.checked.filter((id) => id !== docId),
+              },
+            }
+          : m
+      )
+    );
+  }
+
+  function closePicker(index, status) {
+    setMessages((prev) =>
+      prev.map((m, i) =>
+        i === index && m.picker ? { ...m, picker: { ...m.picker, status } } : m
+      )
+    );
+  }
+
+  async function confirmPicker(index) {
+    const p = messages[index]?.picker;
+    if (!p || p.status !== "open" || p.checked.length === 0) return;
+    closePicker(index, "done");
+    await askAI(p.question, p.checked);
   }
 
   // ── upload one file ──────────────────────────────────────────────────────────
@@ -383,14 +465,32 @@ function AIAssistant() {
     }
   }
 
-  // ── pin a generated chart/table to the dashboard ─────────────────────────────
+  // ── pin a generated chart/table to a dashboard ───────────────────────────────
+  // Clicking "Pin" first asks WHICH dashboard to pin to (users can keep several).
+  // With zero/one dashboard there's nothing to choose, so we pin straight away.
+  async function pinChart(spec, aiMessageId) {
+    let dashboards = [];
+    try {
+      const res = await fetch(`${API_BASE}/api/dashboard/dashboards`, {
+        headers: authHeaders(),
+      });
+      if (res.ok) dashboards = (await res.json()).dashboards || [];
+    } catch {
+      // fall through — pin to the server-side default dashboard
+    }
+    if (dashboards.length > 1) {
+      setPinPicker({ spec, aiMessageId, dashboards });
+      return;
+    }
+    await pinToDashboard(spec, aiMessageId, dashboards[0] || null);
+  }
+
   // aiMessageId links the pinned widget back to the message that produced it, so
   // the dashboard can regenerate the chart against fresh data on re-upload.
-  async function pinChart(spec, aiMessageId) {
+  // dashboard = null → the server falls back to the default dashboard.
+  async function pinToDashboard(spec, aiMessageId, dashboard) {
+    setPinningTo(dashboard ? dashboard.id : "default");
     try {
-      // Pin to whichever dashboard the user last had open (persisted by the
-      // Dashboard page). Omitted/unknown → the server falls back to the default.
-      const activeDashboardId = localStorage.getItem("activeDashboardId") || null;
       const res = await fetch(`${API_BASE}/api/dashboard/widgets`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -399,22 +499,26 @@ function AIAssistant() {
           title: spec.title || null,
           config: { spec },
           ai_message_id: aiMessageId || null,
-          dashboard_id: activeDashboardId,
+          dashboard_id: dashboard ? dashboard.id : null,
         }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.message || "Could not pin chart");
       }
-      // 200 = it was already pinned (idempotent); 201 = newly added.
+      // 200 = it was already pinned there (idempotent); 201 = newly added.
       const alreadyPinned = res.status === 200;
+      const where = dashboard ? `"${dashboard.name}"` : "your dashboard";
       notify(
         alreadyPinned
-          ? "That chart is already on your Dashboard — no duplicate added."
-          : "Added that chart to your dashboard."
+          ? `That chart is already on ${where} — no duplicate added.`
+          : `Added that chart to ${where}.`
       );
+      setPinPicker(null);
     } catch (err) {
       notify(err.message, "error");
+    } finally {
+      setPinningTo(null);
     }
   }
 
@@ -581,7 +685,57 @@ function AIAssistant() {
         <div className="chat-messages">
           {messages.map((msg, i) => (
             <div key={i} className={`chat-bubble ${msg.role} ${msg.error ? "error" : ""}`}>
-              {msg.role === "assistant" && !msg.error ? (
+              {msg.picker ? (
+                <div className="doc-picker">
+                  <div className="doc-picker-title">
+                    {msg.picker.status === "cancelled"
+                      ? "Okay, I won't answer that one."
+                      : msg.picker.status === "done"
+                        ? "Answering from these documents:"
+                        : "I'd answer this from the documents below — untick any you don't want me to use:"}
+                  </div>
+                  {msg.picker.status !== "cancelled" && (
+                    <div className="doc-picker-list">
+                      {msg.picker.docs
+                        .filter(
+                          (d) =>
+                            msg.picker.status === "open" ||
+                            msg.picker.checked.includes(d.id)
+                        )
+                        .map((d) => (
+                          <label key={d.id} className="doc-picker-item">
+                            <input
+                              type="checkbox"
+                              disabled={msg.picker.status !== "open"}
+                              checked={msg.picker.checked.includes(d.id)}
+                              onChange={(e) => setPickerChecked(i, d.id, e.target.checked)}
+                            />
+                            <span className="doc-picker-name">📄 {d.file_name}</span>
+                          </label>
+                        ))}
+                    </div>
+                  )}
+                  {msg.picker.status === "open" && (
+                    <div className="doc-picker-actions">
+                      <button
+                        type="button"
+                        className="doc-picker-answer"
+                        onClick={() => confirmPicker(i)}
+                        disabled={loading || msg.picker.checked.length === 0}
+                      >
+                        Answer with {msg.picker.checked.length} selected
+                      </button>
+                      <button
+                        type="button"
+                        className="doc-picker-cancel"
+                        onClick={() => closePicker(i, "cancelled")}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ) : msg.role === "assistant" && !msg.error ? (
                 <div className="bubble-text markdown">
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm]}
@@ -796,6 +950,45 @@ function AIAssistant() {
           </div>
         )}
       </aside>
+
+      {/* Pin-to-dashboard picker — shown when the user has more than one dashboard */}
+      {pinPicker && (
+        <>
+          <div
+            className="pin-overlay"
+            onClick={() => pinningTo === null && setPinPicker(null)}
+          />
+          <div className="pin-modal" role="dialog" aria-label="Choose a dashboard">
+            <div className="pin-modal-title">Pin to which dashboard?</div>
+            <div className="pin-modal-hint">
+              {pinPicker.spec.title || "This chart"} will appear as a widget there.
+            </div>
+            <div className="pin-modal-list">
+              {pinPicker.dashboards.map((d) => (
+                <button
+                  key={d.id}
+                  type="button"
+                  className="pin-modal-option"
+                  disabled={pinningTo !== null}
+                  onClick={() => pinToDashboard(pinPicker.spec, pinPicker.aiMessageId, d)}
+                >
+                  <span className="pin-modal-name">{d.name}</span>
+                  {d.is_default && <span className="pin-modal-badge">default</span>}
+                  {pinningTo === d.id && <span className="pin-modal-busy">Pinning…</span>}
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              className="pin-modal-cancel"
+              onClick={() => setPinPicker(null)}
+              disabled={pinningTo !== null}
+            >
+              Cancel
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 }

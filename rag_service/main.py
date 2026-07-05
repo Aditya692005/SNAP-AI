@@ -966,6 +966,43 @@ async def chat(req: ChatRequest):
         raise HTTPException(status_code=502, detail=f"Gemini error: {msg}")
 
 
+class RetrievePreviewRequest(BaseModel):
+    message: str
+    organization_id: str
+    document_ids: list[str] | None = None  # docs the user may see
+
+
+@app.post("/retrieve-preview")
+async def retrieve_preview(req: RetrievePreviewRequest):
+    """The documents /chat WOULD draw on for this question: the same scoped
+    vector search, stopped before the LLM — so the client can show the user
+    which documents matched and let them trim the set before answering.
+    Meta/conversational questions return no documents (chat answers those
+    without retrieval)."""
+    if not req.document_ids or is_meta_question(req.message):
+        return {"documents": []}
+
+    hits = retrieve_chunks(req.message, req.organization_id, req.document_ids, k=10)
+
+    # Distinct documents, keeping each one's best similarity.
+    best: dict[str, float] = {}
+    for h in hits:
+        did = str(h["document_id"])
+        sim = float(h.get("similarity") or 0)
+        if did not in best or sim > best[did]:
+            best[did] = sim
+    if not best:
+        return {"documents": []}
+
+    names = {str(d["id"]): d.get("file_name") for d in store.documents_by_ids(list(best))}
+    documents = [
+        {"id": did, "file_name": names.get(did) or "unknown", "similarity": round(sim, 4)}
+        for did, sim in sorted(best.items(), key=lambda kv: kv[1], reverse=True)
+        if did in names  # skip ids whose documents row has vanished
+    ]
+    return {"documents": documents}
+
+
 class VisualizeRequest(BaseModel):
     instruction: str
     source: str | None = None  # which uploaded document to chart

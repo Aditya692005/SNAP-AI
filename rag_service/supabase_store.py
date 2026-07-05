@@ -80,6 +80,14 @@ def file_names_for_documents(document_ids) -> list[str]:
     return list({str(r["file_name"]) for r in (res.data or []) if r.get("file_name")})
 
 
+def documents_by_ids(document_ids) -> list[dict]:
+    """[{id, file_name}] rows for a set of document ids (retrieval preview)."""
+    if not document_ids:
+        return []
+    res = sb().table("documents").select("id, file_name").in_("id", document_ids).execute()
+    return res.data or []
+
+
 def tables_for_documents(document_ids) -> list[dict]:
     """Stored tabular data for a set of documents (for accurate chart data)."""
     if not document_ids:

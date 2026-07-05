@@ -205,6 +205,13 @@ html[data-theme="light"] .chat-input textarea::placeholder { color: #94a3b8; }
 html[data-theme="light"] .doc-card { background: #f8fafc; border-color: #e2e8f0; }
 html[data-theme="light"] .doc-card-title { color: #1e293b; }
 
+/* Document picker (pre-answer confirmation) */
+html[data-theme="light"] .doc-picker-title { color: #1e293b; }
+html[data-theme="light"] .doc-picker-item { background: #f8fafc; border-color: #e2e8f0; }
+html[data-theme="light"] .doc-picker-name { color: #1e293b; }
+html[data-theme="light"] .doc-picker-cancel { border-color: #cbd5e1; color: #475569; }
+html[data-theme="light"] .doc-picker-cancel:hover { color: #1e293b; border-color: #94a3b8; }
+
 /* Chart / table block */
 html[data-theme="light"] .chart-block { background: #ffffff; border-color: #e2e8f0; }
 html[data-theme="light"] .chart-title { color: #1e293b; }

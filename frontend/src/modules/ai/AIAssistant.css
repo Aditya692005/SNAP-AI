@@ -413,6 +413,87 @@
   background: rgba(139, 92, 246, 0.28);
 }
 
+/* ── Document picker (confirm which docs the answer may use) ── */
+.doc-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.doc-picker-title {
+  color: #e2e8f0;
+  font-size: 0.92rem;
+}
+
+.doc-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.doc-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  background: #0b1020;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 0.5rem 0.7rem;
+  cursor: pointer;
+}
+
+.doc-picker-item input[type="checkbox"] {
+  accent-color: #8b5cf6;
+  cursor: pointer;
+}
+
+.doc-picker-item input[type="checkbox"]:disabled {
+  cursor: default;
+}
+
+.doc-picker-name {
+  color: #e2e8f0;
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.doc-picker-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.doc-picker-answer {
+  background: linear-gradient(135deg, #ec4899, #8b5cf6);
+  border: none;
+  color: white;
+  border-radius: 8px;
+  padding: 7px 14px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.doc-picker-answer:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.doc-picker-cancel {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: #94a3b8;
+  border-radius: 8px;
+  padding: 7px 14px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.doc-picker-cancel:hover {
+  color: #e2e8f0;
+  border-color: rgba(255, 255, 255, 0.35);
+}
+
 /* ── Chart / table block (rendered inside an assistant bubble) ── */
 .chart-block {
   margin-top: 0.75rem;
@@ -823,4 +904,122 @@
   border: none;
   border-top: 1px solid rgba(255, 255, 255, 0.1);
   margin: 1em 0;
+}
+
+/* ── Pin-to-dashboard picker ────────────────────────────── */
+.pin-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 6, 18, 0.55);
+  backdrop-filter: blur(2px);
+  z-index: 60;
+}
+
+.pin-modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(380px, 92vw);
+  background:
+    radial-gradient(400px 200px at 100% 0%, rgba(139, 92, 246, 0.12), transparent 60%),
+    #070b16;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px -20px rgba(0, 0, 0, 0.8);
+  padding: 1.2rem 1.3rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  z-index: 61;
+}
+
+.pin-modal-title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: white;
+}
+
+.pin-modal-hint {
+  font-size: 0.8rem;
+  color: #64748b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pin-modal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  max-height: 45vh;
+  overflow-y: auto;
+}
+
+.pin-modal-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  text-align: left;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 11px;
+  padding: 0.7rem 0.85rem;
+  color: #e2e8f0;
+  font-size: 0.9rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.pin-modal-option:hover:not(:disabled) {
+  border-color: rgba(139, 92, 246, 0.45);
+  background: rgba(139, 92, 246, 0.06);
+}
+
+.pin-modal-option:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.pin-modal-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pin-modal-badge {
+  flex-shrink: 0;
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #c4b5fd;
+  background: rgba(139, 92, 246, 0.14);
+  border: 1px solid rgba(139, 92, 246, 0.35);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.pin-modal-busy {
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  color: #94a3b8;
+}
+
+.pin-modal-cancel {
+  align-self: flex-end;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #cbd5e1;
+  border-radius: 9px;
+  padding: 0.45rem 0.9rem;
+  font-size: 0.85rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.pin-modal-cancel:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
 }

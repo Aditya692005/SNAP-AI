@@ -147,6 +147,43 @@ router.post("/chat", requireAuth, async (req, res, next) => {
   }
 });
 
+// ── POST /api/rag/chat/preview ────────────────────────────────────────────────
+// Which documents WOULD be used to answer `message`? Runs the same scoped
+// vector search as /chat but stops before the LLM, so the client can show the
+// matched documents and let the user trim the set before asking for the answer.
+// Body: { message, document_ids? } → { documents: [{ id, file_name, similarity }] }
+router.post("/chat/preview", requireAuth, async (req, res, next) => {
+  try {
+    const { message, document_ids: selectedIds } = req.body;
+    if (!message) return res.status(400).json({ message: "message is required" });
+    const orgId = req.user.organization_id;
+
+    // Same accessibility scoping as /chat — never previews docs the user can't see.
+    const accessible = await accessibleDocumentIds(req.user.id, orgId, {
+      subtreeDepartments: (req.user.permissions || []).includes("SHARE_DEPARTMENT_DOCUMENTS"),
+    });
+    let documentIds = accessible;
+    if (Array.isArray(selectedIds) && selectedIds.length > 0) {
+      const allowed = new Set(accessible);
+      documentIds = selectedIds.filter((id) => allowed.has(id));
+    }
+    if (documentIds.length === 0) return res.json({ documents: [] });
+
+    const response = await fetch(`${RAG_URL}/retrieve-preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message, organization_id: orgId, document_ids: documentIds }),
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      return res.status(response.status).json({ message: err.detail || "RAG service error" });
+    }
+    return res.json(await response.json());
+  } catch (err) {
+    return next(err);
+  }
+});
+
 // ── POST /api/rag/visualize ───────────────────────────────────────────────────
 // Asks the RAG service to turn an uploaded document's data into a chart/table
 // specification (JSON) that the frontend renders and lets the user download.
