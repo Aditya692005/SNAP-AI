@@ -242,6 +242,28 @@ def wants_chart(question: str) -> bool:
     return any(k in q for k in CHART_KEYWORDS)
 
 
+# Requests to PRODUCE a table (a pinnable table widget, not a prose answer):
+# either a produce-verb followed by "table" ("make a table of each hat and its
+# focus"), or a phrase form with no verb ("sales by region as a table"). A bare
+# "table" stays a prose question — "what does the table on page 3 say?" must
+# NOT match.
+TABLE_RE = re.compile(
+    r"\b(make|create|show|give|draw|build|generate|display|present|produce|"
+    r"put|render|represent|convert|turn|organize|organise|format|tabulate)\b"
+    r".{0,60}?\btable\b",
+    re.IGNORECASE,
+)
+TABLE_PHRASES = (
+    "as a table", "in a table", "table of", "table format", "tabular",
+    "tabulate", "table showing", "table with", "table comparing",
+)
+
+
+def wants_table(question: str) -> bool:
+    q = question.lower()
+    return bool(TABLE_RE.search(question)) or any(k in q for k in TABLE_PHRASES)
+
+
 # A generate-style verb followed (allowing filler words) by a document noun
 # signals the user wants a generated report/PDF — e.g. "make me a report",
 # "create a detailed PDF of the findings", "draft a one-page brief".
@@ -922,7 +944,7 @@ async def chat(req: ChatRequest):
             return ChatResponse(answer=answer, sources=source_files, doc_count=n_docs, document=doc)
 
         # Chart/table from the accessible/focused documents.
-        if wants_chart(req.message):
+        if wants_chart(req.message) or wants_table(req.message):
             try:
                 spec, source_files = await run_visualization_supabase(
                     req.message, req.organization_id, req.document_ids, req.focus_document_id
