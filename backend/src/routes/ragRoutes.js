@@ -9,7 +9,10 @@ const FormData = require("form-data");
 const fetch = require("node-fetch");
 
 const requireAuth = require("../middleware/requireAuth");
-const { markWidgetsStaleForSource } = require("../services/widgetRefreshService");
+const {
+  markWidgetsStaleForSource,
+  markDepartmentWidgetsStaleForSource,
+} = require("../services/widgetRefreshService");
 const { upsertStatus, getStatus, clearAllForUser } = require("../models/metricsModel");
 const {
   createDocument,
@@ -293,6 +296,12 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
     upsertStatus(req.user.id, filename, { status: "ready", included: true }).catch(() => {});
     if (isReupload) {
       markWidgetsStaleForSource(req.user.id, orgId, filename).catch(() => {});
+    }
+    // Department boards are shared, so an UPDATE by ANY member (org-level
+    // re-upload, detected above via findByFileName → `existing`) must flag their
+    // charts stale — not just the re-uploader's own personal charts.
+    if (existing) {
+      markDepartmentWidgetsStaleForSource(orgId, filename).catch(() => {});
     }
 
     return res.json({ document_id: doc.id, filename, ...data });

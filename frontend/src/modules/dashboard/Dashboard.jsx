@@ -35,8 +35,22 @@ function Dashboard() {
   const [renaming, setRenaming] = useState(false); // inline rename of active board
   const [draftName, setDraftName] = useState("");
 
+  // Department dashboards: shared boards scoped to a department. The server
+  // decides which the user can see and whether they can edit (can_edit).
+  const [scope, setScope] = useState("personal"); // "personal" | "department"
+  const [deptBoards, setDeptBoards] = useState([]);
+  const [activeDeptId, setActiveDeptId] = useState(null);
+  const [deptWidgets, setDeptWidgets] = useState([]);
+  const [deptCanEdit, setDeptCanEdit] = useState(false);
+  const [deptLoading, setDeptLoading] = useState(false);
+  const [deptRefreshingId, setDeptRefreshingId] = useState(null);
+  const [deptRenaming, setDeptRenaming] = useState(false);
+
+  const deptActive = deptBoards.find((b) => b.id === activeDeptId) || null;
+
   useEffect(() => {
     loadDashboards();
+    loadDepartmentBoards();
     refreshDocuments();
     organizationService.get().then(setOrg).catch(() => {});
   }, []);
@@ -48,6 +62,21 @@ function Dashboard() {
     localStorage.setItem(ACTIVE_KEY, activeId);
     refreshWidgets(activeId);
   }, [activeId]);
+
+  // Load the active department board's widgets whenever it changes.
+  useEffect(() => {
+    if (activeDeptId) refreshDeptWidgets(activeDeptId);
+  }, [activeDeptId]);
+
+  // Since there's no realtime, re-pull the active department board when the tab
+  // regains focus — shrinks the window in which another editor's change (or the
+  // re-upload stale flag) goes unseen before you act on it.
+  useEffect(() => {
+    if (scope !== "department" || !activeDeptId) return;
+    const onFocus = () => refreshDeptWidgets(activeDeptId);
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [scope, activeDeptId]);
 
   const active = dashboards.find((d) => d.id === activeId) || null;
 
@@ -192,6 +221,110 @@ function Dashboard() {
     }
   }
 
+  // ── Department dashboards ────────────────────────────────────────────────────
+  async function loadDepartmentBoards() {
+    try {
+      const res = await fetch(`${API_BASE}/api/dashboard/department`, { headers: authHeaders() });
+      if (!res.ok) return;
+      const list = (await res.json()).dashboards || [];
+      setDeptBoards(list);
+      // Default to the user's editable board if they have one, else the first.
+      setActiveDeptId((cur) => cur || (list.find((b) => b.can_edit) || list[0])?.id || null);
+    } catch {
+      // no department boards visible — the switcher stays hidden
+    }
+  }
+
+  async function refreshDeptWidgets(id) {
+    setDeptLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/dashboard/department/${id}/widgets`, {
+        headers: authHeaders(),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setDeptWidgets(data.widgets || []);
+        setDeptCanEdit(!!data.can_edit);
+        // Keep the board's version (for rename) in step with the server.
+        setDeptBoards((prev) =>
+          prev.map((b) => (b.id === id ? { ...b, version: data.version, can_edit: data.can_edit } : b))
+        );
+      }
+    } catch {
+      // leave as-is
+    } finally {
+      setDeptLoading(false);
+    }
+  }
+
+  // A shared board changed underneath us (409). Tell the user and re-pull.
+  function handleDeptConflict() {
+    window.alert("This board was just changed by someone else — reloading the latest version.");
+    if (activeDeptId) refreshDeptWidgets(activeDeptId);
+  }
+
+  async function removeDeptWidget(w) {
+    if (!window.confirm("Remove this chart from the department dashboard?")) return;
+    const prev = deptWidgets;
+    setDeptWidgets((list) => list.filter((x) => x.id !== w.id));
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/dashboard/department/widgets/${w.id}?expected_version=${w.version}`,
+        { method: "DELETE", headers: authHeaders() }
+      );
+      if (res.status === 409) {
+        setDeptWidgets(prev);
+        handleDeptConflict();
+      } else if (!res.ok) {
+        setDeptWidgets(prev);
+      }
+    } catch {
+      setDeptWidgets(prev);
+    }
+  }
+
+  async function refreshDeptWidget(w) {
+    setDeptRefreshingId(w.id);
+    try {
+      const res = await fetch(`${API_BASE}/api/dashboard/department/widgets/${w.id}/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ expected_version: w.version }),
+      });
+      if (res.status === 409) {
+        handleDeptConflict();
+      } else if (res.ok) {
+        const updated = await res.json();
+        setDeptWidgets((list) => list.map((x) => (x.id === w.id ? updated : x)));
+      }
+    } catch {
+      // leave stale on failure
+    } finally {
+      setDeptRefreshingId(null);
+    }
+  }
+
+  async function renameDeptBoard(board, name) {
+    const clean = (name || "").trim();
+    setDeptRenaming(false);
+    if (!clean || clean === board.name) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/dashboard/department/${board.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ name: clean, expected_version: board.version }),
+      });
+      if (res.status === 409) {
+        handleDeptConflict();
+      } else if (res.ok) {
+        const updated = await res.json();
+        setDeptBoards((prev) => prev.map((b) => (b.id === board.id ? { ...b, ...updated } : b)));
+      }
+    } catch {
+      // leave name as-is
+    }
+  }
+
   async function toggleDocument(source, included) {
     setDocuments((prev) =>
       prev.map((d) => (d.source_document === source ? { ...d, included } : d))
@@ -267,6 +400,26 @@ function Dashboard() {
           </div>
         </div>
 
+        {/* Scope switch — only shown when the user can see a department board */}
+        {deptBoards.length > 0 && (
+          <div className="scope-switch">
+            <button
+              className={`scope-btn ${scope === "personal" ? "active" : ""}`}
+              onClick={() => setScope("personal")}
+            >
+              My dashboards
+            </button>
+            <button
+              className={`scope-btn ${scope === "department" ? "active" : ""}`}
+              onClick={() => setScope("department")}
+            >
+              Department
+            </button>
+          </div>
+        )}
+
+        {scope === "personal" && (
+          <>
         {/* Dashboard tabs — switch between the user's personal dashboards */}
         <div className="dashboard-tabs">
           {dashboards.map((d) => (
@@ -390,6 +543,115 @@ function Dashboard() {
               );
             })}
           </div>
+        )}
+          </>
+        )}
+
+        {/* Department dashboards — shared, read-only unless you can edit */}
+        {scope === "department" && (
+          <>
+            <div className="dashboard-tabs">
+              {deptBoards.map((b) => (
+                <button
+                  key={b.id}
+                  className={`dash-tab ${b.id === activeDeptId ? "active" : ""}`}
+                  onClick={() => setActiveDeptId(b.id)}
+                >
+                  <span className="dash-tab-name">{b.department_name}</span>
+                  {!b.can_edit && <span className="dash-tab-badge">view</span>}
+                </button>
+              ))}
+            </div>
+
+            {deptActive && (
+              <div className="dashboard-board-actions">
+                {deptActive.can_edit && !deptRenaming && (
+                  <button
+                    className="ghost-btn small"
+                    onClick={() => {
+                      setDraftName(deptActive.name);
+                      setDeptRenaming(true);
+                    }}
+                  >
+                    ✎ Rename
+                  </button>
+                )}
+                {deptActive.can_edit && deptRenaming && (
+                  <input
+                    className="dash-rename-input"
+                    autoFocus
+                    value={draftName}
+                    onChange={(e) => setDraftName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") renameDeptBoard(deptActive, draftName);
+                      if (e.key === "Escape") setDeptRenaming(false);
+                    }}
+                    onBlur={() => renameDeptBoard(deptActive, draftName)}
+                  />
+                )}
+                {!deptActive.can_edit && (
+                  <span className="dash-readonly-hint">
+                    View only — managed by this department’s manager
+                  </span>
+                )}
+                {deptActive.updated_at && (
+                  <span className="dash-updated-hint">
+                    Last updated {new Date(deptActive.updated_at).toLocaleDateString()}
+                  </span>
+                )}
+              </div>
+            )}
+
+            {deptLoading && <div className="dashboard-empty">Loading dashboard…</div>}
+
+            {!deptLoading && deptWidgets.length === 0 && (
+              <div className="welcome-card">
+                <h2>No charts on this department dashboard yet</h2>
+                <p>
+                  {deptCanEdit
+                    ? "Ask the AI Assistant for a chart, then pin it to this department board."
+                    : "Your department manager hasn’t pinned any charts here yet."}
+                </p>
+                {deptCanEdit && (
+                  <Link to="/ai" className="upload-btn">Open AI Assistant</Link>
+                )}
+              </div>
+            )}
+
+            {!deptLoading && deptWidgets.length > 0 && (
+              <div className="dashboard-charts">
+                {deptWidgets.map((w) => {
+                  const spec = w.config?.spec;
+                  const stale = !!w.config?.stale;
+                  if (!spec) return null;
+                  return (
+                    <div className={`chart-panel ${stale ? "stale" : ""}`} key={w.id}>
+                      {stale && (
+                        <div className="widget-stale-bar">
+                          <span>
+                            ⚠ The source document changed — this chart may be out of date.
+                          </span>
+                          {deptCanEdit && (
+                            <button
+                              className="ghost-btn small"
+                              onClick={() => refreshDeptWidget(w)}
+                              disabled={deptRefreshingId === w.id}
+                            >
+                              {deptRefreshingId === w.id ? "Refreshing…" : "↻ Refresh"}
+                            </button>
+                          )}
+                        </div>
+                      )}
+                      <ChartBlock
+                        spec={spec}
+                        onRemove={deptCanEdit ? () => removeDeptWidget(w) : undefined}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </>
         )}
       </main>
 

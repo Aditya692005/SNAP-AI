@@ -30,6 +30,7 @@ const {
   clearPasswordResetOtp,
 } = require("../models/userModel");
 const { findByDomain, findByContactEmail, createOrganization } = require("../models/organizationModel");
+const { findDepartmentById } = require("../models/departmentModel");
 const { findRoleByName, getPermissionsForRole } = require("../models/roleModel");
 const { signToken } = require("../utils/token");
 const {
@@ -343,7 +344,12 @@ async function getCurrentUser(req, res, next) {
       throw new AppError("User not found.", 404);
     }
     const permissions = await getPermissionsForRole(user.role_id);
-    return res.status(200).json({ user: { ...user, permissions } });
+    // Resolve the department NAME (not just the id) so the profile can show it
+    // directly, and so it reflects a recent move rather than a stale login copy.
+    const department = user.department_id ? await findDepartmentById(user.department_id) : null;
+    return res
+      .status(200)
+      .json({ user: { ...user, permissions, department_name: department?.name ?? null } });
   } catch (err) {
     return next(err);
   }

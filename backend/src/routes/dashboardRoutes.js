@@ -33,7 +33,30 @@ const {
   deleteDocument: deleteDocumentRow,
   listUploadedFileNames,
 } = require("../models/documentModel");
-const { refreshWidget } = require("../services/widgetRefreshService");
+const { listDepartments } = require("../models/departmentModel");
+const {
+  getOrCreateDefaultDepartmentDashboard,
+  listDefaultDashboardsByDepartmentIds,
+  getDepartmentDashboard,
+  listDepartmentWidgets,
+  findWidgetByMessage: findDeptWidgetByMessage,
+  addDepartmentWidget,
+  getWidgetOwner,
+  updateWidgetVersioned,
+  deleteWidgetVersioned,
+  renameDepartmentDashboardVersioned,
+  touchBoard,
+} = require("../models/departmentDashboardModel");
+const {
+  isAdmin,
+  viewableDepartmentIds,
+  canViewDepartmentBoard,
+  canEditDepartmentBoard,
+} = require("../services/departmentDashboardAccess");
+const {
+  refreshWidget,
+  refreshDepartmentWidget,
+} = require("../services/widgetRefreshService");
 
 const router = express.Router();
 const RAG_URL = process.env.RAG_SERVICE_URL || "http://localhost:8000";
@@ -344,6 +367,208 @@ router.post("/widgets/:id/refresh", requireAuth, async (req, res, next) => {
   try {
     const widget = await refreshWidget(req.user.id, req.user.organization_id, req.params.id);
     return res.json(widget);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ message: err.message });
+    return next(err);
+  }
+});
+
+// ── Department dashboards ─────────────────────────────────────────────────────
+// Shared boards scoped to a department. Employees VIEW their own department's
+// board; managers EDIT only their OWN department's board (exact match, NOT the
+// subtree — each team's manager owns their board), while org admins edit any.
+// Managers also VIEW descendant boards for oversight. See
+// departmentDashboardAccess.js for the exact rules. Board renames and per-widget
+// edits/deletes are optimistic: the client passes the last-seen `version` and a
+// stale write returns 409.
+
+// Resolve a department widget and authorize the caller to EDIT it. Throws a
+// status-tagged error (404 not-a-dept-widget / 403 no edit rights).
+async function loadEditableDepartmentWidget(req) {
+  const widget = await getWidgetOwner(req.params.id);
+  if (!widget || !widget.department_dashboard_id) {
+    const e = new Error("Widget not found");
+    e.status = 404;
+    throw e;
+  }
+  const board = await getDepartmentDashboard(widget.department_dashboard_id);
+  if (!board) {
+    const e = new Error("Widget not found");
+    e.status = 404;
+    throw e;
+  }
+  if (!canEditDepartmentBoard(req.user, board)) {
+    const e = new Error("You don't have permission to edit this dashboard.");
+    e.status = 403;
+    throw e;
+  }
+  return { widget, board };
+}
+
+// GET /api/dashboard/department — the boards the caller can see, each tagged
+// with can_edit so the UI knows whether to show edit controls.
+router.get("/department", requireAuth, async (req, res, next) => {
+  try {
+    const user = req.user;
+    const orgId = user.organization_id;
+    const allDepts = await listDepartments(orgId);
+    const deptNames = new Map(allDepts.map((d) => [d.id, d.name]));
+    const visible = await viewableDepartmentIds(user, orgId, allDepts.map((d) => d.id));
+
+    // Make sure the caller's own department has a board so they never hit an
+    // empty state on their own team's dashboard.
+    if (user.department_id && visible.has(user.department_id)) {
+      await getOrCreateDefaultDepartmentDashboard(user.department_id, orgId, user.id);
+    }
+
+    const boards = await listDefaultDashboardsByDepartmentIds([...visible]);
+    const shaped = boards
+      .map((b) => ({
+        id: b.id,
+        name: b.name,
+        department_id: b.department_id,
+        department_name: deptNames.get(b.department_id) || "Department",
+        version: b.version,
+        updated_by_user_id: b.updated_by_user_id,
+        updated_at: b.updated_at,
+        can_edit: canEditDepartmentBoard(user, b),
+      }))
+      .sort((a, b) => a.department_name.localeCompare(b.department_name));
+    return res.json({ dashboards: shaped });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// GET /api/dashboard/department/:id/widgets — one board's widgets (view-gated).
+router.get("/department/:id/widgets", requireAuth, async (req, res, next) => {
+  try {
+    const board = await getDepartmentDashboard(req.params.id);
+    if (!board) return res.status(404).json({ message: "Dashboard not found" });
+    if (!(await canViewDepartmentBoard(req.user, board))) {
+      return res.status(403).json({ message: "You don't have access to this dashboard." });
+    }
+    return res.json({
+      dashboard_id: board.id,
+      version: board.version,
+      can_edit: canEditDepartmentBoard(req.user, board),
+      widgets: await listDepartmentWidgets(board.id),
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// POST /api/dashboard/department/:id/widgets — pin a chart (edit-gated).
+// Idempotent by ai_message_id (concurrent pins of different charts both win).
+router.post("/department/:id/widgets", requireAuth, async (req, res, next) => {
+  try {
+    const board = await getDepartmentDashboard(req.params.id);
+    if (!board) return res.status(404).json({ message: "Dashboard not found" });
+    if (!canEditDepartmentBoard(req.user, board)) {
+      return res.status(403).json({ message: "You don't have permission to edit this dashboard." });
+    }
+    const { widget_type, title, config, ai_message_id } = req.body || {};
+    if (widget_type !== "ai_chart") {
+      return res.status(400).json({ message: 'widget_type must be "ai_chart"' });
+    }
+    if (!config || typeof config !== "object") {
+      return res.status(400).json({ message: "config (object) is required" });
+    }
+    if (ai_message_id) {
+      const existing = await findDeptWidgetByMessage(board.id, ai_message_id);
+      if (existing) return res.status(200).json(existing);
+    }
+    const widget = await addDepartmentWidget(board.id, {
+      widget_type,
+      title: title ?? null,
+      config,
+      ai_message_id: ai_message_id ?? null,
+    });
+    touchBoard(board.id, req.user.id);
+    return res.status(201).json(widget);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// PATCH /api/dashboard/department/widgets/:id — edit a widget (edit-gated,
+// version-guarded). Body must include expected_version.
+router.patch("/department/widgets/:id", requireAuth, async (req, res, next) => {
+  try {
+    const { widget } = await loadEditableDepartmentWidget(req);
+    const expectedVersion = req.body?.expected_version;
+    if (!Number.isInteger(expectedVersion)) {
+      return res.status(400).json({ message: "expected_version (integer) is required" });
+    }
+    const allowed = {};
+    for (const k of ["title", "config", "position_x", "position_y", "width", "height"]) {
+      if (k in (req.body || {})) allowed[k] = req.body[k];
+    }
+    if (Object.keys(allowed).length === 0) {
+      return res.status(400).json({ message: "no updatable fields provided" });
+    }
+    const updated = await updateWidgetVersioned(widget.id, expectedVersion, allowed);
+    touchBoard(widget.department_dashboard_id, req.user.id);
+    return res.json(updated);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ message: err.message });
+    return next(err);
+  }
+});
+
+// DELETE /api/dashboard/department/widgets/:id?expected_version= — remove a
+// widget (edit-gated, version-guarded).
+router.delete("/department/widgets/:id", requireAuth, async (req, res, next) => {
+  try {
+    const { widget } = await loadEditableDepartmentWidget(req);
+    const expectedVersion = Number(req.query.expected_version);
+    if (!Number.isInteger(expectedVersion)) {
+      return res.status(400).json({ message: "expected_version (integer) is required" });
+    }
+    await deleteWidgetVersioned(widget.id, expectedVersion);
+    touchBoard(widget.department_dashboard_id, req.user.id);
+    return res.json({ deleted: true });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ message: err.message });
+    return next(err);
+  }
+});
+
+// POST /api/dashboard/department/widgets/:id/refresh — regenerate a stale chart
+// against the latest data (edit-gated, version-guarded). Body: expected_version.
+router.post("/department/widgets/:id/refresh", requireAuth, async (req, res, next) => {
+  try {
+    const { widget } = await loadEditableDepartmentWidget(req);
+    const expectedVersion = req.body?.expected_version;
+    if (!Number.isInteger(expectedVersion)) {
+      return res.status(400).json({ message: "expected_version (integer) is required" });
+    }
+    const updated = await refreshDepartmentWidget(widget, expectedVersion, req.user.id);
+    return res.json(updated);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ message: err.message });
+    return next(err);
+  }
+});
+
+// PATCH /api/dashboard/department/:id — rename a board (edit-gated,
+// version-guarded). Body: name, expected_version.
+router.patch("/department/:id", requireAuth, async (req, res, next) => {
+  try {
+    const board = await getDepartmentDashboard(req.params.id);
+    if (!board) return res.status(404).json({ message: "Dashboard not found" });
+    if (!canEditDepartmentBoard(req.user, board)) {
+      return res.status(403).json({ message: "You don't have permission to edit this dashboard." });
+    }
+    const name = (req.body?.name || "").trim();
+    if (!name) return res.status(400).json({ message: "name is required" });
+    const expectedVersion = req.body?.expected_version;
+    if (!Number.isInteger(expectedVersion)) {
+      return res.status(400).json({ message: "expected_version (integer) is required" });
+    }
+    const updated = await renameDepartmentDashboardVersioned(board.id, expectedVersion, name, req.user.id);
+    return res.json(updated);
   } catch (err) {
     if (err.status) return res.status(err.status).json({ message: err.message });
     return next(err);

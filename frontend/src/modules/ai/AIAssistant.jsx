@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import Sidebar from "../../components/Sidebar";
 import ToastStack from "../../components/Toast";
 import ChartBlock from "./ChartBlock";
+import { authService } from "../../services/authService";
 import "./AIAssistant.css";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
@@ -498,41 +499,69 @@ function AIAssistant() {
   }
 
   // ── pin a generated chart/table to a dashboard ───────────────────────────────
-  // Clicking "Pin" first asks WHICH dashboard to pin to (users can keep several).
-  // With zero/one dashboard there's nothing to choose, so we pin straight away.
+  // Clicking "Pin" first asks WHICH board to pin to: the user's personal
+  // dashboards plus any DEPARTMENT board they can edit (managers/admins). With a
+  // single target there's nothing to choose, so we pin straight away.
   async function pinChart(spec, aiMessageId) {
-    let dashboards = [];
+    let personal = [];
+    let department = [];
     try {
       const res = await fetch(`${API_BASE}/api/dashboard/dashboards`, {
         headers: authHeaders(),
       });
-      if (res.ok) dashboards = (await res.json()).dashboards || [];
+      if (res.ok) personal = (await res.json()).dashboards || [];
     } catch {
       // fall through — pin to the server-side default dashboard
     }
-    if (dashboards.length > 1) {
-      setPinPicker({ spec, aiMessageId, dashboards });
+    if (authService.canManageDepartmentDashboards()) {
+      try {
+        const res = await fetch(`${API_BASE}/api/dashboard/department`, {
+          headers: authHeaders(),
+        });
+        if (res.ok) {
+          department = ((await res.json()).dashboards || []).filter((b) => b.can_edit);
+        }
+      } catch {
+        // department boards unavailable — just offer personal ones
+      }
+    }
+    const targets = [
+      ...personal.map((d) => ({ kind: "personal", id: d.id, name: d.name })),
+      ...department.map((b) => ({
+        kind: "department",
+        id: b.id,
+        name: b.department_name,
+        badge: "department",
+      })),
+    ];
+    if (targets.length > 1) {
+      setPinPicker({ spec, aiMessageId, targets });
       return;
     }
-    await pinToDashboard(spec, aiMessageId, dashboards[0] || null);
+    await pinToTarget(spec, aiMessageId, targets[0] || null);
   }
 
   // aiMessageId links the pinned widget back to the message that produced it, so
   // the dashboard can regenerate the chart against fresh data on re-upload.
-  // dashboard = null → the server falls back to the default dashboard.
-  async function pinToDashboard(spec, aiMessageId, dashboard) {
-    setPinningTo(dashboard ? dashboard.id : "default");
+  // target = null → the server falls back to the user's default personal board.
+  async function pinToTarget(spec, aiMessageId, target) {
+    setPinningTo(target ? target.id : "default");
     try {
-      const res = await fetch(`${API_BASE}/api/dashboard/widgets`, {
+      const isDept = target && target.kind === "department";
+      const url = isDept
+        ? `${API_BASE}/api/dashboard/department/${target.id}/widgets`
+        : `${API_BASE}/api/dashboard/widgets`;
+      const body = {
+        widget_type: "ai_chart",
+        title: spec.title || null,
+        config: { spec },
+        ai_message_id: aiMessageId || null,
+      };
+      if (!isDept) body.dashboard_id = target ? target.id : null; // personal board id
+      const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({
-          widget_type: "ai_chart",
-          title: spec.title || null,
-          config: { spec },
-          ai_message_id: aiMessageId || null,
-          dashboard_id: dashboard ? dashboard.id : null,
-        }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -540,7 +569,9 @@ function AIAssistant() {
       }
       // 200 = it was already pinned there (idempotent); 201 = newly added.
       const alreadyPinned = res.status === 200;
-      const where = dashboard ? `"${dashboard.name}"` : "your dashboard";
+      const where = target
+        ? `"${target.name}"${isDept ? " (department)" : ""}`
+        : "your dashboard";
       notify(
         alreadyPinned
           ? `That chart is already on ${where} — no duplicate added.`
@@ -996,17 +1027,17 @@ function AIAssistant() {
               {pinPicker.spec.title || "This chart"} will appear as a widget there.
             </div>
             <div className="pin-modal-list">
-              {pinPicker.dashboards.map((d) => (
+              {pinPicker.targets.map((t) => (
                 <button
-                  key={d.id}
+                  key={`${t.kind}-${t.id}`}
                   type="button"
                   className="pin-modal-option"
                   disabled={pinningTo !== null}
-                  onClick={() => pinToDashboard(pinPicker.spec, pinPicker.aiMessageId, d)}
+                  onClick={() => pinToTarget(pinPicker.spec, pinPicker.aiMessageId, t)}
                 >
-                  <span className="pin-modal-name">{d.name}</span>
-                  {d.is_default && <span className="pin-modal-badge">default</span>}
-                  {pinningTo === d.id && <span className="pin-modal-busy">Pinning…</span>}
+                  <span className="pin-modal-name">{t.name}</span>
+                  {t.badge && <span className="pin-modal-badge">{t.badge}</span>}
+                  {pinningTo === t.id && <span className="pin-modal-busy">Pinning…</span>}
                 </button>
               ))}
             </div>

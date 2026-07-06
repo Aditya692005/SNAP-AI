@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { authService } from "../services/authService";
 import { getTheme, toggleTheme } from "../services/theme";
@@ -25,16 +25,31 @@ function UserMenu() {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [theme, setTheme] = useState(getTheme());
+  const [user, setUser] = useState(authService.getUser());
 
-  const user = authService.getUser();
+  const isPublic = PUBLIC_PATHS.includes(location.pathname);
+
+  // Re-sync the cached user from the server on mount so a department/role change
+  // made by an admin shows up (name + gating) without waiting for a re-login.
+  useEffect(() => {
+    if (isPublic || !authService.isAuthenticated()) return;
+    let alive = true;
+    authService.refreshUser().then((fresh) => {
+      if (alive && fresh) setUser(fresh);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [isPublic]);
 
   // Hide on public/auth pages and when logged out.
-  if (PUBLIC_PATHS.includes(location.pathname) || !authService.isAuthenticated() || !user) {
+  if (isPublic || !authService.isAuthenticated() || !user) {
     return null;
   }
 
   // Department is assigned later by an org_admin, so it may be unset at first.
-  const deptName = user.department_id ? "Assigned" : "Unassigned";
+  // Show a placeholder while the name is still loading for an assigned user.
+  const deptName = user.department_name || (user.department_id ? "…" : "Unassigned");
   const roleLabel = ROLE_LABELS[user.role] || user.role || "—";
 
   function onToggleTheme() {

@@ -965,3 +965,48 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* ── Scope switch: personal vs department dashboards ── */
+.scope-switch {
+  display: inline-flex;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  margin-bottom: 1rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.scope-btn {
+  padding: 0.4rem 1.1rem;
+  border-radius: 999px;
+  background: transparent;
+  border: none;
+  color: #cbd5e1;
+  font-size: 0.85rem;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.scope-btn:hover {
+  color: #f8fafc;
+}
+
+.scope-btn.active {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.28), rgba(99, 102, 241, 0.28));
+  color: #fff;
+}
+
+.dash-readonly-hint {
+  font-size: 0.8rem;
+  color: #94a3b8;
+  font-style: italic;
+}
+
+.dash-updated-hint {
+  font-size: 0.75rem;
+  color: #64748b;
+  margin-left: auto;
+}

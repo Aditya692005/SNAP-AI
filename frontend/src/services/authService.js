@@ -156,12 +156,47 @@ export const authService = {
     return user ? JSON.parse(user) : null;
   },
 
+  // Re-fetch the current user from the server and refresh the cached copy. The
+  // login payload is a snapshot, so if an admin moves the user to another
+  // department (or changes their role), the cached department_id/permissions go
+  // stale until the next login. Calling this keeps UI gating and the profile in
+  // sync without a forced re-login. Returns the fresh user (or the cached one on
+  // failure). Includes `department_name` resolved server-side.
+  async refreshUser() {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/auth/me`, { headers: authHeaders() });
+      if (!res.ok) return this.getUser();
+      const data = await res.json();
+      if (data?.user) localStorage.setItem("user", JSON.stringify(data.user));
+      return data?.user ?? this.getUser();
+    } catch {
+      return this.getUser();
+    }
+  },
+
   isAuthenticated() {
     return !!this.getToken();
   },
 
   isAdmin() {
     return this.getUser()?.role === "org_admin";
+  },
+
+  // Permission actions granted to the logged-in user (from the login payload).
+  getPermissions() {
+    return this.getUser()?.permissions || [];
+  },
+
+  getDepartmentId() {
+    return this.getUser()?.department_id || null;
+  },
+
+  // Can the user edit ANY department dashboard? Admins can (any board); a manager
+  // can only if they belong to a department (they edit their own team's board).
+  // This only gates UI affordances — the server is the source of truth.
+  canManageDepartmentDashboards() {
+    if (this.isAdmin()) return true;
+    return this.getPermissions().includes("MANAGE_DEPARTMENT_DASHBOARD") && !!this.getDepartmentId();
   },
 };
 
