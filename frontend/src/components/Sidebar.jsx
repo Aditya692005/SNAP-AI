@@ -6,6 +6,8 @@ import { HiOutlineDocumentReport } from "react-icons/hi";
 import { GrUserAdmin } from "react-icons/gr";
 import { IoSettingsSharp } from "react-icons/io5";
 import { SiSnapcraft } from "react-icons/si";
+import { IoIosArrowForward } from "react-icons/io";
+import { IoIosArrowBack } from "react-icons/io";
 import { Link, useLocation } from "react-router-dom";
 import { authService } from "../services/authService";
 import "./Sidebar.css";
@@ -56,7 +58,9 @@ function Sidebar() {
           title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           aria-label="Toggle sidebar"
         >
-          {collapsed ? "»" : "«"}
+          {/* {collapsed ? "»" : "«"} */}
+          {collapsed ? <IoIosArrowForward /> : <IoIosArrowBack />}
+          {/* {collapsed ? ">" : "<"} */}
         </button>
       </div>
 
