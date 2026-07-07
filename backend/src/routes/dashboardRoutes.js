@@ -10,6 +10,7 @@ const fetch = require("node-fetch");
 const requireAuth = require("../middleware/requireAuth");
 const {
   getIncludedMetrics,
+  getMetricsForDocumentIds,
   listStatuses,
   setIncluded,
   deleteDocument,
@@ -43,6 +44,7 @@ const {
   findByFileName: findDocByName,
   deleteDocument: deleteDocumentRow,
   listUploadedFileNames,
+  documentIdsForDepartment,
 } = require("../models/documentModel");
 const { listDepartments } = require("../models/departmentModel");
 const {
@@ -51,6 +53,7 @@ const {
   getDepartmentDashboard,
   listDepartmentWidgets,
   findWidgetByMessage: findDeptWidgetByMessage,
+  findMetricWidget: findDeptMetricWidget,
   addDepartmentWidget,
   getWidgetOwner,
   updateWidgetVersioned,
@@ -147,6 +150,44 @@ function buildKpi(metrics, metric, currency, kind) {
     : null;
 }
 
+// Shape a flat list of document_metrics rows into the dashboard payload
+// (kpis / series / breakdowns / kinds). Shared by the personal and department
+// metrics endpoints — they differ only in WHICH rows they aggregate over.
+function shapeMetrics(metrics) {
+  const currencyCounts = {};
+  for (const r of metrics) {
+    if (r.currency) currencyCounts[r.currency] = (currencyCounts[r.currency] || 0) + 1;
+  }
+  const currency = Object.entries(currencyCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+
+  const present = [...new Set(metrics.map((r) => r.metric))];
+  const departments = {};
+  const kinds = {};
+  for (const r of metrics) {
+    if (r.department && !departments[r.metric]) departments[r.metric] = r.department;
+    if (r.kind && !kinds[r.metric]) kinds[r.metric] = r.kind;
+  }
+
+  const kpis = present
+    .map((m) => {
+      const kpi = buildKpi(metrics, m, currency, kinds[m]);
+      return kpi ? { ...kpi, department: departments[m] || null, kind: kinds[m] || null } : null;
+    })
+    .filter(Boolean);
+
+  const series = {};
+  const breakdowns = {};
+  for (const m of present) {
+    const s = seriesFor(metrics, m, kinds[m]);
+    if (s.length > 0) series[m] = s;
+    const b = breakdownFor(metrics, m, kinds[m]);
+    if (b.length > 0) breakdowns[m] = b;
+  }
+
+  const sources = [...new Set(metrics.map((r) => r.source_document))];
+  return { kpis, series, breakdowns, departments, kinds, sources, currency, has_data: metrics.length > 0 };
+}
+
 // ── GET /api/dashboard/metrics ────────────────────────────────────────────────
 // Returns computed KPIs / series / breakdowns for EVERY metric present in the
 // user's included documents, each tagged with its department and value kind.
@@ -154,54 +195,7 @@ function buildKpi(metrics, metric, currency, kind) {
 // this endpoint just supplies the live numbers.
 router.get("/metrics", requireAuth, async (req, res, next) => {
   try {
-    const metrics = await getIncludedMetrics(req.user.id);
-
-    // Most common currency wins for display.
-    const currencyCounts = {};
-    for (const r of metrics) {
-      if (r.currency) currencyCounts[r.currency] = (currencyCounts[r.currency] || 0) + 1;
-    }
-    const currency =
-      Object.entries(currencyCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
-
-    // Distinct metric keys actually present, plus the department/kind each maps to.
-    const present = [...new Set(metrics.map((r) => r.metric))];
-    const departments = {};
-    const kinds = {};
-    for (const r of metrics) {
-      if (r.department && !departments[r.metric]) departments[r.metric] = r.department;
-      if (r.kind && !kinds[r.metric]) kinds[r.metric] = r.kind;
-    }
-
-    const kpis = present
-      .map((m) => {
-        const kpi = buildKpi(metrics, m, currency, kinds[m]);
-        if (!kpi) return null;
-        return { ...kpi, department: departments[m] || null, kind: kinds[m] || null };
-      })
-      .filter(Boolean);
-
-    const series = {};
-    const breakdowns = {};
-    for (const m of present) {
-      const s = seriesFor(metrics, m, kinds[m]);
-      if (s.length > 0) series[m] = s;
-      const b = breakdownFor(metrics, m, kinds[m]);
-      if (b.length > 0) breakdowns[m] = b;
-    }
-
-    const sources = [...new Set(metrics.map((r) => r.source_document))];
-
-    return res.json({
-      kpis,
-      series,
-      breakdowns,
-      departments,
-      kinds,
-      sources,
-      currency,
-      has_data: metrics.length > 0,
-    });
+    return res.json(shapeMetrics(await getIncludedMetrics(req.user.id)));
   } catch (err) {
     return next(err);
   }
@@ -586,6 +580,22 @@ router.get("/department", requireAuth, async (req, res, next) => {
   }
 });
 
+// GET /api/dashboard/department/:id/metrics — live KPI numbers for a department
+// board, aggregated over every document shared to that department (view-gated).
+router.get("/department/:id/metrics", requireAuth, async (req, res, next) => {
+  try {
+    const board = await getDepartmentDashboard(req.params.id);
+    if (!board) return res.status(404).json({ message: "Dashboard not found" });
+    if (!(await canViewDepartmentBoard(req.user, board))) {
+      return res.status(403).json({ message: "You don't have access to this dashboard." });
+    }
+    const docIds = await documentIdsForDepartment(board.department_id);
+    return res.json(shapeMetrics(await getMetricsForDocumentIds(docIds)));
+  } catch (err) {
+    return next(err);
+  }
+});
+
 // GET /api/dashboard/department/:id/widgets — one board's widgets (view-gated).
 router.get("/department/:id/widgets", requireAuth, async (req, res, next) => {
   try {
@@ -615,14 +625,21 @@ router.post("/department/:id/widgets", requireAuth, async (req, res, next) => {
       return res.status(403).json({ message: "You don't have permission to edit this dashboard." });
     }
     const { widget_type, title, config, ai_message_id } = req.body || {};
-    if (widget_type !== "ai_chart") {
-      return res.status(400).json({ message: 'widget_type must be "ai_chart"' });
+    if (widget_type !== "ai_chart" && widget_type !== "metric") {
+      return res.status(400).json({ message: 'widget_type must be "ai_chart" or "metric"' });
     }
     if (!config || typeof config !== "object") {
       return res.status(400).json({ message: "config (object) is required" });
     }
-    if (ai_message_id) {
+    if (widget_type === "metric" && !config.metric_key) {
+      return res.status(400).json({ message: "config.metric_key is required for a metric widget" });
+    }
+    if (widget_type === "ai_chart" && ai_message_id) {
       const existing = await findDeptWidgetByMessage(board.id, ai_message_id);
+      if (existing) return res.status(200).json(existing);
+    }
+    if (widget_type === "metric") {
+      const existing = await findDeptMetricWidget(board.id, config.metric_key);
       if (existing) return res.status(200).json(existing);
     }
     const widget = await addDepartmentWidget(board.id, {

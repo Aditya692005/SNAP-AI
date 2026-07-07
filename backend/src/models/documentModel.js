@@ -169,6 +169,21 @@ async function findActiveGrant(documentId, accessType, { roleId, departmentId, u
 // it for users holding SHARE_DEPARTMENT_DOCUMENTS, i.e. managers/admins) the
 // DEPARTMENT tier also matches grants to any sub-department of the user's own
 // department — a manager sees what's shared anywhere in the subtree they govern.
+// Document ids shared to a specific department (for a department dashboard's
+// aggregated metrics). Metrics are stored per document_id, so this scopes a
+// department board to every document its team can see — regardless of uploader.
+async function documentIdsForDepartment(departmentId) {
+  const notExpired = `expires_at.is.null,expires_at.gt.${new Date().toISOString()}`;
+  const { data, error } = await supabase
+    .from("document_access")
+    .select("document_id")
+    .eq("access_type", "DEPARTMENT")
+    .eq("department_id", departmentId)
+    .or(notExpired);
+  if (error) throw error;
+  return [...new Set((data || []).map((a) => a.document_id))];
+}
+
 async function accessibleDocumentIds(userId, organizationId, { subtreeDepartments = false } = {}) {
   const { data: u } = await supabase
     .from("users")
@@ -301,6 +316,7 @@ module.exports = {
   findDocumentById,
   findByFileName,
   findByContentHash,
+  documentIdsForDepartment,
   deleteDocument,
   deleteAllForUser,
   grantAccess,

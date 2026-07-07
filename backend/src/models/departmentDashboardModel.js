@@ -18,7 +18,7 @@ const supabase = require("../../supabase/supabase");
 const BOARD_FIELDS =
   "id, department_id, organization_id, name, is_default, created_by_user_id, updated_by_user_id, version, created_at, updated_at";
 const WIDGET_FIELDS =
-  "id, personal_dashboard_id, department_dashboard_id, organization_dashboard_id, widget_type, title, config, position_x, position_y, width, height, ai_message_id, version, created_at, updated_at";
+  "id, personal_dashboard_id, department_dashboard_id, organization_dashboard_id, widget_type, title, config, position_x, position_y, width, height, ai_message_id, archived_at, version, created_at, updated_at";
 
 function conflictError(message = "This board was changed by someone else. Refresh and try again.") {
   const e = new Error(message);
@@ -93,6 +93,7 @@ async function listDepartmentWidgets(dashboardId) {
     .from("dashboard_widgets")
     .select(WIDGET_FIELDS)
     .eq("department_dashboard_id", dashboardId)
+    .is("archived_at", null)
     .order("position_y", { ascending: true })
     .order("position_x", { ascending: true });
   if (error) throw error;
@@ -108,6 +109,20 @@ async function findWidgetByMessage(dashboardId, aiMessageId) {
     .eq("department_dashboard_id", dashboardId)
     .eq("ai_message_id", aiMessageId)
     .order("created_at", { ascending: true })
+    .limit(1);
+  if (error) throw error;
+  return (data && data[0]) || null;
+}
+
+// A metric widget for `metricKey` on a department board (live or trashed), or
+// null — keeps adding a metric card idempotent per board.
+async function findMetricWidget(dashboardId, metricKey) {
+  const { data, error } = await supabase
+    .from("dashboard_widgets")
+    .select(WIDGET_FIELDS)
+    .eq("department_dashboard_id", dashboardId)
+    .eq("widget_type", "metric")
+    .eq("config->>metric_key", metricKey)
     .limit(1);
   if (error) throw error;
   return (data && data[0]) || null;
@@ -247,6 +262,7 @@ module.exports = {
   getDepartmentDashboard,
   listDepartmentWidgets,
   findWidgetByMessage,
+  findMetricWidget,
   addDepartmentWidget,
   getWidgetOwner,
   updateWidgetVersioned,
