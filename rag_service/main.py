@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -513,38 +513,64 @@ def slugify_metric(name: str) -> str:
 # a plain number.
 _ALLOWED_KINDS = {"currency", "percent", "count", "number"}
 
-METRICS_PROMPT = ChatPromptTemplate.from_messages([
-    ("system",
-     "You extract quantitative business metrics from a document for a "
-     "dashboard. Return STRICT JSON only: a JSON ARRAY of metric objects, "
-     "nothing else.\n\n"
-     "Name each metric yourself based on what the document contains - you are "
-     "NOT limited to a fixed list. Use a short, generic snake_case key for the "
-     "concept (e.g. revenue, marketing_spend, deployment_frequency, "
-     "net_promoter_score) and reuse the same key for the same concept across "
-     "data points so it aggregates cleanly.\n\n"
-     "Each object:\n"
-     "{{\n"
-     '  "metric": short snake_case key naming the concept,\n'
-     '  "department": best-guess domain grouping (finance, sales, marketing, '
-     "hr, operations, engineering, ... or a new one if none fit),\n"
-     '  "kind": one of "currency","percent","count","number",\n'
-     '  "period": "YYYY" | "YYYY-MM" | "YYYY-Qn", or null if none stated,\n'
-     '  "value": a plain number (no commas, currency symbols, %, or units),\n'
-     '  "currency": ISO code like "USD" if known, else null,\n'
-     '  "category": a breakdown label (e.g. region/department/product) or null,\n'
-     '  "confidence": 0.0-1.0\n'
-     "}}\n\n"
-     "Rules:\n"
-     "- Use ONLY numbers present in the document; never invent values.\n"
-     "- Emit one object per (metric, period, category) data point you find.\n"
-     "- For rates/percentages set kind=\"percent\" and emit the plain number "
-     "(e.g. 12.5 for 12.5%); for money set kind=\"currency\".\n"
-     "- Only extract genuine quantitative metrics; skip prose and identifiers.\n"
-     "- If the document contains no such metrics, return [].\n"
-     "- Output ONLY the JSON array."),
-    ("human", "DOCUMENT:\n{dataset}"),
-])
+# Base extraction instructions (open-ended: the LLM names metrics itself). Built
+# as a plain string so per-request user-defined metrics can be appended without
+# ChatPromptTemplate brace-escaping issues.
+METRICS_SYSTEM_TEXT = (
+    "You extract quantitative business metrics from a document for a "
+    "dashboard. Return STRICT JSON only: a JSON ARRAY of metric objects, "
+    "nothing else.\n\n"
+    "Name each metric yourself based on what the document contains - you are "
+    "NOT limited to a fixed list. Use a short, generic snake_case key for the "
+    "concept (e.g. revenue, marketing_spend, deployment_frequency, "
+    "net_promoter_score) and reuse the same key for the same concept across "
+    "data points so it aggregates cleanly.\n\n"
+    "Each object:\n"
+    "{\n"
+    '  "metric": short snake_case key naming the concept,\n'
+    '  "department": best-guess domain grouping (finance, sales, marketing, '
+    "hr, operations, engineering, ... or a new one if none fit),\n"
+    '  "kind": one of "currency","percent","count","number",\n'
+    '  "period": "YYYY" | "YYYY-MM" | "YYYY-Qn", or null if none stated,\n'
+    '  "value": a plain number (no commas, currency symbols, %, or units),\n'
+    '  "currency": ISO code like "USD" if known, else null,\n'
+    '  "category": a breakdown label (e.g. region/department/product) or null,\n'
+    '  "confidence": 0.0-1.0\n'
+    "}\n\n"
+    "Rules:\n"
+    "- Use ONLY numbers present in the document; never invent values.\n"
+    "- Emit one object per (metric, period, category) data point you find.\n"
+    "- For rates/percentages set kind=\"percent\" and emit the plain number "
+    "(e.g. 12.5 for 12.5%); for money set kind=\"currency\".\n"
+    "- Only extract genuine quantitative metrics; skip prose and identifiers.\n"
+    "- If the document contains no such metrics, return [].\n"
+    "- Output ONLY the JSON array."
+)
+
+# Reuse StrOutputParser to flatten the model reply (handles str or the
+# content-block list some Gemini models return).
+_metrics_parser = StrOutputParser()
+
+
+def build_metrics_system(custom_defs: list[dict] | None) -> str:
+    """Append the user's tracked metric definitions so extraction actively looks
+    for them and reuses their exact keys, on top of open-ended discovery."""
+    text = METRICS_SYSTEM_TEXT
+    lines = []
+    for c in custom_defs or []:
+        key = slugify_metric(str(c.get("key") or c.get("metric_key") or ""))
+        if not key:
+            continue
+        label = str(c.get("label") or key)
+        desc = str(c.get("description") or "").strip()
+        lines.append(f"- {key} ({label}): {desc}" if desc else f"- {key} ({label})")
+    if lines:
+        text += (
+            "\n\nThe user is specifically tracking these metrics — actively look "
+            "for them and use these EXACT keys when the document contains them "
+            "(still extract other metrics you find too):\n" + "\n".join(lines)
+        )
+    return text
 
 
 def parse_json_array(raw: str) -> list:
@@ -600,13 +626,19 @@ def normalize_metric(raw: dict) -> dict | None:
     }
 
 
-async def extract_metrics(source: str) -> list[dict]:
-    """Pull canonical financial metrics from one uploaded document."""
+async def extract_metrics(source: str, custom_defs: list[dict] | None = None) -> list[dict]:
+    """Open-ended metric extraction from one uploaded document. `custom_defs` are
+    the user's tracked metric definitions, injected so the LLM looks for them and
+    reuses their exact keys."""
     dataset, _ = build_source_context(source)
     if not dataset.strip():
         return []
-    chain = METRICS_PROMPT | llm | StrOutputParser()
-    raw = await chain.ainvoke({"dataset": dataset})
+    system_text = build_metrics_system(custom_defs)
+    resp = await llm.ainvoke([
+        SystemMessage(content=system_text),
+        HumanMessage(content=f"DOCUMENT:\n{dataset}"),
+    ])
+    raw = _metrics_parser.invoke(resp)
     try:
         items = parse_json_array(raw)
     except (json.JSONDecodeError, ValueError):
@@ -1082,12 +1114,13 @@ async def visualize(req: VisualizeRequest):
 
 class ExtractMetricsRequest(BaseModel):
     source: str  # which uploaded document to extract dashboard metrics from
+    custom_metrics: list[dict] = []  # user-defined defs [{key,label,kind,description}]
 
 
 @app.post("/extract-metrics")
 async def extract_metrics_endpoint(req: ExtractMetricsRequest):
     try:
-        metrics = await extract_metrics(req.source)
+        metrics = await extract_metrics(req.source, req.custom_metrics)
         return {"source": req.source, "metrics": metrics}
     except ChatGoogleGenerativeAIError as e:
         msg = str(e)

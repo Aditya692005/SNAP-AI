@@ -62,15 +62,19 @@ async function setDocumentStatus(id, status) {
 // Reset an existing documents row for a re-upload of the same file: back to
 // PROCESSING with the new file's size/type. The id is kept so the RAG service's
 // per-document cleanup replaces the old chunks/tables instead of duplicating.
-async function resetDocumentForReupload(id, { mimeType, fileSize }) {
-  const { error } = await supabase
-    .from("documents")
-    .update({
-      status: "PROCESSING",
-      mime_type: mimeType ?? null,
-      file_size: fileSize ?? null,
-    })
-    .eq("id", id);
+async function resetDocumentForReupload(id, { mimeType, fileSize, contentHash }) {
+  const update = {
+    status: "PROCESSING",
+    mime_type: mimeType ?? null,
+    file_size: fileSize ?? null,
+  };
+  if (contentHash) update.content_hash = contentHash;
+  let { error } = await supabase.from("documents").update(update).eq("id", id);
+  // Pre-migration fallback if content_hash column is absent.
+  if (error && contentHash && error.code === "PGRST204") {
+    delete update.content_hash;
+    ({ error } = await supabase.from("documents").update(update).eq("id", id));
+  }
   if (error) throw error;
 }
 

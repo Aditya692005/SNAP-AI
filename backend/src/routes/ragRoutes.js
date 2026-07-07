@@ -3,6 +3,7 @@
 // Proxies /api/rag/* → Python RAG service at http://localhost:8000
 // Mount in server.js:  app.use("/api/rag", ragRoutes);
 
+const crypto = require("crypto");
 const express = require("express");
 const multer = require("multer");
 const FormData = require("form-data");
@@ -13,6 +14,7 @@ const {
   markWidgetsStaleForSource,
   markDepartmentWidgetsStaleForSource,
 } = require("../services/widgetRefreshService");
+const { extractAndStore } = require("../services/metricsService");
 const { upsertStatus, getStatus, clearAllForUser } = require("../models/metricsModel");
 const {
   createDocument,
@@ -20,6 +22,7 @@ const {
   resetDocumentForReupload,
   accessibleDocumentIds,
   findByFileName,
+  findByContentHash,
   deleteAllForUser,
 } = require("../models/documentModel");
 const {
@@ -227,6 +230,23 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
     const filename = req.file.originalname;
     const overwrite = req.body?.overwrite === "true";
 
+    // 0) Content-hash dedup: identical file BYTES already in this org under a
+    //    DIFFERENT name → refuse, so the same data can't be double-counted. A
+    //    same-name re-upload of identical content falls through to the filename
+    //    update flow below (and a same-name UPDATE with new content has a new
+    //    hash, so it isn't blocked here).
+    const contentHash = crypto.createHash("sha256").update(req.file.buffer).digest("hex");
+    const dupByHash = await findByContentHash(orgId, contentHash);
+    if (dupByHash && dupByHash.file_name !== filename) {
+      return res.status(409).json({
+        code: "DUPLICATE_CONTENT",
+        duplicate: true,
+        document_id: dupByHash.id,
+        filename: dupByHash.file_name,
+        message: `Identical content was already uploaded as "${dupByHash.file_name}" — skipped to avoid duplicate data.`,
+      });
+    }
+
     // 1) Register the document (org + uploader). A same-named document may
     //    already exist — the on-disk file, vectors, and dashboard metrics all
     //    key on the filename, so uploading it again is an UPDATE of that
@@ -253,6 +273,7 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
       await resetDocumentForReupload(existing.id, {
         mimeType: req.file.mimetype,
         fileSize: req.file.size,
+        contentHash,
       });
     } else {
       doc = await createDocument(orgId, req.user.id, {
@@ -260,6 +281,7 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
         storagePath: `uploads/${filename}`,
         mimeType: req.file.mimetype,
         fileSize: req.file.size,
+        contentHash,
       });
     }
 
@@ -297,6 +319,11 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
     if (isReupload) {
       markWidgetsStaleForSource(req.user.id, orgId, filename).catch(() => {});
     }
+
+    // Extract dashboard metrics in the background (open-ended + the user's
+    // tracked definitions), tagged with this document/org so they aggregate at
+    // any scope. Phase 4 turns newly-discovered metrics into KPI widgets.
+    extractAndStore(req.user.id, filename, { documentId: doc.id, organizationId: orgId }).catch(() => {});
     // Department boards are shared, so an UPDATE by ANY member (org-level
     // re-upload, detected above via findByFileName → `existing`) must flag their
     // charts stale — not just the re-uploader's own personal charts.
