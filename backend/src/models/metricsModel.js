@@ -6,8 +6,11 @@
 const supabase = require("../../supabase/supabase");
 
 // Replace all stored metrics for one document with a freshly extracted set, and
-// record the extraction status ('done' / 'empty').
-async function replaceDocumentMetrics(userId, source, metrics) {
+// record the extraction status ('done' / 'empty'). `opts.documentId` /
+// `opts.organizationId` tag each row so metrics can be aggregated by document
+// ACCESS at any scope (personal / department / organization), not just user_id.
+async function replaceDocumentMetrics(userId, source, metrics, opts = {}) {
+  const { documentId = null, organizationId = null } = opts;
   const { error: delErr } = await supabase
     .from("document_metrics")
     .delete()
@@ -19,6 +22,8 @@ async function replaceDocumentMetrics(userId, source, metrics) {
     const rows = metrics.map((m) => ({
       user_id: userId,
       source_document: source,
+      document_id: documentId,
+      organization_id: organizationId,
       metric: m.metric,
       department: m.department ?? null,
       kind: m.kind ?? null,
@@ -35,6 +40,19 @@ async function replaceDocumentMetrics(userId, source, metrics) {
   await upsertStatus(userId, source, {
     status: metrics.length > 0 ? "done" : "empty",
   });
+}
+
+// Metrics for a set of documents (by document_id), for department/organization
+// dashboards that aggregate across every document accessible at that scope.
+// Rows predating the document_id backfill (null) are simply not returned here.
+async function getMetricsForDocumentIds(documentIds) {
+  if (!documentIds || documentIds.length === 0) return [];
+  const { data, error } = await supabase
+    .from("document_metrics")
+    .select("source_document, metric, department, kind, period, value, currency, category, confidence, document_id")
+    .in("document_id", documentIds);
+  if (error) throw error;
+  return data || [];
 }
 
 // Upsert the status row for a document (keeps `included` unless overridden).
@@ -124,6 +142,7 @@ module.exports = {
   listStatuses,
   getStatus,
   getIncludedMetrics,
+  getMetricsForDocumentIds,
   deleteDocument,
   clearAllForUser,
 };

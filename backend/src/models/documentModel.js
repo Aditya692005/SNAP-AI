@@ -7,22 +7,50 @@
 const supabase = require("../../supabase/supabase");
 const { departmentSubtreeIds } = require("./departmentModel");
 
-async function createDocument(organizationId, userId, { title, fileName, storagePath, mimeType, fileSize }) {
-  const { data, error } = await supabase
+async function createDocument(organizationId, userId, { title, fileName, storagePath, mimeType, fileSize, contentHash }) {
+  const row = {
+    organization_id: organizationId,
+    uploaded_by_user_id: userId,
+    title: title || fileName,
+    file_name: fileName,
+    storage_path: storagePath,
+    mime_type: mimeType ?? null,
+    file_size: fileSize ?? null,
+    status: "PROCESSING",
+  };
+  if (contentHash) row.content_hash = contentHash;
+
+  let { data, error } = await supabase
     .from("documents")
-    .insert({
-      organization_id: organizationId,
-      uploaded_by_user_id: userId,
-      title: title || fileName,
-      file_name: fileName,
-      storage_path: storagePath,
-      mime_type: mimeType ?? null,
-      file_size: fileSize ?? null,
-      status: "PROCESSING",
-    })
+    .insert(row)
     .select("id, file_name, status")
     .single();
+
+  // Pre-migration fallback: if the content_hash column isn't there yet, insert
+  // without it so uploads keep working.
+  if (error && contentHash && error.code === "PGRST204") {
+    delete row.content_hash;
+    ({ data, error } = await supabase
+      .from("documents")
+      .insert(row)
+      .select("id, file_name, status")
+      .single());
+  }
   if (error) throw error;
+  return data;
+}
+
+// Existing document in the org with the same file BYTES (SHA-256), regardless of
+// file name. Returns null when none — or before the content_hash column exists.
+async function findByContentHash(organizationId, contentHash) {
+  const { data, error } = await supabase
+    .from("documents")
+    .select("id, file_name")
+    .eq("organization_id", organizationId)
+    .eq("content_hash", contentHash)
+    .limit(1)
+    .maybeSingle();
+  if (error) return null;
   return data;
 }
 
@@ -268,6 +296,7 @@ module.exports = {
   resetDocumentForReupload,
   findDocumentById,
   findByFileName,
+  findByContentHash,
   deleteDocument,
   deleteAllForUser,
   grantAccess,
