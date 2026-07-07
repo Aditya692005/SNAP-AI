@@ -6,8 +6,45 @@
 const fetch = require("node-fetch");
 const { replaceDocumentMetrics, upsertStatus } = require("../models/metricsModel");
 const { listMetricDefinitions } = require("../models/metricDefinitionsModel");
+const {
+  getOrCreateDefaultDashboard,
+  metricKeysOnDashboard,
+  addWidget,
+} = require("../models/dashboardModel");
 
 const RAG_URL = process.env.RAG_SERVICE_URL || "http://localhost:8000";
+
+// "customer_churn" -> "Customer Churn"
+function prettyLabel(key) {
+  return String(key).replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// Ensure the user's DEFAULT board has a metric card for every newly discovered
+// metric key. Keys that already have a card (live OR trashed) are skipped, so a
+// metric the user removed doesn't keep coming back. Returns the widgets added,
+// which the caller surfaces to the client for the "added metrics — undo" toast.
+async function autoAddMetricWidgets(userId, organizationId, metrics) {
+  if (!metrics || metrics.length === 0) return [];
+  const board = await getOrCreateDefaultDashboard(userId, organizationId);
+  const existing = await metricKeysOnDashboard(board.id);
+  const kindByKey = new Map();
+  for (const m of metrics) {
+    if (m.metric && !kindByKey.has(m.metric)) kindByKey.set(m.metric, m.kind || "number");
+  }
+  const added = [];
+  for (const [key, kind] of kindByKey) {
+    if (existing.has(key)) continue;
+    const label = prettyLabel(key);
+    const widget = await addWidget(board.id, {
+      widget_type: "metric",
+      title: label,
+      config: { metric_key: key, kind, label },
+    });
+    added.push(widget);
+    existing.add(key);
+  }
+  return added;
+}
 
 // Extract metrics for one document from the RAG service and store them, tagged
 // with the document/org so they aggregate at any dashboard scope. The user's
@@ -56,4 +93,4 @@ async function extractAndStore(userId, source, opts = {}) {
   }
 }
 
-module.exports = { extractAndStore };
+module.exports = { extractAndStore, autoAddMetricWidgets };

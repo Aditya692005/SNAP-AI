@@ -22,12 +22,23 @@ const {
   renameDashboard,
   deleteDashboard,
   listWidgets,
+  listArchivedWidgetsForUser,
+  listRecentMetricWidgetsForUser,
   findWidgetByMessage,
+  findMetricWidget,
+  metricKeysOnDashboard,
+  setWidgetArchived,
   getWidgetForUser,
   addWidget,
   updateWidget,
   deleteWidget,
 } = require("../models/dashboardModel");
+const {
+  listMetricDefinitions,
+  createMetricDefinition,
+  deleteMetricDefinition,
+} = require("../models/metricDefinitionsModel");
+const { extractAndStore } = require("../services/metricsService");
 const {
   findByFileName: findDocByName,
   deleteDocument: deleteDocumentRow,
@@ -72,36 +83,48 @@ function periodKey(period) {
   return year * 100;
 }
 
-// Sum values per period for one metric, sorted chronologically.
-function seriesFor(metrics, metric) {
+// Aggregate a set of values for one metric by its `kind`: money and counts SUM;
+// rates/levels/percentages AVERAGE (summing a percentage or a concentration is
+// meaningless). Unknown kinds fall back to sum.
+function aggregate(values, kind) {
+  if (!values.length) return 0;
+  const sum = values.reduce((s, v) => s + Number(v || 0), 0);
+  return kind === "percent" || kind === "number" ? sum / values.length : sum;
+}
+
+// One aggregated value per period for a metric, sorted chronologically.
+function seriesFor(metrics, metric, kind) {
   const byPeriod = new Map();
   for (const r of metrics) {
     if (r.metric !== metric || !r.period) continue;
-    byPeriod.set(r.period, (byPeriod.get(r.period) || 0) + Number(r.value || 0));
+    if (!byPeriod.has(r.period)) byPeriod.set(r.period, []);
+    byPeriod.get(r.period).push(r.value);
   }
   return [...byPeriod.entries()]
-    .map(([period, value]) => ({ period, value }))
+    .map(([period, values]) => ({ period, value: aggregate(values, kind) }))
     .sort((a, b) => periodKey(a.period) - periodKey(b.period));
 }
 
 // Sum values grouped by (period, category) for one metric (for breakdown charts).
 // Period is kept so the client can scope a breakdown to the selected period
 // instead of mixing every period/granularity together.
-function breakdownFor(metrics, metric) {
+function breakdownFor(metrics, metric, kind) {
   const byKey = new Map();
   for (const r of metrics) {
     if (r.metric !== metric || !r.category) continue;
     const period = r.period || null;
     const key = `${period ?? ""}\u0000${r.category}`;
-    const entry = byKey.get(key) || { label: r.category, value: 0, period };
-    entry.value += Number(r.value || 0);
+    const entry = byKey.get(key) || { label: r.category, values: [], period };
+    entry.values.push(r.value);
     byKey.set(key, entry);
   }
-  return [...byKey.values()].sort((a, b) => b.value - a.value);
+  return [...byKey.values()]
+    .map((e) => ({ label: e.label, period: e.period, value: aggregate(e.values, kind) }))
+    .sort((a, b) => b.value - a.value);
 }
 
-function buildKpi(metrics, metric, currency) {
-  const series = seriesFor(metrics, metric);
+function buildKpi(metrics, metric, currency, kind) {
+  const series = seriesFor(metrics, metric, kind);
   if (series.length > 0) {
     const current = series[series.length - 1];
     const prev = series.length > 1 ? series[series.length - 2] : null;
@@ -117,13 +140,10 @@ function buildKpi(metrics, metric, currency) {
       currency,
     };
   }
-  // No periodised data — fall back to a plain total if any values exist.
-  const total = metrics
-    .filter((r) => r.metric === metric)
-    .reduce((sum, r) => sum + Number(r.value || 0), 0);
-  const has = metrics.some((r) => r.metric === metric);
-  return has
-    ? { metric, value: total, period: null, delta_pct: null, currency }
+  // No periodised data — fall back to the aggregate of all values (avg/sum by kind).
+  const values = metrics.filter((r) => r.metric === metric).map((r) => r.value);
+  return values.length
+    ? { metric, value: aggregate(values, kind), period: null, delta_pct: null, currency }
     : null;
 }
 
@@ -155,7 +175,7 @@ router.get("/metrics", requireAuth, async (req, res, next) => {
 
     const kpis = present
       .map((m) => {
-        const kpi = buildKpi(metrics, m, currency);
+        const kpi = buildKpi(metrics, m, currency, kinds[m]);
         if (!kpi) return null;
         return { ...kpi, department: departments[m] || null, kind: kinds[m] || null };
       })
@@ -164,9 +184,9 @@ router.get("/metrics", requireAuth, async (req, res, next) => {
     const series = {};
     const breakdowns = {};
     for (const m of present) {
-      const s = seriesFor(metrics, m);
+      const s = seriesFor(metrics, m, kinds[m]);
       if (s.length > 0) series[m] = s;
-      const b = breakdownFor(metrics, m);
+      const b = breakdownFor(metrics, m, kinds[m]);
       if (b.length > 0) breakdowns[m] = b;
     }
 
@@ -290,19 +310,32 @@ router.post("/widgets", requireAuth, async (req, res, next) => {
       ai_message_id,
       dashboard_id,
     } = req.body || {};
-    if (widget_type !== "ai_chart") {
-      return res.status(400).json({ message: 'widget_type must be "ai_chart"' });
+    if (widget_type !== "ai_chart" && widget_type !== "metric") {
+      return res.status(400).json({ message: 'widget_type must be "ai_chart" or "metric"' });
     }
     if (!config || typeof config !== "object") {
       return res.status(400).json({ message: "config (object) is required" });
     }
+    if (widget_type === "metric" && !config.metric_key) {
+      return res.status(400).json({ message: "config.metric_key is required for a metric widget" });
+    }
     const dashboard = await resolveDashboard(req, dashboard_id);
 
-    // Idempotent pin: if this chart (same AI message) is already on the SAME
-    // dashboard, return the existing widget instead of adding a duplicate.
-    if (ai_message_id) {
+    // Idempotent add: charts key off the AI message; metric cards key off the
+    // metric_key — one card per metric per board (restore a trashed one instead
+    // of adding a second).
+    if (widget_type === "ai_chart" && ai_message_id) {
       const existing = await findWidgetByMessage(dashboard.id, ai_message_id);
       if (existing) return res.status(200).json(existing);
+    }
+    if (widget_type === "metric") {
+      const existing = await findMetricWidget(dashboard.id, config.metric_key);
+      if (existing) {
+        if (existing.archived_at) {
+          return res.status(200).json(await setWidgetArchived(dashboard.id, existing.id, false));
+        }
+        return res.status(200).json(existing);
+      }
     }
 
     const widget = await addWidget(dashboard.id, {
@@ -369,6 +402,119 @@ router.post("/widgets/:id/refresh", requireAuth, async (req, res, next) => {
     return res.json(widget);
   } catch (err) {
     if (err.status) return res.status(err.status).json({ message: err.message });
+    return next(err);
+  }
+});
+
+// ── Widget trash (recycle bin) ────────────────────────────────────────────────
+// GET /api/dashboard/widgets/trash — the user's trashed widgets (metric + chart).
+router.get("/widgets/trash", requireAuth, async (req, res, next) => {
+  try {
+    return res.json({ widgets: await listArchivedWidgetsForUser(req.user.id) });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// GET /api/dashboard/recent-widgets?since=<iso> — metric widgets auto-added
+// since a timestamp, so the client can toast "Added N metrics — Undo".
+router.get("/recent-widgets", requireAuth, async (req, res, next) => {
+  try {
+    const since = req.query.since ? String(req.query.since) : null;
+    return res.json({ widgets: await listRecentMetricWidgetsForUser(req.user.id, since) });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// PATCH /api/dashboard/widgets/:id/archive {archived} — trash or restore a widget.
+router.patch("/widgets/:id/archive", requireAuth, async (req, res, next) => {
+  try {
+    const { archived } = req.body || {};
+    if (typeof archived !== "boolean") {
+      return res.status(400).json({ message: "archived (boolean) is required" });
+    }
+    const widget = await getWidgetForUser(req.user.id, req.params.id);
+    if (!widget) return res.status(404).json({ message: "Widget not found" });
+    const updated = await setWidgetArchived(widget.personal_dashboard_id, req.params.id, archived);
+    return res.json(updated);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// ── Metric definitions (create a metric, possibly before any data exists) ─────
+// GET — the user's tracked metric definitions.
+router.get("/metric-definitions", requireAuth, async (req, res, next) => {
+  try {
+    return res.json({ metric_definitions: await listMetricDefinitions("PERSONAL", req.user.id) });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// POST — define a metric, place a (possibly empty) KPI widget for it on the
+// default board, and backfill from already-uploaded docs in the background so
+// existing data shows without a manual recompute.
+router.post("/metric-definitions", requireAuth, async (req, res, next) => {
+  try {
+    const { label, description, kind } = req.body || {};
+    if (!label || !String(label).trim()) {
+      return res.status(400).json({ message: "label is required" });
+    }
+    const metricKey = String(req.body.metric_key || label)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 40);
+    if (!metricKey) return res.status(400).json({ message: "could not derive a metric key from label" });
+
+    const def = await createMetricDefinition("PERSONAL", req.user.id, req.user.organization_id, {
+      metric_key: metricKey,
+      label: String(label).trim(),
+      description: description ?? null,
+      kind: kind || "number",
+    });
+
+    // Put a metric widget on the default board (idempotent / un-trashes).
+    const board = await getOrCreateDefaultDashboard(req.user.id, req.user.organization_id);
+    const existing = await findMetricWidget(board.id, metricKey);
+    if (existing) {
+      if (existing.archived_at) await setWidgetArchived(board.id, existing.id, false);
+    } else {
+      await addWidget(board.id, {
+        widget_type: "metric",
+        title: def.label,
+        config: { metric_key: metricKey, kind: def.kind, label: def.label },
+      });
+    }
+
+    // Backfill: re-extract the user's existing docs so a just-defined metric
+    // pulls values from files uploaded earlier. Background + best effort.
+    listUploadedFileNames(req.user.id, req.user.organization_id)
+      .then((sources) =>
+        sources.reduce(
+          (chain, s) =>
+            chain.then(() =>
+              extractAndStore(req.user.id, s, { organizationId: req.user.organization_id }).catch(() => {})
+            ),
+          Promise.resolve()
+        )
+      )
+      .catch(() => {});
+
+    return res.status(201).json(def);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// DELETE — remove a definition (its widget/data are managed via the trash).
+router.delete("/metric-definitions/:id", requireAuth, async (req, res, next) => {
+  try {
+    await deleteMetricDefinition(req.params.id, req.user.id);
+    return res.json({ deleted: true });
+  } catch (err) {
     return next(err);
   }
 });

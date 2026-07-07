@@ -14,7 +14,7 @@ const {
   markWidgetsStaleForSource,
   markDepartmentWidgetsStaleForSource,
 } = require("../services/widgetRefreshService");
-const { extractAndStore } = require("../services/metricsService");
+const { extractAndStore, autoAddMetricWidgets } = require("../services/metricsService");
 const { upsertStatus, getStatus, clearAllForUser } = require("../models/metricsModel");
 const {
   createDocument,
@@ -322,8 +322,16 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
 
     // Extract dashboard metrics in the background (open-ended + the user's
     // tracked definitions), tagged with this document/org so they aggregate at
-    // any scope. Phase 4 turns newly-discovered metrics into KPI widgets.
-    extractAndStore(req.user.id, filename, { documentId: doc.id, organizationId: orgId }).catch(() => {});
+    // any scope, then auto-add a KPI card for each newly discovered metric on
+    // the default board. The client polls /recent-widgets to show an
+    // "added metrics — undo" toast.
+    extractAndStore(req.user.id, filename, { documentId: doc.id, organizationId: orgId })
+      .then((r) => {
+        if (r.ok && r.metrics.length) {
+          return autoAddMetricWidgets(req.user.id, orgId, r.metrics);
+        }
+      })
+      .catch(() => {});
     // Department boards are shared, so an UPDATE by ANY member (org-level
     // re-upload, detected above via findByFileName → `existing`) must flag their
     // charts stale — not just the re-uploader's own personal charts.

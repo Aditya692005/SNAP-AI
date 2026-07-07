@@ -10,7 +10,7 @@ const supabase = require("../../supabase/supabase");
 
 const DASHBOARD_FIELDS = "id, user_id, organization_id, name, is_default, created_at, updated_at";
 const WIDGET_FIELDS =
-  "id, personal_dashboard_id, widget_type, title, config, position_x, position_y, width, height, ai_message_id, created_at, updated_at";
+  "id, personal_dashboard_id, widget_type, title, config, position_x, position_y, width, height, ai_message_id, archived_at, created_at, updated_at";
 
 // Fetch the user's default personal dashboard, creating one on first use.
 // Relies on the partial unique index on (user_id) WHERE is_default to stay
@@ -115,15 +115,98 @@ async function deleteDashboard(userId, dashboardId) {
   return (data || []).length > 0;
 }
 
+// Live widgets on a dashboard (archived/trashed ones excluded).
 async function listWidgets(dashboardId) {
   const { data, error } = await supabase
     .from("dashboard_widgets")
     .select(WIDGET_FIELDS)
     .eq("personal_dashboard_id", dashboardId)
+    .is("archived_at", null)
     .order("position_y", { ascending: true })
     .order("position_x", { ascending: true });
   if (error) throw error;
   return data || [];
+}
+
+// All of the user's trashed widgets, across their dashboards (for the trash UI).
+async function listArchivedWidgetsForUser(userId) {
+  const { data: dashes, error: dErr } = await supabase
+    .from("personal_dashboards")
+    .select("id")
+    .eq("user_id", userId);
+  if (dErr) throw dErr;
+  const ids = (dashes || []).map((d) => d.id);
+  if (ids.length === 0) return [];
+  const { data, error } = await supabase
+    .from("dashboard_widgets")
+    .select(WIDGET_FIELDS)
+    .in("personal_dashboard_id", ids)
+    .not("archived_at", "is", null)
+    .order("archived_at", { ascending: false });
+  if (error) throw error;
+  return data || [];
+}
+
+// Recently auto-added metric widgets across the user's boards, for the
+// "added metrics — undo" toast. `sinceIso` bounds it to the last upload.
+async function listRecentMetricWidgetsForUser(userId, sinceIso) {
+  const { data: dashes, error: dErr } = await supabase
+    .from("personal_dashboards")
+    .select("id")
+    .eq("user_id", userId);
+  if (dErr) throw dErr;
+  const ids = (dashes || []).map((d) => d.id);
+  if (ids.length === 0) return [];
+  let q = supabase
+    .from("dashboard_widgets")
+    .select(WIDGET_FIELDS)
+    .in("personal_dashboard_id", ids)
+    .eq("widget_type", "metric")
+    .is("archived_at", null)
+    .order("created_at", { ascending: false });
+  if (sinceIso) q = q.gte("created_at", sinceIso);
+  const { data, error } = await q;
+  if (error) throw error;
+  return data || [];
+}
+
+// A metric widget for `metricKey` on this dashboard (live or trashed), or null.
+// Keeps auto-add / manual-add idempotent — one card per metric per board.
+async function findMetricWidget(dashboardId, metricKey) {
+  const { data, error } = await supabase
+    .from("dashboard_widgets")
+    .select(WIDGET_FIELDS)
+    .eq("personal_dashboard_id", dashboardId)
+    .eq("widget_type", "metric")
+    .eq("config->>metric_key", metricKey)
+    .limit(1);
+  if (error) throw error;
+  return (data && data[0]) || null;
+}
+
+// Metric keys that already have a widget on this dashboard (live OR trashed), so
+// auto-add never re-creates a card the user removed.
+async function metricKeysOnDashboard(dashboardId) {
+  const { data, error } = await supabase
+    .from("dashboard_widgets")
+    .select("config")
+    .eq("personal_dashboard_id", dashboardId)
+    .eq("widget_type", "metric");
+  if (error) throw error;
+  return new Set((data || []).map((w) => w.config?.metric_key).filter(Boolean));
+}
+
+// Archive (trash) or restore a widget the user owns.
+async function setWidgetArchived(dashboardId, widgetId, archived) {
+  const { data, error } = await supabase
+    .from("dashboard_widgets")
+    .update({ archived_at: archived ? new Date().toISOString() : null, updated_at: new Date().toISOString() })
+    .eq("id", widgetId)
+    .eq("personal_dashboard_id", dashboardId)
+    .select(WIDGET_FIELDS)
+    .single();
+  if (error) throw error;
+  return data;
 }
 
 // The earliest widget on this dashboard pinned from a given AI message, or null.
@@ -224,7 +307,12 @@ module.exports = {
   renameDashboard,
   deleteDashboard,
   listWidgets,
+  listArchivedWidgetsForUser,
+  listRecentMetricWidgetsForUser,
   findWidgetByMessage,
+  findMetricWidget,
+  metricKeysOnDashboard,
+  setWidgetArchived,
   getWidgetForUser,
   addWidget,
   updateWidget,
