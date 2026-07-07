@@ -11,6 +11,68 @@ function authHeaders() {
   return { Authorization: `Bearer ${localStorage.getItem("token")}` };
 }
 
+// Format a KPI value by its kind (currency/percent/count/number).
+function formatMetricValue(value, kind, currency) {
+  if (value == null || Number.isNaN(Number(value))) return "—";
+  const n = Number(value);
+  if (kind === "percent") return `${(Math.round(n * 100) / 100).toLocaleString()}%`;
+  if (kind === "currency") {
+    try {
+      return n.toLocaleString(undefined, {
+        style: "currency",
+        currency: currency || "USD",
+        maximumFractionDigits: Math.abs(n) >= 1000 ? 0 : 2,
+      });
+    } catch {
+      return n.toLocaleString();
+    }
+  }
+  return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+// A KPI card widget. Reads its live value from the metrics payload (kpis[]) by
+// the widget's config.metric_key; renders "—" until data exists (a metric can
+// be created before any document contains it).
+function MetricCard({ widget, metrics, onArchive }) {
+  const key = widget.config?.metric_key;
+  const label = widget.config?.label || widget.title || key;
+  const kpi = (metrics?.kpis || []).find((k) => k.metric === key);
+  const kind = kpi?.kind || widget.config?.kind;
+  const delta = kpi?.delta_pct;
+  return (
+    <div className="kpi-card-wrap">
+      {onArchive && (
+        <button
+          type="button"
+          className="kpi-remove"
+          title="Remove this metric (moves it to Trash)"
+          aria-label={`Remove ${label}`}
+          onClick={() => onArchive(widget.id)}
+        >
+          ×
+        </button>
+      )}
+      <div className="kpi-card">
+        <div className="kpi-top">
+          <span className="kpi-label">{label}</span>
+        </div>
+        <span className="kpi-value">
+          {kpi ? formatMetricValue(kpi.value, kind, metrics?.currency) : "—"}
+        </span>
+        <div className="kpi-bottom">
+          {delta != null ? (
+            <span className={`kpi-delta ${delta >= 0 ? "up" : "down"}`}>
+              {delta >= 0 ? "▲" : "▼"} {Math.abs(delta).toFixed(1)}%
+            </span>
+          ) : (
+            <span className="kpi-delta muted">{kpi?.period || "no data yet"}</span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // The personal dashboard is a board of charts the user pinned from the AI
 // Assistant (widget_type "ai_chart"). Nothing is auto-added; a widget only
 // appears when the user explicitly pins a chart. When a document is re-uploaded
@@ -34,6 +96,11 @@ function Dashboard() {
   const [creating, setCreating] = useState(false); // inline "new dashboard" input
   const [renaming, setRenaming] = useState(false); // inline rename of active board
   const [draftName, setDraftName] = useState("");
+  const [metrics, setMetrics] = useState(null); // personal live KPI numbers
+  const [deptMetrics, setDeptMetrics] = useState(null); // department live KPI numbers
+  const [trashOpen, setTrashOpen] = useState(false);
+  const [trash, setTrash] = useState([]); // archived widgets
+  const [toast, setToast] = useState(null); // { widgets:[...], } auto-added notice
 
   // Department dashboards: shared boards scoped to a department. The server
   // decides which the user can see and whether they can edit (can_edit).
@@ -98,14 +165,44 @@ function Dashboard() {
   async function refreshWidgets(id) {
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/dashboard/widgets?dashboard_id=${id}`, {
-        headers: authHeaders(),
-      });
-      if (res.ok) setWidgets((await res.json()).widgets || []);
+      const [wRes, mRes] = await Promise.all([
+        fetch(`${API_BASE}/api/dashboard/widgets?dashboard_id=${id}`, { headers: authHeaders() }),
+        fetch(`${API_BASE}/api/dashboard/metrics`, { headers: authHeaders() }),
+      ]);
+      if (wRes.ok) setWidgets((await wRes.json()).widgets || []);
+      if (mRes.ok) setMetrics(await mRes.json());
     } catch {
       // leave empty state
     } finally {
       setLoading(false);
+    }
+    loadTrash();
+    checkRecentWidgets();
+  }
+
+  async function loadTrash() {
+    try {
+      const res = await fetch(`${API_BASE}/api/dashboard/widgets/trash`, { headers: authHeaders() });
+      if (res.ok) setTrash((await res.json()).widgets || []);
+    } catch {
+      /* leave as-is */
+    }
+  }
+
+  // Show a one-click-undo toast for metric widgets auto-added since we last looked
+  // (e.g. after an upload discovered new metrics). `since` is remembered locally.
+  async function checkRecentWidgets() {
+    const key = "dashboardRecentSeen";
+    const since = localStorage.getItem(key);
+    try {
+      const url = `${API_BASE}/api/dashboard/recent-widgets${since ? `?since=${encodeURIComponent(since)}` : ""}`;
+      const res = await fetch(url, { headers: authHeaders() });
+      if (!res.ok) return;
+      const added = (await res.json()).widgets || [];
+      localStorage.setItem(key, new Date().toISOString());
+      if (added.length > 0 && since) setToast({ widgets: added });
+    } catch {
+      /* no toast on failure */
     }
   }
 
@@ -188,17 +285,78 @@ function Dashboard() {
     }
   }
 
-  async function removeWidget(id) {
+  // The × on a widget sends it to the trash (soft delete), not gone for good.
+  async function archiveWidget(id) {
     const prev = widgets;
     setWidgets((w) => w.filter((x) => x.id !== id));
     try {
-      const res = await fetch(`${API_BASE}/api/dashboard/widgets/${id}`, {
+      const res = await fetch(`${API_BASE}/api/dashboard/widgets/${id}/archive`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ archived: true }),
+      });
+      if (!res.ok) throw new Error();
+      loadTrash();
+    } catch {
+      setWidgets(prev); // restore on failure
+    }
+  }
+
+  async function restoreWidget(id) {
+    try {
+      await fetch(`${API_BASE}/api/dashboard/widgets/${id}/archive`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ archived: false }),
+      });
+      setTrash((t) => t.filter((x) => x.id !== id));
+      if (activeId) refreshWidgets(activeId);
+    } catch {
+      /* resync on next load */
+    }
+  }
+
+  async function purgeWidget(id, label) {
+    if (!window.confirm(`Permanently delete "${label}"? This can't be undone.`)) return;
+    try {
+      await fetch(`${API_BASE}/api/dashboard/widgets/${id}`, {
         method: "DELETE",
         headers: authHeaders(),
       });
-      if (!res.ok) throw new Error();
+      setTrash((t) => t.filter((x) => x.id !== id));
     } catch {
-      setWidgets(prev); // restore on failure
+      /* resync on next load */
+    }
+  }
+
+  // Undo an auto-add notice: trash every widget it added.
+  async function undoRecent(added) {
+    setToast(null);
+    await Promise.all(
+      added.map((w) =>
+        fetch(`${API_BASE}/api/dashboard/widgets/${w.id}/archive`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: JSON.stringify({ archived: true }),
+        }).catch(() => {})
+      )
+    );
+    if (activeId) refreshWidgets(activeId);
+  }
+
+  async function addMetric() {
+    const label = window.prompt("Track a new metric — what is it called? (e.g. Customer Churn)");
+    if (!label || !label.trim()) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/dashboard/metric-definitions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ label: label.trim() }),
+      });
+      if (!res.ok) throw new Error();
+      if (activeId) refreshWidgets(activeId);
+    } catch {
+      window.alert("Could not create the metric.");
     }
   }
 
@@ -238,9 +396,11 @@ function Dashboard() {
   async function refreshDeptWidgets(id) {
     setDeptLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/dashboard/department/${id}/widgets`, {
-        headers: authHeaders(),
-      });
+      const [res, mRes] = await Promise.all([
+        fetch(`${API_BASE}/api/dashboard/department/${id}/widgets`, { headers: authHeaders() }),
+        fetch(`${API_BASE}/api/dashboard/department/${id}/metrics`, { headers: authHeaders() }),
+      ]);
+      if (mRes.ok) setDeptMetrics(await mRes.json());
       if (res.ok) {
         const data = await res.json();
         setDeptWidgets(data.widgets || []);
@@ -499,6 +659,14 @@ function Dashboard() {
                 🗑 Delete
               </button>
             )}
+            <button className="ghost-btn small" onClick={addMetric}>
+              ＋ Add metric
+            </button>
+            {trash.length > 0 && (
+              <button className="ghost-btn small" onClick={() => setTrashOpen(true)}>
+                🗑 Trash <span className="sources-count">{trash.length}</span>
+              </button>
+            )}
           </div>
         )}
 
@@ -506,42 +674,55 @@ function Dashboard() {
 
         {!loading && widgets.length === 0 && (
           <div className="welcome-card">
-            <h2>No charts pinned yet</h2>
+            <h2>Nothing on this dashboard yet</h2>
             <p>
-              Head to the AI Assistant, ask for a chart (e.g. “bar chart of sales
-              by region”), and pin it — it’ll show up here on your dashboard.
+              Upload documents (metric cards appear automatically), add a metric to
+              track, or pin a chart from the AI Assistant.
             </p>
             <Link to="/ai" className="upload-btn">Open AI Assistant</Link>
           </div>
         )}
 
+        {/* Metric KPI cards */}
+        {!loading && widgets.some((w) => w.widget_type === "metric") && (
+          <div className="kpi-row">
+            {widgets
+              .filter((w) => w.widget_type === "metric")
+              .map((w) => (
+                <MetricCard key={w.id} widget={w} metrics={metrics} onArchive={archiveWidget} />
+              ))}
+          </div>
+        )}
+
         {/* Pinned charts */}
-        {!loading && widgets.length > 0 && (
+        {!loading && widgets.some((w) => w.widget_type === "ai_chart") && (
           <div className="dashboard-charts">
-            {widgets.map((w) => {
-              const spec = w.config?.spec;
-              const stale = !!w.config?.stale;
-              if (!spec) return null;
-              return (
-                <div className={`chart-panel ${stale ? "stale" : ""}`} key={w.id}>
-                  {stale && (
-                    <div className="widget-stale-bar">
-                      <span>
-                        ⚠ The source document changed — this chart may be out of date.
-                      </span>
-                      <button
-                        className="ghost-btn small"
-                        onClick={() => refreshWidget(w.id)}
-                        disabled={refreshingId === w.id}
-                      >
-                        {refreshingId === w.id ? "Refreshing…" : "↻ Refresh"}
-                      </button>
-                    </div>
-                  )}
-                  <ChartBlock spec={spec} onRemove={() => removeWidget(w.id)} />
-                </div>
-              );
-            })}
+            {widgets
+              .filter((w) => w.widget_type === "ai_chart")
+              .map((w) => {
+                const spec = w.config?.spec;
+                const stale = !!w.config?.stale;
+                if (!spec) return null;
+                return (
+                  <div className={`chart-panel ${stale ? "stale" : ""}`} key={w.id}>
+                    {stale && (
+                      <div className="widget-stale-bar">
+                        <span>
+                          ⚠ The source document changed — this chart may be out of date.
+                        </span>
+                        <button
+                          className="ghost-btn small"
+                          onClick={() => refreshWidget(w.id)}
+                          disabled={refreshingId === w.id}
+                        >
+                          {refreshingId === w.id ? "Refreshing…" : "↻ Refresh"}
+                        </button>
+                      </div>
+                    )}
+                    <ChartBlock spec={spec} onRemove={() => archiveWidget(w.id)} />
+                  </div>
+                );
+              })}
           </div>
         )}
           </>
@@ -618,37 +799,55 @@ function Dashboard() {
               </div>
             )}
 
-            {!deptLoading && deptWidgets.length > 0 && (
+            {/* Department metric KPI cards (removal is manager-only, versioned) */}
+            {!deptLoading && deptWidgets.some((w) => w.widget_type === "metric") && (
+              <div className="kpi-row">
+                {deptWidgets
+                  .filter((w) => w.widget_type === "metric")
+                  .map((w) => (
+                    <MetricCard
+                      key={w.id}
+                      widget={w}
+                      metrics={deptMetrics}
+                      onArchive={deptCanEdit ? () => removeDeptWidget(w) : undefined}
+                    />
+                  ))}
+              </div>
+            )}
+
+            {!deptLoading && deptWidgets.some((w) => w.widget_type === "ai_chart") && (
               <div className="dashboard-charts">
-                {deptWidgets.map((w) => {
-                  const spec = w.config?.spec;
-                  const stale = !!w.config?.stale;
-                  if (!spec) return null;
-                  return (
-                    <div className={`chart-panel ${stale ? "stale" : ""}`} key={w.id}>
-                      {stale && (
-                        <div className="widget-stale-bar">
-                          <span>
-                            ⚠ The source document changed — this chart may be out of date.
-                          </span>
-                          {deptCanEdit && (
-                            <button
-                              className="ghost-btn small"
-                              onClick={() => refreshDeptWidget(w)}
-                              disabled={deptRefreshingId === w.id}
-                            >
-                              {deptRefreshingId === w.id ? "Refreshing…" : "↻ Refresh"}
-                            </button>
-                          )}
-                        </div>
-                      )}
-                      <ChartBlock
-                        spec={spec}
-                        onRemove={deptCanEdit ? () => removeDeptWidget(w) : undefined}
-                      />
-                    </div>
-                  );
-                })}
+                {deptWidgets
+                  .filter((w) => w.widget_type === "ai_chart")
+                  .map((w) => {
+                    const spec = w.config?.spec;
+                    const stale = !!w.config?.stale;
+                    if (!spec) return null;
+                    return (
+                      <div className={`chart-panel ${stale ? "stale" : ""}`} key={w.id}>
+                        {stale && (
+                          <div className="widget-stale-bar">
+                            <span>
+                              ⚠ The source document changed — this chart may be out of date.
+                            </span>
+                            {deptCanEdit && (
+                              <button
+                                className="ghost-btn small"
+                                onClick={() => refreshDeptWidget(w)}
+                                disabled={deptRefreshingId === w.id}
+                              >
+                                {deptRefreshingId === w.id ? "Refreshing…" : "↻ Refresh"}
+                              </button>
+                            )}
+                          </div>
+                        )}
+                        <ChartBlock
+                          spec={spec}
+                          onRemove={deptCanEdit ? () => removeDeptWidget(w) : undefined}
+                        />
+                      </div>
+                    );
+                  })}
               </div>
             )}
           </>
@@ -710,6 +909,69 @@ function Dashboard() {
           </div>
         )}
       </aside>
+
+      {/* Trash drawer — removed widgets: restore or delete permanently */}
+      <div className={`sources-overlay ${trashOpen ? "open" : ""}`} onClick={() => setTrashOpen(false)} />
+      <aside className={`sources-drawer ${trashOpen ? "open" : ""}`} aria-hidden={!trashOpen}>
+        <div className="drawer-header">
+          <div>
+            <h2>Trash</h2>
+            <span className="sources-hint">Restore a widget or delete it permanently</span>
+          </div>
+          <button className="drawer-close" onClick={() => setTrashOpen(false)} aria-label="Close trash">
+            ✕
+          </button>
+        </div>
+        {trash.length === 0 ? (
+          <div className="dashboard-empty">Trash is empty.</div>
+        ) : (
+          <div className="sources-list">
+            {trash.map((w) => {
+              const label =
+                w.widget_type === "metric"
+                  ? w.config?.label || w.config?.metric_key
+                  : w.title || w.config?.spec?.title || "Chart";
+              return (
+                <div className="source-row" key={w.id}>
+                  <div className="source-info">
+                    <span className="source-name">
+                      {w.widget_type === "metric" ? "📊" : "📈"} {label}
+                    </span>
+                  </div>
+                  <div className="source-actions">
+                    <button type="button" className="ghost-btn small" onClick={() => restoreWidget(w.id)}>
+                      ↩ Restore
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost-btn small danger"
+                      onClick={() => purgeWidget(w.id, label)}
+                    >
+                      🗑 Delete
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </aside>
+
+      {/* Auto-added metrics notice with one-click undo */}
+      {toast && (
+        <div className="dashboard-toast">
+          <span>
+            Added {toast.widgets.length} metric{toast.widgets.length > 1 ? "s" : ""} to your
+            dashboard: {toast.widgets.map((w) => w.config?.label || w.config?.metric_key).join(", ")}
+          </span>
+          <button className="toast-undo" onClick={() => undoRecent(toast.widgets)}>
+            Undo
+          </button>
+          <button className="toast-dismiss" onClick={() => setToast(null)} aria-label="Dismiss">
+            ✕
+          </button>
+        </div>
+      )}
     </div>
   );
 }

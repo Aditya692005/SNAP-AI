@@ -1010,3 +1010,77 @@
   color: #64748b;
   margin-left: auto;
 }
+
+/* Metric widget hover-remove (×) + auto-add toast (reconciliation) */
+.kpi-card-wrap {
+  position: relative;
+  display: flex;
+}
+.kpi-card-wrap > .kpi-card {
+  flex: 1;
+}
+.kpi-remove {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 2;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.35);
+  color: #e2e8f0;
+  font-size: 0.95rem;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, background 0.12s ease;
+}
+.kpi-card-wrap:hover .kpi-remove {
+  opacity: 1;
+}
+.kpi-remove:hover {
+  background: #ef4444;
+  color: #fff;
+}
+
+.dashboard-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  max-width: 90vw;
+  padding: 0.7rem 1rem;
+  background: #1e293b;
+  color: #e2e8f0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+  font-size: 0.9rem;
+}
+.toast-undo {
+  border: none;
+  background: #6366f1;
+  color: #fff;
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-weight: 600;
+}
+.toast-undo:hover {
+  background: #4f46e5;
+}
+.toast-dismiss {
+  border: none;
+  background: none;
+  color: #94a3b8;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
