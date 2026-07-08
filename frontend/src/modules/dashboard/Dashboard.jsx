@@ -30,15 +30,59 @@ function formatMetricValue(value, kind, currency) {
   return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 
-// A KPI card widget. Reads its live value from the metrics payload (kpis[]) by
-// the widget's config.metric_key; renders "—" until data exists (a metric can
-// be created before any document contains it).
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// Human-friendly period label for the granularity dropdown. Handles quarterly
+// ("2024-Q1" → "Q1 2024"), monthly ("2024-03" → "Mar 2024") and plain years,
+// falling back to the raw string for anything else.
+function formatPeriod(period) {
+  if (!period) return "";
+  const p = String(period);
+  const q = /^(\d{4})[-\s]?Q([1-4])$/i.exec(p);
+  if (q) return `Q${q[2]} ${q[1]}`;
+  const m = /^(\d{4})-(\d{2})$/.exec(p);
+  if (m) {
+    const mi = Number(m[2]) - 1;
+    if (mi >= 0 && mi < 12) return `${MONTHS[mi]} ${m[1]}`;
+  }
+  return p;
+}
+
+// A KPI card widget. Reads its live value from the metrics payload by the
+// widget's config.metric_key; renders "—" until data exists (a metric can be
+// created before any document contains it).
+//
+// Time-bound metrics (e.g. royalties reported per quarter) carry a `series` of
+// {period, value} points. By default the card shows the LATEST period (the
+// KPI), but when more than one period exists the user can pick any quarter/year
+// from a dropdown to see that period's value and its change vs the one before.
 function MetricCard({ widget, metrics, onArchive }) {
   const key = widget.config?.metric_key;
   const label = widget.config?.label || widget.title || key;
   const kpi = (metrics?.kpis || []).find((k) => k.metric === key);
   const kind = kpi?.kind || widget.config?.kind;
-  const delta = kpi?.delta_pct;
+  const series = metrics?.series?.[key] || []; // [{period, value}] chronological
+
+  // null = "Latest" (the KPI). Otherwise a specific period string from `series`.
+  const [period, setPeriod] = useState(null);
+
+  // Resolve which point to display. For a chosen period, show its value and the
+  // delta vs the preceding period; otherwise fall back to the KPI (latest).
+  let value = kpi ? kpi.value : null;
+  let shownPeriod = kpi?.period || null;
+  let delta = kpi?.delta_pct ?? null;
+  if (period != null && series.length) {
+    const idx = series.findIndex((p) => p.period === period);
+    const point = idx >= 0 ? series[idx] : null;
+    const prev = idx > 0 ? series[idx - 1] : null;
+    value = point ? point.value : null;
+    shownPeriod = point ? point.period : period;
+    delta =
+      point && prev && prev.value !== 0
+        ? ((point.value - prev.value) / Math.abs(prev.value)) * 100
+        : null;
+  }
+
   return (
     <div className="kpi-card-wrap">
       {onArchive && (
@@ -55,17 +99,38 @@ function MetricCard({ widget, metrics, onArchive }) {
       <div className="kpi-card">
         <div className="kpi-top">
           <span className="kpi-label">{label}</span>
+          {series.length > 1 && (
+            <select
+              className="kpi-period-select"
+              value={period ?? ""}
+              onChange={(e) => setPeriod(e.target.value || null)}
+              // Keep clicks on the dropdown from reaching the card / × button.
+              onClick={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+              title="View a specific period"
+            >
+              <option value="">
+                Latest{kpi?.period ? ` · ${formatPeriod(kpi.period)}` : ""}
+              </option>
+              {[...series].reverse().map((p) => (
+                <option key={p.period} value={p.period}>
+                  {formatPeriod(p.period)}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
         <span className="kpi-value">
-          {kpi ? formatMetricValue(kpi.value, kind, metrics?.currency) : "—"}
+          {value != null ? formatMetricValue(value, kind, metrics?.currency) : "—"}
         </span>
         <div className="kpi-bottom">
           {delta != null ? (
             <span className={`kpi-delta ${delta >= 0 ? "up" : "down"}`}>
               {delta >= 0 ? "▲" : "▼"} {Math.abs(delta).toFixed(1)}%
+              {shownPeriod ? <span className="kpi-period-tag"> · {formatPeriod(shownPeriod)}</span> : null}
             </span>
           ) : (
-            <span className="kpi-delta muted">{kpi?.period || "no data yet"}</span>
+            <span className="kpi-delta muted">{formatPeriod(shownPeriod) || "no data yet"}</span>
           )}
         </div>
       </div>
@@ -96,6 +161,9 @@ function Dashboard() {
   const [creating, setCreating] = useState(false); // inline "new dashboard" input
   const [renaming, setRenaming] = useState(false); // inline rename of active board
   const [draftName, setDraftName] = useState("");
+  const [addingMetric, setAddingMetric] = useState(false); // inline "add metric" input
+  const [metricDraft, setMetricDraft] = useState("");
+  const [metricError, setMetricError] = useState(null); // shown under the input on failure
   const [metrics, setMetrics] = useState(null); // personal live KPI numbers
   const [deptMetrics, setDeptMetrics] = useState(null); // department live KPI numbers
   const [trashOpen, setTrashOpen] = useState(false);
@@ -344,19 +412,31 @@ function Dashboard() {
     if (activeId) refreshWidgets(activeId);
   }
 
-  async function addMetric() {
-    const label = window.prompt("Track a new metric — what is it called? (e.g. Customer Churn)");
-    if (!label || !label.trim()) return;
+  // Create a metric from the inline input. Kept off window.prompt() on purpose —
+  // browsers silently suppress prompt() in many contexts, which made the button
+  // look dead. The inline <input> below drives this instead.
+  async function submitMetric() {
+    const label = metricDraft.trim();
+    if (!label) {
+      setAddingMetric(false);
+      setMetricError(null);
+      return;
+    }
     try {
       const res = await fetch(`${API_BASE}/api/dashboard/metric-definitions`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({ label: label.trim() }),
+        // Pin the metric card to the board the user is looking at, not the
+        // default board (otherwise it lands out of sight on non-default boards).
+        body: JSON.stringify({ label, dashboard_id: activeId }),
       });
       if (!res.ok) throw new Error();
+      setMetricDraft("");
+      setAddingMetric(false);
+      setMetricError(null);
       if (activeId) refreshWidgets(activeId);
     } catch {
-      window.alert("Could not create the metric.");
+      setMetricError("Could not create the metric. Please try again.");
     }
   }
 
@@ -659,9 +739,43 @@ function Dashboard() {
                 🗑 Delete
               </button>
             )}
-            <button className="ghost-btn small" onClick={addMetric}>
-              ＋ Add metric
-            </button>
+            {addingMetric ? (
+              <span className="add-metric-inline">
+                <input
+                  className="dash-rename-input"
+                  autoFocus
+                  placeholder="Metric name (e.g. Customer Churn)…"
+                  value={metricDraft}
+                  onChange={(e) => {
+                    setMetricDraft(e.target.value);
+                    if (metricError) setMetricError(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") submitMetric();
+                    if (e.key === "Escape") {
+                      setAddingMetric(false);
+                      setMetricDraft("");
+                      setMetricError(null);
+                    }
+                  }}
+                />
+                <button className="ghost-btn small" onClick={submitMetric}>
+                  Add
+                </button>
+                {metricError && <span className="add-metric-error">{metricError}</span>}
+              </span>
+            ) : (
+              <button
+                className="ghost-btn small"
+                onClick={() => {
+                  setMetricDraft("");
+                  setMetricError(null);
+                  setAddingMetric(true);
+                }}
+              >
+                ＋ Add metric
+              </button>
+            )}
             {trash.length > 0 && (
               <button className="ghost-btn small" onClick={() => setTrashOpen(true)}>
                 🗑 Trash <span className="sources-count">{trash.length}</span>

@@ -470,8 +470,9 @@ router.post("/metric-definitions", requireAuth, async (req, res, next) => {
       kind: kind || "number",
     });
 
-    // Put a metric widget on the default board (idempotent / un-trashes).
-    const board = await getOrCreateDefaultDashboard(req.user.id, req.user.organization_id);
+    // Put a metric widget on the requested board (defaulting to the user's
+    // default board), idempotent / un-trashing an existing one.
+    const board = await resolveDashboard(req, req.body.dashboard_id);
     const existing = await findMetricWidget(board.id, metricKey);
     if (existing) {
       if (existing.archived_at) await setWidgetArchived(board.id, existing.id, false);
@@ -499,6 +500,7 @@ router.post("/metric-definitions", requireAuth, async (req, res, next) => {
 
     return res.status(201).json(def);
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ message: err.message });
     return next(err);
   }
 });
