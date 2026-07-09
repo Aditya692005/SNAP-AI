@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Literal
 
 import markdown
+import numpy as np
 import pandas as pd
 from fpdf import FPDF
 from dotenv import load_dotenv
@@ -81,6 +82,76 @@ llm = ChatGoogleGenerativeAI(
 )
 
 splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+
+# ── Semantic chunking (P2.6) ──────────────────────────────────────────────────
+# Dependency-free embedding-boundary chunker: split a block into sentences, embed
+# them (reusing MiniLM), and start a new chunk where consecutive-sentence
+# similarity drops (a topic shift) or a size cap is hit. Each chunk keeps its
+# exact char span within the block (start/end) — reused for citations in P2.7.
+# Returns None to signal the caller should fall back to the recursive splitter.
+SEMANTIC_MAX_CHARS = 1200        # hard cap so a chunk can't grow unbounded
+SEMANTIC_MIN_CHARS = 200         # merge tiny tail chunks into the previous one
+SEMANTIC_BREAK_PERCENTILE = 25   # break where similarity is in the lowest quartile
+SEMANTIC_INPUT_CAP = 40_000      # above this, use the cheap splitter (bound cost)
+
+_SENT_BOUNDARY = re.compile(r"(?<=[.!?])\s+|\n{2,}")
+
+
+def _sentence_spans(text: str) -> list[tuple[int, int]]:
+    """(start, end) char spans of the sentences in `text`, preserving positions."""
+    spans, start = [], 0
+    for m in _SENT_BOUNDARY.finditer(text):
+        if text[start:m.start()].strip():
+            spans.append((start, m.start()))
+        start = m.end()
+    if text[start:].strip():
+        spans.append((start, len(text)))
+    return spans
+
+
+def semantic_split(text: str) -> list[dict] | None:
+    """Chunk `text` at semantic boundaries. Each item is
+    {text, start, end} with start/end being char offsets INTO `text`.
+    None => caller should fall back to the recursive splitter."""
+    text = text or ""
+    if not text.strip():
+        return []
+    if len(text) < SEMANTIC_MIN_CHARS or len(text) > SEMANTIC_INPUT_CAP:
+        return [{"text": text, "start": 0, "end": len(text)}]
+    spans = _sentence_spans(text)
+    if len(spans) <= 1:
+        return [{"text": text, "start": 0, "end": len(text)}]
+    try:
+        vecs = np.asarray(embeddings.embed_documents([text[s:e] for s, e in spans]))
+    except Exception:
+        return None
+    norms = np.linalg.norm(vecs, axis=1)
+    sims = []
+    for i in range(len(spans) - 1):
+        denom = norms[i] * norms[i + 1]
+        sims.append(float(vecs[i] @ vecs[i + 1] / denom) if denom else 0.0)
+    threshold = float(np.percentile(sims, SEMANTIC_BREAK_PERCENTILE)) if sims else 0.0
+
+    chunks: list[dict] = []
+    buf_start = spans[0][0]
+    for i, (_, cur_end) in enumerate(spans):
+        is_last = i == len(spans) - 1
+        at_break = i < len(sims) and sims[i] < threshold
+        too_big = (cur_end - buf_start) >= SEMANTIC_MAX_CHARS
+        if is_last or at_break or too_big:
+            if text[buf_start:cur_end].strip():
+                chunks.append({"text": text[buf_start:cur_end], "start": buf_start, "end": cur_end})
+            if not is_last:
+                buf_start = spans[i + 1][0]
+
+    merged: list[dict] = []
+    for c in chunks:
+        if merged and (c["end"] - c["start"]) < SEMANTIC_MIN_CHARS:
+            merged[-1]["end"] = c["end"]
+            merged[-1]["text"] = text[merged[-1]["start"]:c["end"]]
+        else:
+            merged.append(c)
+    return merged
 
 # ── Per-session chat history (list of HumanMessage / AIMessage) ───────────────
 session_histories: dict[str, list] = {}
@@ -166,15 +237,26 @@ def index_document(document_id: str, organization_id: str, path: Path, filename:
     summaries -> embedded document_chunks. Returns {chunks, tables}."""
     parsed = parse_file(path)
 
-    text_blocks = list(parsed.text_chunks)
+    chunk_texts: list[str] = []
+
+    # Prose blocks → semantic chunking (falls back to the recursive splitter when
+    # semantic_split declines, e.g. embedding failure).
+    for block in parsed.text_chunks:
+        if not (block and block.strip()):
+            continue
+        sem = semantic_split(block)
+        if sem is None:
+            chunk_texts.extend(splitter.split_text(block))
+        else:
+            chunk_texts.extend(c["text"] for c in sem)
+
+    # Table summaries → short generated text; the recursive splitter is fine.
     for table in parsed.tables:
         store.insert_document_table(document_id, table)
-        text_blocks.append(summarize_table(table))
+        summary = summarize_table(table)
+        if summary and summary.strip():
+            chunk_texts.extend(splitter.split_text(summary))
 
-    chunk_texts: list[str] = []
-    for block in text_blocks:
-        if block and block.strip():
-            chunk_texts.extend(splitter.split_text(block))
     chunk_texts = [c for c in chunk_texts if c.strip()]
 
     if chunk_texts:
