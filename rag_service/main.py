@@ -411,6 +411,13 @@ VIZ_PROMPT = ChatPromptTemplate.from_messages([
      "Rules:\n"
      "- Pick the most suitable chart_type for the request and the data.\n"
      "- Use ONLY values present in the dataset; never invent data.\n"
+     "- The dataset may contain MULTIPLE tables (e.g. different time ranges or "
+     "metrics split across separate files) that share columns. Treat them as ONE "
+     "combined dataset: merge their rows and use EVERY matching period/category "
+     "found across ALL tables.\n"
+     "- When the request names a range (e.g. '2024 to 2027'), include EVERY period "
+     "in that range that appears in ANY table, sorted chronologically — never stop "
+     "at the periods from just one table.\n"
      "- Aggregate/group when the request implies it (e.g. totals by category).\n"
      "- labels and each dataset's data array must be the SAME length.\n"
      "- pie/doughnut must have exactly one dataset.\n"
@@ -460,7 +467,13 @@ def build_viz_context_supabase(instruction: str, organization_id, document_ids, 
     if focus_document_id:
         ids = [focus_document_id]
     else:
-        ids = rank_documents_by_relevance(instruction, organization_id, document_ids)
+        ranked = rank_documents_by_relevance(instruction, organization_id, document_ids)
+        # Charts often compare data SPLIT across several files (e.g. 2024-25 in one
+        # upload, 2026-27 in another). Narrowing to the top-ranked docs drops the
+        # rest and loses whole periods, so include EVERY accessible doc — ranked
+        # ones first so the most relevant survive if we hit the context cap.
+        rest = [d for d in (document_ids or []) if d not in ranked]
+        ids = ranked + rest
     parts = []
     used = set()
     tables_by_doc: dict = {}
