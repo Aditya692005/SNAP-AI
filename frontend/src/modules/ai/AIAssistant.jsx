@@ -31,6 +31,19 @@ const GREETING = {
   text: "Hi! I'm SNAP AI. Upload documents and ask me anything — including \"show me a bar chart of sales by region\" to generate charts, or \"generate a report summarizing this document\" to create a downloadable PDF.",
 };
 
+// Requests that SYNTHESIZE across documents — charts, tables, reports,
+// comparisons, or an explicit multi-year range — should see ALL of the user's
+// data, not just the single best-matching file. Otherwise data split across
+// uploads (e.g. 2024-25 in one file, 2026-27 in another) silently goes missing
+// from the result. Mirrors the RAG service's wants_chart / wants_table /
+// wants_document intent so the scoping matches what the server will do.
+const AGGREGATE_INTENT_RE =
+  /\b(chart|graph|plot|visuali[sz]e|visuali[sz]ation|diagram|histogram|scatter|pie|doughnut|trend|table|compare|comparison|report|over time|by (year|quarter|month|region|category|department|product))\b|from\s+\d{4}\s+to\s+\d{4}/i;
+
+function wantsAggregate(text) {
+  return AGGREGATE_INTENT_RE.test(text || "");
+}
+
 function getToken() {
   return localStorage.getItem("token");
 }
@@ -220,6 +233,15 @@ function AIAssistant() {
 
     if (selectedDocIds.length > 0 || docList.length === 0) {
       await askAI(text, selectedDocIds.length > 0 ? selectedDocIds : undefined);
+      return;
+    }
+
+    // Charts / tables / reports routinely combine data spread across several
+    // files. The preview step below narrows to the single best-matching
+    // document, which would drop the others and lose whole periods — so for
+    // these requests skip narrowing and use everything the user can access.
+    if (wantsAggregate(text)) {
+      await askAI(text, undefined);
       return;
     }
 
