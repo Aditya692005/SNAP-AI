@@ -623,6 +623,157 @@ async def run_visualization_supabase(instruction: str, organization_id, document
     return spec, source_files
 
 
+# ── Deterministic tabular aggregation ────────────────────────────────────────
+# "Average NO2 for all cities" over a 3,540-row table can't be answered by chunk
+# retrieval (returns only top-k chunks) or by dumping the table to the LLM (the
+# context cap truncates it — cities past the cutoff vanish — and the model can't
+# reliably average thousands of rows anyway). When a request is an aggregation of
+# a named numeric column GROUPED BY a named category, compute it exactly in
+# pandas over every row instead. Restricted to the grouped case on purpose:
+# ungrouped/filtered aggregates ("total revenue in 2024") need a WHERE the parser
+# doesn't model, so those fall through to the normal RAG path.
+_AGG_PATTERNS = [
+    (r"\b(mean|average|avg)\b", "mean"),
+    (r"\b(total|sum)\b", "sum"),
+    (r"\b(count|how many|number of)\b", "count"),
+    (r"\b(max|maximum|highest|peak|largest)\b", "max"),
+    (r"\b(min|minimum|lowest|smallest)\b", "min"),
+]
+_AGG_LABEL = {"mean": "average", "sum": "total", "count": "count of", "max": "maximum", "min": "minimum"}
+
+
+def _detect_agg_func(message: str) -> str | None:
+    for pat, fn in _AGG_PATTERNS:
+        if re.search(pat, message, re.I):
+            return fn
+    return None
+
+
+def _word_tokens(text: str) -> set:
+    return {t for t in re.split(r"[^a-z0-9]+", str(text).lower()) if t}
+
+
+def _singular(tok: str) -> str:
+    """Crude singularizer so plural query words match column names (cities->city)."""
+    if len(tok) > 4 and tok.endswith("ies"):
+        return f"{tok[:-3]}y"
+    if len(tok) > 4 and tok.endswith("ses"):
+        return tok[:-2]
+    if len(tok) > 3 and tok.endswith("s") and not tok.endswith("ss"):
+        return tok[:-1]
+    return tok
+
+
+def _is_numeric_col(series) -> bool:
+    col = _to_numeric(series)
+    return int(col.notna().sum()) >= max(1, int(0.5 * len(series)))
+
+
+def _match_metric_columns(message, df) -> list:
+    """Numeric columns explicitly named in the message (e.g. 'NO2' -> 'NO2')."""
+    mtoks = _word_tokens(message)
+    return [c for c in df.columns if (_word_tokens(c) & mtoks) and _is_numeric_col(df[c])]
+
+
+# Filler words that must NOT drive column matching — otherwise "chart OF avg NO2
+# BY city" would match a "Type OF Location" column on the stray "of".
+_GROUP_STOP = {
+    "the", "all", "each", "every", "per", "by", "for", "across", "of", "and", "in",
+    "to", "from", "me", "give", "show", "list", "get", "chart", "bar", "line", "graph",
+    "plot", "pie", "doughnut", "table", "average", "avg", "mean", "total", "sum",
+    "count", "max", "min", "maximum", "minimum", "highest", "lowest", "number",
+    "emission", "emissions", "value", "values", "data", "compare", "comparison",
+}
+
+
+def _match_group_column(message, df, exclude) -> str | None:
+    """A categorical column named in the message ('cities' -> 'City/Town/...')."""
+    mtoks = {
+        _singular(t) for t in _word_tokens(message)
+        if len(t) >= 3 and t not in _GROUP_STOP
+    }
+    for c in df.columns:
+        if c in exclude or _is_numeric_col(df[c]):
+            continue
+        ctoks = {_singular(t) for t in _word_tokens(c) if t not in _GROUP_STOP}
+        if ctoks & mtoks:
+            return c
+    return None
+
+
+def compute_tabular_aggregation(message, rows) -> dict | None:
+    """Compute (metric agg BY group) over `rows`, or None if not applicable."""
+    if not rows:
+        return None
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return None
+    func = _detect_agg_func(message)
+    if not func:
+        return None
+    metric_cols = _match_metric_columns(message, df)
+    if not metric_cols:
+        return None
+    group_col = _match_group_column(message, df, exclude=set(metric_cols))
+    if not group_col:
+        return None  # only the grouped case is safe (no WHERE-filter modelling)
+    for mc in metric_cols:
+        df[mc] = _to_numeric(df[mc])
+    grouped = df.groupby(group_col)[metric_cols].agg(func).reset_index().sort_values(group_col)
+    out_rows = []
+    for rec in grouped.to_dict("records"):
+        row: dict = {group_col: str(rec[group_col])}
+        for mc in metric_cols:
+            v = rec[mc]
+            row[mc] = None if pd.isna(v) else round(float(v), 2)
+        out_rows.append(row)
+    return {"func": func, "group_col": group_col, "metric_cols": metric_cols, "rows": out_rows}
+
+
+def run_aggregation_supabase(message, organization_id, document_ids, focus_document_id, want_chart) -> dict | None:
+    """Deterministic groupby answer over the relevant docs' stored tables.
+    Returns ChatResponse kwargs (answer/sources/chart), or None to fall through."""
+    if focus_document_id:
+        ids = [focus_document_id]
+    elif document_ids:
+        ids = list(document_ids)
+    else:
+        return None
+    all_rows, used = [], []
+    for t in store.tables_for_documents(ids):
+        trows = (t.get("table_data") or {}).get("rows") or []
+        if trows:
+            all_rows.extend(trows)
+            if t.get("document_id") not in used:
+                used.append(t.get("document_id"))
+    agg = compute_tabular_aggregation(message, all_rows)
+    if agg is None:
+        return None
+
+    gcol, mcols, out_rows = agg["group_col"], agg["metric_cols"], agg["rows"]
+    label = _AGG_LABEL.get(str(agg["func"])) or str(agg["func"])
+    sources = store.file_names_for_documents(used)
+    note = f"{label.title()} of {', '.join(mcols)} by {gcol}, computed exactly over {len(all_rows)} rows."
+
+    if want_chart:
+        spec = {
+            "chart_type": "bar",
+            "title": f"{label.title()} {', '.join(mcols)} by {gcol}",
+            "labels": [r[gcol] for r in out_rows],
+            "datasets": [{"label": mc, "data": [r[mc] for r in out_rows]} for mc in mcols],
+            "notes": note,
+            "source": "",
+            "is_tabular": True,
+        }
+        return {"answer": note, "sources": sources, "chart": spec}
+
+    cols = [gcol] + mcols
+    md = "| " + " | ".join(cols) + " |\n| " + " | ".join(["---"] * len(cols)) + " |\n"
+    for r in out_rows:
+        md += "| " + " | ".join("" if r.get(c) is None else str(r.get(c)) for c in cols) + " |\n"
+    return {"answer": f"{note}\n\n{md}", "sources": sources, "chart": None}
+
+
 # ── Dashboard metric extraction ──────────────────────────────────────────────
 # Open-ended: the LLM proposes its own metric key/department/kind from whatever
 # the document actually contains, rather than picking from a fixed catalog. This
@@ -1407,6 +1558,20 @@ async def chat(req: ChatRequest):
                 "or add it back to my knowledge base."
             )
             return ChatResponse(answer=answer, sources=source_files, doc_count=n_docs, document=doc)
+
+        # Deterministic aggregation over tabular data ("average NO2 by city",
+        # "total sales by region"): computed exactly from the stored table so no
+        # rows are lost to the context cap and the numbers are precise. Handles
+        # both the chart form and the plain-answer form; falls through when the
+        # request isn't a (numeric agg BY category) over a table.
+        agg = run_aggregation_supabase(
+            req.message, req.organization_id, req.document_ids, req.focus_document_id,
+            want_chart=wants_chart(req.message) or wants_table(req.message),
+        )
+        if agg is not None:
+            return ChatResponse(
+                answer=agg["answer"], sources=agg["sources"], doc_count=n_docs, chart=agg.get("chart")
+            )
 
         # Chart/table from the accessible/focused documents.
         if wants_chart(req.message) or wants_table(req.message):
