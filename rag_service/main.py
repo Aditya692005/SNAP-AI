@@ -60,6 +60,18 @@ if EMBED_DIM != 384:
         f"Embedding model returns {EMBED_DIM} dims but document_chunks expects 384."
     )
 
+# Cross-encoder reranker (P1.4): reorders the hybrid candidate pool by true
+# query-chunk relevance. Local + CPU, using the already-installed
+# sentence-transformers. Guarded so the service still starts if the model can't
+# be downloaded — retrieval then keeps the fused (RRF) order.
+RERANKER_MODEL = os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+try:
+    from sentence_transformers import CrossEncoder
+    reranker = CrossEncoder(RERANKER_MODEL, device="cpu")
+except Exception as _rerank_exc:  # noqa: BLE001
+    reranker = None
+    print(f"[rag] cross-encoder reranker unavailable ({_rerank_exc}); using fused order")
+
 llm = ChatGoogleGenerativeAI(
     model=GEMINI_MODEL,
     google_api_key=GOOGLE_API_KEY,
@@ -1043,6 +1055,22 @@ def retrieve_chunks(question: str, organization_id: str, document_ids=None, k: i
         )
     except Exception:
         hits = store.match_chunks(query_vec, organization_id, document_ids=document_ids, match_count=k)
+    return rerank_hits(question, hits, k)
+
+
+def rerank_hits(question: str, hits: list[dict], k: int) -> list[dict]:
+    """Reorder candidates by cross-encoder relevance, returning the top-k. Falls
+    back to the incoming order (fused RRF / dense score) if the reranker is
+    unavailable or errors, so retrieval never hard-fails on the reranker."""
+    if not hits or reranker is None or len(hits) <= 1:
+        return hits[:k]
+    try:
+        scores = reranker.predict([(question, h["chunk_text"]) for h in hits])
+        for h, s in zip(hits, scores):
+            h["rerank_score"] = float(s)
+        hits = sorted(hits, key=lambda h: h.get("rerank_score", 0.0), reverse=True)
+    except Exception:
+        pass  # keep fused order
     return hits[:k]
 
 def render_document_tables(document_id) -> str:
