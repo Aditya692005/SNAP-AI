@@ -97,6 +97,22 @@ def insert_document_chunks(
     return len(rows)
 
 
+def hybrid_match_chunks(query_embedding, query_text: str, organization_id: str, document_ids=None, match_count: int = 30) -> list[dict]:
+    """Hybrid dense + full-text search via the RRF-fusing RPC. Returns rows with
+    {id, document_id, file_name, chunk_index, chunk_text, similarity, fts_rank,
+    score}. Raises if the P1.3 migration (function/tsv column) isn't applied —
+    callers fall back to dense-only match_chunks."""
+    params = {
+        "query_embedding": _vec(query_embedding),
+        "query_text": query_text or "",
+        "p_organization_id": organization_id,
+        "match_count": match_count,
+        "p_document_ids": document_ids,
+    }
+    res = sb().rpc("hybrid_match_document_chunks", params).execute()
+    return res.data or []
+
+
 def match_chunks(query_embedding, organization_id: str, document_ids=None, match_count: int = 5) -> list[dict]:
     """Cosine-similarity search via the RPC, scoped to an org and (optionally) a
     set of accessible document ids. Returns a list of {id, document_id,

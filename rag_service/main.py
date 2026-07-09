@@ -1026,12 +1026,24 @@ def to_lc_messages(history: list[dict] | None) -> list:
     return msgs
 
 
+# How many candidates hybrid search returns before we trim to k (widened in P1.4
+# so the cross-encoder reranker has a real pool to reorder).
+HYBRID_CANDIDATES = 30
+
+
 def retrieve_chunks(question: str, organization_id: str, document_ids=None, k: int = 5) -> list[dict]:
-    """Phase 2 retrieval: embed the question and find the nearest chunks via the
-    match_document_chunks RPC, scoped to an org and (optionally) a set of
-    accessible document ids. Returns the RPC rows."""
+    """Retrieve the most relevant chunks, scoped to an org and (optionally) the
+    accessible document ids. Hybrid dense + full-text (RRF); falls back to
+    dense-only if the P1.3 migration isn't applied. Returns the top-k rows."""
     query_vec = embeddings.embed_query(question)
-    return store.match_chunks(query_vec, organization_id, document_ids=document_ids, match_count=k)
+    try:
+        hits = store.hybrid_match_chunks(
+            query_vec, question, organization_id,
+            document_ids=document_ids, match_count=max(k, HYBRID_CANDIDATES),
+        )
+    except Exception:
+        hits = store.match_chunks(query_vec, organization_id, document_ids=document_ids, match_count=k)
+    return hits[:k]
 
 def render_document_tables(document_id) -> str:
     """A document's stored tabular data (document_tables) rendered as CSV text, so
