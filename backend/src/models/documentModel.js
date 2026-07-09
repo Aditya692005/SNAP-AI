@@ -60,19 +60,32 @@ async function setDocumentStatus(id, status) {
 }
 
 // Reset an existing documents row for a re-upload of the same file: back to
-// PROCESSING with the new file's size/type. The id is kept so the RAG service's
+// PROCESSING with the new file's size/type, and bump `version` so re-indexed
+// chunks are tagged as a new version. The id is kept so the RAG service's
 // per-document cleanup replaces the old chunks/tables instead of duplicating.
 async function resetDocumentForReupload(id, { mimeType, fileSize, contentHash }) {
+  // Bump version (read-then-write; best effort if the column isn't deployed).
+  let nextVersion = null;
+  try {
+    const { data: cur } = await supabase.from("documents").select("version").eq("id", id).maybeSingle();
+    if (cur && typeof cur.version === "number") nextVersion = cur.version + 1;
+  } catch {
+    /* version column not deployed yet */
+  }
+
   const update = {
     status: "PROCESSING",
     mime_type: mimeType ?? null,
     file_size: fileSize ?? null,
   };
   if (contentHash) update.content_hash = contentHash;
+  if (nextVersion != null) update.version = nextVersion;
+
   let { error } = await supabase.from("documents").update(update).eq("id", id);
-  // Pre-migration fallback if content_hash column is absent.
-  if (error && contentHash && error.code === "PGRST204") {
+  // Pre-migration fallback if a new column (content_hash / version) is absent.
+  if (error && error.code === "PGRST204") {
     delete update.content_hash;
+    delete update.version;
     ({ error } = await supabase.from("documents").update(update).eq("id", id));
   }
   if (error) throw error;

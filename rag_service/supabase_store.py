@@ -43,18 +43,57 @@ def insert_document_table(document_id: str, table) -> None:
     ).execute()
 
 
-def insert_document_chunks(document_id: str, texts: list[str], embeddings: list, start_index: int = 0) -> int:
+def get_document_version(document_id: str) -> int:
+    """Current version of a document (bumped on re-upload). 1 if unknown or the
+    `version` column isn't deployed yet."""
+    try:
+        res = sb().table("documents").select("version").eq("id", document_id).limit(1).execute()
+        data = res.data or []
+        if data and data[0].get("version") is not None:
+            return int(data[0]["version"])
+    except Exception:
+        pass
+    return 1
+
+
+def insert_document_chunks(
+    document_id: str,
+    texts: list[str],
+    embeddings: list,
+    *,
+    organization_id: str | None = None,
+    doc_version: int = 1,
+    source: str | None = None,
+    start_index: int = 0,
+) -> int:
+    """Insert chunks with tenant id + version + rough token count + metadata.
+    token_count is a cheap ~chars/4 estimate (good enough for context budgeting).
+    Falls back to the minimal column set if the P1.2 metadata migration hasn't
+    been applied yet, so ingestion never hard-breaks on a migration lag."""
     rows = [
         {
             "document_id": document_id,
+            "organization_id": organization_id,
             "chunk_index": start_index + i,
             "chunk_text": text,
             "embedding": _vec(emb),
+            "doc_version": doc_version,
+            "token_count": max(1, len(text) // 4),
+            "metadata": {"source": source} if source else None,
         }
         for i, (text, emb) in enumerate(zip(texts, embeddings))
     ]
-    if rows:
+    if not rows:
+        return 0
+    try:
         sb().table("document_chunks").insert(rows).execute()
+    except Exception:
+        minimal = [
+            {"document_id": r["document_id"], "chunk_index": r["chunk_index"],
+             "chunk_text": r["chunk_text"], "embedding": r["embedding"]}
+            for r in rows
+        ]
+        sb().table("document_chunks").insert(minimal).execute()
     return len(rows)
 
 

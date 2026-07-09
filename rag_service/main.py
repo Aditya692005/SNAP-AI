@@ -165,7 +165,14 @@ def index_document(document_id: str, organization_id: str, path: Path, filename:
 
     if chunk_texts:
         vectors = embeddings.embed_documents(chunk_texts)
-        store.insert_document_chunks(document_id, chunk_texts, vectors)
+        store.insert_document_chunks(
+            document_id,
+            chunk_texts,
+            vectors,
+            organization_id=organization_id,
+            doc_version=store.get_document_version(document_id),
+            source=filename,
+        )
 
     return {"chunks": len(chunk_texts), "tables": len(parsed.tables)}
 
