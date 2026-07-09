@@ -7,6 +7,12 @@
 -- recreated. If the column is already 384 you can run only part (2) below.
 -- ============================================================================
 
+-- 0) Ensure the columns this RPC returns exist (self-contained: safe to run this
+--    file on its own, regardless of migration order).
+alter table document_chunks add column if not exists char_start int;
+alter table document_chunks add column if not exists char_end   int;
+alter table document_chunks add column if not exists metadata    jsonb;
+
 -- 1) Ensure the embedding column is vector(384). The ANN index is bound to the
 --    column type, so drop it first, then recreate as HNSW (see rag-hnsw-index.sql).
 drop index if exists idx_document_chunks_embedding;

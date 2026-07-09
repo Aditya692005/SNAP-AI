@@ -1,9 +1,15 @@
 -- ============================================================================
 -- RAG upgrade P1.3 — hybrid retrieval: dense vectors + Postgres full-text
 -- search, fused with Reciprocal Rank Fusion. Run ONCE in the Supabase SQL
--- Editor, AFTER rag-chunk-metadata.sql (needs document_chunks.organization_id).
--- Everything stays in Postgres — no new infrastructure.
+-- Editor. Self-contained (adds the columns it needs), so migration order is not
+-- a trap. Everything stays in Postgres — no new infrastructure.
 -- ============================================================================
+
+-- 0) Ensure the columns this RPC references/returns exist.
+alter table document_chunks add column if not exists organization_id uuid;
+alter table document_chunks add column if not exists char_start      int;
+alter table document_chunks add column if not exists char_end        int;
+alter table document_chunks add column if not exists metadata        jsonb;
 
 -- 1) Full-text vector over chunk_text + GIN index for keyword search.
 alter table document_chunks
