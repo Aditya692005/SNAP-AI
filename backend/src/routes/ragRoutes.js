@@ -135,6 +135,18 @@ router.post("/chat", requireAuth, async (req, res, next) => {
       if (data.sources?.length) metadata.sources = data.sources;
       if (data.chart) metadata.chart = data.chart;
       if (data.document) metadata.document = data.document;
+      // Persist a slim citation list (source + page + span) so provenance chips
+      // survive a reload, not just the live response.
+      if (data.retrieved?.length) {
+        metadata.citations = data.retrieved.map((r) => ({
+          document_id: r.document_id,
+          file_name: r.file_name,
+          page: r.page,
+          char_start: r.char_start,
+          char_end: r.char_end,
+          similarity: r.similarity,
+        }));
+      }
       const aiMsg = await addMessage(
         convo.id,
         "AI",

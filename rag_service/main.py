@@ -1300,6 +1300,7 @@ async def run_rag_chain(
         {
             "chunk_id": h["id"],
             "document_id": h["document_id"],
+            "file_name": h.get("file_name"),
             "similarity": h["similarity"],
             "chunk_index": h.get("chunk_index"),
             "char_start": h.get("char_start"),

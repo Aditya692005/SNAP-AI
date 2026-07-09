@@ -9,6 +9,18 @@ import "./AIAssistant.css";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
 
+// Collapse retrieval provenance to one chip per (file, page), keeping the best
+// (highest-similarity) span, ordered by relevance. Backs the "Cited from" chips.
+function dedupeCitations(citations) {
+  const byKey = new Map();
+  for (const c of citations || []) {
+    const key = `${c.file_name || ""}|${c.page ?? ""}`;
+    const prev = byKey.get(key);
+    if (!prev || (c.similarity ?? 0) > (prev.similarity ?? 0)) byKey.set(key, c);
+  }
+  return [...byKey.values()].sort((a, b) => (b.similarity ?? 0) - (a.similarity ?? 0));
+}
+
 // The thread the user last had open, so navigating away and back (which unmounts
 // this component and clears its in-memory messages) reopens the same
 // conversation instead of dropping the user on a blank chat.
@@ -125,6 +137,7 @@ function AIAssistant() {
                 role: "assistant",
                 text: m.content,
                 sources: m.metadata?.sources || [],
+                citations: m.metadata?.citations || [],
                 chart: m.metadata?.chart || undefined,
                 document: m.metadata?.document || undefined,
               }
@@ -300,6 +313,7 @@ function AIAssistant() {
           role: "assistant",
           text: data.answer,
           sources: data.sources || [],
+          citations: data.retrieved || [], // provenance: source + page + char span
           doc_count: data.doc_count,
           chart: data.chart || undefined, // present when the prompt asked for a chart
           document: data.document || undefined, // present when a report was generated
@@ -840,21 +854,47 @@ function AIAssistant() {
                   </div>
                 </div>
               )}
-              {msg.sources?.length > 0 && (
+              {msg.citations?.length > 0 ? (
                 <div className="bubble-sources">
-                  Sources:{" "}
-                  {msg.sources.map((s) => (
-                    <button
-                      key={s}
-                      type="button"
-                      className="source-chip"
-                      onClick={() => downloadSource(s)}
-                      title={`Download ${s}`}
-                    >
-                      ⬇ {s}
-                    </button>
-                  ))}
+                  Cited from:{" "}
+                  {dedupeCitations(msg.citations).map((c, i) => {
+                    const name = c.file_name || "source";
+                    const pct = c.similarity != null ? Math.round(c.similarity * 100) : null;
+                    const span =
+                      c.char_start != null && c.char_end != null
+                        ? ` · chars ${c.char_start}–${c.char_end}`
+                        : "";
+                    return (
+                      <button
+                        key={`${name}-${c.page ?? ""}-${i}`}
+                        type="button"
+                        className="source-chip"
+                        onClick={() => c.file_name && downloadSource(c.file_name)}
+                        title={`${pct != null ? `Relevance ${pct}%` : ""}${span} — click to open the source`}
+                      >
+                        📄 {name}
+                        {c.page != null ? ` · p.${c.page}` : ""}
+                      </button>
+                    );
+                  })}
                 </div>
+              ) : (
+                msg.sources?.length > 0 && (
+                  <div className="bubble-sources">
+                    Sources:{" "}
+                    {msg.sources.map((s) => (
+                      <button
+                        key={s}
+                        type="button"
+                        className="source-chip"
+                        onClick={() => downloadSource(s)}
+                        title={`Download ${s}`}
+                      >
+                        ⬇ {s}
+                      </button>
+                    ))}
+                  </div>
+                )
               )}
             </div>
           ))}
