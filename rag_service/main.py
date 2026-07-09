@@ -238,26 +238,37 @@ def index_document(document_id: str, organization_id: str, path: Path, filename:
     parsed = parse_file(path)
 
     chunk_texts: list[str] = []
+    chunk_metas: list[dict] = []  # parallel: {char_start, char_end, page} per chunk
 
     # Prose blocks → semantic chunking (falls back to the recursive splitter when
-    # semantic_split declines, e.g. embedding failure).
-    for block in parsed.text_chunks:
+    # semantic_split declines). `page` is the 1-based block index — the page for
+    # PDFs, the slide for PPTX, else just a section ordinal. Offsets are within
+    # the block, so a citation reads "page N, chars start–end".
+    for block_i, block in enumerate(parsed.text_chunks):
         if not (block and block.strip()):
             continue
+        page = block_i + 1
         sem = semantic_split(block)
         if sem is None:
-            chunk_texts.extend(splitter.split_text(block))
+            for c in splitter.split_text(block):
+                if c.strip():
+                    chunk_texts.append(c)
+                    chunk_metas.append({"page": page})  # offsets unknown for fallback
         else:
-            chunk_texts.extend(c["text"] for c in sem)
+            for c in sem:
+                chunk_texts.append(c["text"])
+                chunk_metas.append({"char_start": c["start"], "char_end": c["end"], "page": page})
 
-    # Table summaries → short generated text; the recursive splitter is fine.
+    # Table summaries → short generated text (not a verbatim source span, so no
+    # offsets); the recursive splitter is fine.
     for table in parsed.tables:
         store.insert_document_table(document_id, table)
         summary = summarize_table(table)
         if summary and summary.strip():
-            chunk_texts.extend(splitter.split_text(summary))
-
-    chunk_texts = [c for c in chunk_texts if c.strip()]
+            for c in splitter.split_text(summary):
+                if c.strip():
+                    chunk_texts.append(c)
+                    chunk_metas.append({})
 
     if chunk_texts:
         vectors = embeddings.embed_documents(chunk_texts)
@@ -268,6 +279,7 @@ def index_document(document_id: str, organization_id: str, path: Path, filename:
             organization_id=organization_id,
             doc_version=store.get_document_version(document_id),
             source=filename,
+            metas=chunk_metas,
         )
 
     return {"chunks": len(chunk_texts), "tables": len(parsed.tables)}
@@ -1285,7 +1297,15 @@ async def run_rag_chain(
     context = "\n\n".join(context_parts)
 
     retrieved: list[dict] = [
-        {"chunk_id": h["id"], "document_id": h["document_id"], "similarity": h["similarity"]}
+        {
+            "chunk_id": h["id"],
+            "document_id": h["document_id"],
+            "similarity": h["similarity"],
+            "chunk_index": h.get("chunk_index"),
+            "char_start": h.get("char_start"),
+            "char_end": h.get("char_end"),
+            "page": (h.get("metadata") or {}).get("page"),
+        }
         for h in hits
     ]
     # Sources are the source FILE NAMES (downloadable), not document ids.

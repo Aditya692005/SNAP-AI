@@ -34,7 +34,10 @@ returns table (
     chunk_text  text,
     similarity  float,
     fts_rank    float,
-    score       float
+    score       float,
+    char_start  int,
+    char_end    int,
+    metadata    jsonb
 )
 language sql
 stable
@@ -74,7 +77,7 @@ as $$
         full outer join fts on dense.id = fts.id
     )
     select f.id, dc.document_id, d.file_name, dc.chunk_index, dc.chunk_text,
-           f.similarity, f.fts_rank, f.score
+           f.similarity, f.fts_rank, f.score, dc.char_start, dc.char_end, dc.metadata
     from fused f
     join document_chunks dc on dc.id = f.id
     join documents d on d.id = dc.document_id

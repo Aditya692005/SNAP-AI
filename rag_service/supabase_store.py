@@ -64,14 +64,24 @@ def insert_document_chunks(
     organization_id: str | None = None,
     doc_version: int = 1,
     source: str | None = None,
+    metas: list[dict] | None = None,
     start_index: int = 0,
 ) -> int:
-    """Insert chunks with tenant id + version + rough token count + metadata.
-    token_count is a cheap ~chars/4 estimate (good enough for context budgeting).
-    Falls back to the minimal column set if the P1.2 metadata migration hasn't
-    been applied yet, so ingestion never hard-breaks on a migration lag."""
-    rows = [
-        {
+    """Insert chunks with tenant id + version + rough token count + metadata +
+    char offsets. `metas[i]` (optional, parallel to texts) may carry
+    {char_start, char_end, page} for chunk i; page/section go into metadata jsonb
+    alongside the source filename, offsets into their own columns.
+    token_count is a cheap ~chars/4 estimate. Falls back to the minimal column
+    set if the P1.2/P2.7 migrations aren't applied yet, so ingestion never
+    hard-breaks on a migration lag."""
+    metas = metas or []
+    rows = []
+    for i, (text, emb) in enumerate(zip(texts, embeddings)):
+        meta = metas[i] if i < len(metas) else {}
+        md = {"source": source} if source else {}
+        if meta.get("page") is not None:
+            md["page"] = meta["page"]
+        rows.append({
             "document_id": document_id,
             "organization_id": organization_id,
             "chunk_index": start_index + i,
@@ -79,10 +89,10 @@ def insert_document_chunks(
             "embedding": _vec(emb),
             "doc_version": doc_version,
             "token_count": max(1, len(text) // 4),
-            "metadata": {"source": source} if source else None,
-        }
-        for i, (text, emb) in enumerate(zip(texts, embeddings))
-    ]
+            "metadata": md or None,
+            "char_start": meta.get("char_start"),
+            "char_end": meta.get("char_end"),
+        })
     if not rows:
         return 0
     try:

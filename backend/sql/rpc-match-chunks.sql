@@ -40,7 +40,10 @@ returns table (
     file_name   text,
     chunk_index int,
     chunk_text  text,
-    similarity  float
+    similarity  float,
+    char_start  int,
+    char_end    int,
+    metadata    jsonb
 )
 language sql
 stable
@@ -51,7 +54,10 @@ as $$
         d.file_name,
         dc.chunk_index,
         dc.chunk_text,
-        1 - (dc.embedding <=> query_embedding) as similarity
+        1 - (dc.embedding <=> query_embedding) as similarity,
+        dc.char_start,
+        dc.char_end,
+        dc.metadata
     from document_chunks dc
     join documents d on d.id = dc.document_id
     where d.organization_id = p_organization_id
