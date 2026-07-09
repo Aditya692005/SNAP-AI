@@ -7,15 +7,16 @@
 -- recreated. If the column is already 384 you can run only part (2) below.
 -- ============================================================================
 
--- 1) Ensure the embedding column is vector(384). The ivfflat index is bound to
---    the column type, so drop it first, then recreate.
+-- 1) Ensure the embedding column is vector(384). The ANN index is bound to the
+--    column type, so drop it first, then recreate as HNSW (see rag-hnsw-index.sql).
 drop index if exists idx_document_chunks_embedding;
 
 alter table document_chunks
     alter column embedding type vector(384);
 
 create index idx_document_chunks_embedding
-    on document_chunks using ivfflat (embedding vector_cosine_ops) with (lists = 100);
+    on document_chunks using hnsw (embedding vector_cosine_ops)
+    with (m = 16, ef_construction = 64);
 
 -- 2) Recreate the search function with the matching 384-dim signature.
 --    supabase-js / supabase-py cannot issue `<=>` directly, so retrieval goes
