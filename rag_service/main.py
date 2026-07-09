@@ -626,25 +626,253 @@ def normalize_metric(raw: dict) -> dict | None:
     }
 
 
-async def extract_metrics(source: str, custom_defs: list[dict] | None = None) -> list[dict]:
-    """Open-ended metric extraction from one uploaded document. `custom_defs` are
-    the user's tracked metric definitions, injected so the LLM looks for them and
-    reuses their exact keys."""
-    dataset, _ = build_source_context(source)
-    if not dataset.strip():
-        return []
-    system_text = build_metrics_system(custom_defs)
+# ── Deterministic tabular extraction ─────────────────────────────────────────
+# Asking the LLM to enumerate every (metric, period) cell of a table makes it
+# sample and silently drop rows, so periods go missing (a 14-metric x 8-quarter
+# sheet is 112 objects — the model summarises instead of listing them all). For
+# CSV/Excel we instead MELT the dataframe in code: every row x numeric column
+# becomes one data point, capturing ALL periods with zero sampling. The LLM is
+# not involved in reading the values.
+MAX_TABULAR_ROWS = 50_000
+
+_MONTH_INDEX = {}
+for _i, _m in enumerate(
+    ["january", "february", "march", "april", "may", "june", "july", "august",
+     "september", "october", "november", "december"], start=1):
+    _MONTH_INDEX[_m] = _i
+    _MONTH_INDEX[_m[:3]] = _i
+
+_PERCENT_HINTS = ("rate", "ratio", "percent", "percentage", "margin", "growth",
+                  "share", "yield", "utilization", "occupancy", "cpc", "ctr")
+_CURRENCY_HINTS = ("revenue", "income", "sales", "profit", "cost", "expenditure",
+                   "expense", "price", "fee", "royalt", "salary", "amount", "budget",
+                   "spend", "turnover", "mrr", "arr", "gmv", "arpu", "payment",
+                   "earnings", "billing", "cash")
+_COUNT_HINTS = ("count", "calls", "number", "num", "qty", "quantity", "users",
+                "employee", "visit", "click", "order", "unit", "cities", "session",
+                "signup", "subscriber", "headcount", "ticket")
+
+
+def _guess_kind(col: str) -> str:
+    c = col.lower()
+    if any(h in c for h in _PERCENT_HINTS):
+        return "percent"
+    if any(h in c for h in _CURRENCY_HINTS):
+        return "currency"
+    if any(h in c for h in _COUNT_HINTS):
+        return "count"
+    return "number"
+
+
+def _to_numeric(series) -> "pd.Series":
+    """Coerce a column to numbers, stripping thousands separators / currency / %."""
+    if series.dtype == object:
+        cleaned = series.astype(str).str.replace(r"[,$€£%\s]", "", regex=True)
+        return pd.Series(pd.to_numeric(cleaned, errors="coerce"))
+    return pd.Series(pd.to_numeric(series, errors="coerce"))
+
+
+def _fmt_year(v) -> str | None:
+    try:
+        y = int(float(str(v).strip()))
+    except (TypeError, ValueError):
+        return None
+    return str(y) if 1900 <= y <= 2100 else None
+
+
+def _fmt_quarter(v) -> str | None:
+    m = re.search(r"([1-4])", str(v))
+    return f"Q{m.group(1)}" if m else None
+
+
+def _fmt_month(v) -> str | None:
+    s = str(v).strip().lower()
+    if s in _MONTH_INDEX:
+        return f"{_MONTH_INDEX[s]:02d}"
+    try:
+        n = int(float(s))
+        if 1 <= n <= 12:
+            return f"{n:02d}"
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def _find_col(df, pattern):
+    for c in df.columns:
+        if re.fullmatch(pattern, str(c).strip(), re.I):
+            return c
+    return None
+
+
+def _build_period_extractor(df):
+    """Return (row -> period string | None, {columns used as the period key}).
+    Recognises Year+Quarter, Year+Month, a Date/Period column, or Year alone."""
+    year_col = _find_col(df, r"year|fy|yr")
+    q_col = _find_col(df, r"quarter|qtr|q")
+    m_col = _find_col(df, r"month|mon|mo")
+    date_col = None
+    for c in df.columns:
+        if re.search(r"date|period|timestamp", str(c).strip(), re.I):
+            date_col = c
+            break
+
+    if year_col and q_col:
+        def fn(row):
+            y, q = _fmt_year(row[year_col]), _fmt_quarter(row[q_col])
+            return f"{y}-{q}" if y and q else y
+        return fn, {year_col, q_col}
+    if year_col and m_col:
+        def fn(row):
+            y, mm = _fmt_year(row[year_col]), _fmt_month(row[m_col])
+            return f"{y}-{mm}" if y and mm else y
+        return fn, {year_col, m_col}
+    if date_col is not None:
+        def fn(row):
+            dt = pd.to_datetime(row[date_col], errors="coerce")
+            if pd.isna(dt):
+                s = str(row[date_col]).strip()  # already a label like "2024-Q1"?
+                return s or None
+            return f"{dt.year}-{dt.month:02d}"
+        return fn, {date_col}
+    if year_col:
+        return (lambda row: _fmt_year(row[year_col])), {year_col}
+    return None, set()
+
+
+def extract_metrics_tabular(df, custom_defs: list[dict] | None = None) -> list[dict] | None:
+    """Melt a dataframe into one metric point per (row, numeric column). Returns
+    None (→ caller falls back to the LLM) when the table has no recognisable
+    period column or no numeric columns, so categorical/wide tables still work."""
+    if df is None or df.empty:
+        return None
+    df = df.head(MAX_TABULAR_ROWS)
+    period_fn, period_cols = _build_period_extractor(df)
+    if period_fn is None:
+        return None  # no time signal → let the LLM handle it (may find categories)
+
+    def_kind = {}
+    for c in (custom_defs or []):
+        k = slugify_metric(str(c.get("key") or c.get("metric_key") or ""))
+        if k and c.get("kind"):
+            def_kind[k] = str(c["kind"]).strip().lower()
+
+    metric_cols = []
+    threshold = max(1, int(0.5 * len(df)))
+    for c in df.columns:
+        if c in period_cols:
+            continue
+        col = _to_numeric(df[c])
+        if int(col.notna().sum()) >= threshold:
+            metric_cols.append((c, col))
+    if not metric_cols:
+        return None
+
+    periods = [period_fn(df.iloc[i]) for i in range(len(df))]
+    raw_points = []
+    for c, col in metric_cols:
+        key = slugify_metric(str(c))
+        if not key:
+            continue
+        kind = def_kind.get(key) or _guess_kind(str(c))
+        for i in range(len(df)):
+            v = col.iloc[i]
+            if pd.isna(v):
+                continue
+            raw_points.append({
+                "metric": key,
+                "department": "general",
+                "kind": kind,
+                "period": periods[i],
+                "value": float(v),
+                "currency": None,
+                "category": None,
+                "confidence": 0.9,
+            })
+    return [m for m in (normalize_metric(p) for p in raw_points) if m]
+
+
+# ── Chunked LLM extraction (text / PDF / unstructured tables) ─────────────────
+# Non-tabular sources still need the LLM, but a single truncated pass drops
+# whatever falls past the cap. Instead we feed the WHOLE document in windows and
+# merge, de-duping by (metric, period, category) so overlaps don't double-count.
+EXTRACT_CHUNK_CHARS = 15_000
+EXTRACT_CHUNK_OVERLAP = 500
+MAX_EXTRACT_CHUNKS = 12
+
+
+def _full_source_text(source: str) -> str:
+    """Whole-document text for extraction — NOT capped at MAX_VIZ_CHARS."""
+    df = load_dataframe(source)
+    if df is not None:
+        return "TABULAR DATA (CSV):\n" + df.head(MAX_TABULAR_ROWS).to_csv(index=False)
+    safe = Path(source).name
+    path = (UPLOAD_DIR / safe).resolve()
+    if UPLOAD_DIR.resolve() in path.parents and path.is_file():
+        try:
+            return "DOCUMENT TEXT:\n" + "\n\n".join(parse_file(path).text_chunks)
+        except Exception:
+            return ""
+    return ""
+
+
+def _split_for_extraction(text: str) -> list[str]:
+    if len(text) <= EXTRACT_CHUNK_CHARS:
+        return [text]
+    chunks, i = [], 0
+    while i < len(text) and len(chunks) < MAX_EXTRACT_CHUNKS:
+        chunks.append(text[i:i + EXTRACT_CHUNK_CHARS])
+        i += EXTRACT_CHUNK_CHARS - EXTRACT_CHUNK_OVERLAP
+    return chunks
+
+
+def _dedup_metrics(metrics: list[dict]) -> list[dict]:
+    """Collapse identical (metric, period, category) points, keeping the most
+    confident — so overlapping chunks don't inflate values."""
+    best: dict = {}
+    for m in metrics:
+        key = (m["metric"], m.get("period"), m.get("category"))
+        if key not in best or m.get("confidence", 0) > best[key].get("confidence", 0):
+            best[key] = m
+    return list(best.values())
+
+
+async def _extract_chunk(text: str, system_text: str) -> list[dict]:
     resp = await llm.ainvoke([
         SystemMessage(content=system_text),
-        HumanMessage(content=f"DOCUMENT:\n{dataset}"),
+        HumanMessage(content=f"DOCUMENT:\n{text}"),
     ])
     raw = _metrics_parser.invoke(resp)
     try:
         items = parse_json_array(raw)
     except (json.JSONDecodeError, ValueError):
         return []
-    metrics = [m for m in (normalize_metric(i) for i in items if isinstance(i, dict)) if m]
-    return metrics
+    return [m for m in (normalize_metric(i) for i in items if isinstance(i, dict)) if m]
+
+
+async def extract_metrics(source: str, custom_defs: list[dict] | None = None) -> list[dict]:
+    """Metric extraction from one uploaded document.
+
+    Tabular files are melted deterministically (every period captured, no LLM
+    sampling). Everything else — and any table we can't structure — is extracted
+    by the LLM chunk-by-chunk over the WHOLE document and merged, so periods no
+    longer fall past a truncation cap. `custom_defs` steer the LLM path and set
+    the kind on the tabular path."""
+    df = load_dataframe(source)
+    if df is not None:
+        tabular = extract_metrics_tabular(df, custom_defs)
+        if tabular:
+            return tabular
+        # Couldn't structure the table → fall through to the LLM.
+
+    text = _full_source_text(source)
+    if not text.strip():
+        return []
+    system_text = build_metrics_system(custom_defs)
+    collected: list[dict] = []
+    for chunk in _split_for_extraction(text):
+        collected.extend(await _extract_chunk(chunk, system_text))
+    return _dedup_metrics(collected)
 
 
 # ── Document generation helpers ──────────────────────────────────────────────
