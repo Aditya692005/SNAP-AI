@@ -7,7 +7,9 @@ import json
 import os
 import re
 import shutil
+import time
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
@@ -1042,12 +1044,46 @@ def to_lc_messages(history: list[dict] | None) -> list:
 # so the cross-encoder reranker has a real pool to reorder).
 HYBRID_CANDIDATES = 30
 
+# ── Retrieval caches (P1.5) ───────────────────────────────────────────────────
+# (a) embedding cache: identical/whitespace-different queries skip re-embedding.
+# (b) result cache: a full retrieval result is reused for a short TTL, so re-asks
+#     within a turn are instant. Time-based invalidation is safe because a new
+#     upload only needs to be reflected after the TTL (a few seconds).
+_RESULT_TTL_SECONDS = 60
+_result_cache: dict[str, tuple[float, list]] = {}
+_cache_stats = {"result_hits": 0, "result_miss": 0}
+
+
+def _norm_query(q: str) -> str:
+    return " ".join((q or "").split())
+
+
+@lru_cache(maxsize=512)
+def _embed_query_cached(norm_q: str) -> tuple:
+    # Cached by normalized text; tuple is hashable + immutable for lru_cache.
+    return tuple(embeddings.embed_query(norm_q))
+
+
+def _result_key(organization_id: str, document_ids, norm_q: str, k: int) -> str:
+    docs = ",".join(sorted(document_ids)) if document_ids else "*"
+    return f"{organization_id}|{docs}|{k}|{norm_q}"
+
 
 def retrieve_chunks(question: str, organization_id: str, document_ids=None, k: int = 5) -> list[dict]:
     """Retrieve the most relevant chunks, scoped to an org and (optionally) the
-    accessible document ids. Hybrid dense + full-text (RRF); falls back to
-    dense-only if the P1.3 migration isn't applied. Returns the top-k rows."""
-    query_vec = embeddings.embed_query(question)
+    accessible document ids. Hybrid dense + full-text (RRF) → cross-encoder
+    rerank; falls back to dense-only if the P1.3 migration isn't applied.
+    Caches the query embedding and the final result (short TTL)."""
+    norm_q = _norm_query(question)
+    key = _result_key(organization_id, document_ids, norm_q, k)
+    now = time.time()
+    cached = _result_cache.get(key)
+    if cached and cached[0] > now:
+        _cache_stats["result_hits"] += 1
+        return cached[1]
+    _cache_stats["result_miss"] += 1
+
+    query_vec = list(_embed_query_cached(norm_q))
     try:
         hits = store.hybrid_match_chunks(
             query_vec, question, organization_id,
@@ -1055,7 +1091,13 @@ def retrieve_chunks(question: str, organization_id: str, document_ids=None, k: i
         )
     except Exception:
         hits = store.match_chunks(query_vec, organization_id, document_ids=document_ids, match_count=k)
-    return rerank_hits(question, hits, k)
+    result = rerank_hits(question, hits, k)
+
+    _result_cache[key] = (now + _RESULT_TTL_SECONDS, result)
+    if len(_result_cache) > 1024:  # bound: drop expired, else oldest-ish
+        for kk in [k2 for k2, v in list(_result_cache.items()) if v[0] <= now][:512] or list(_result_cache)[:256]:
+            _result_cache.pop(kk, None)
+    return result
 
 
 def rerank_hits(question: str, hits: list[dict], k: int) -> list[dict]:
