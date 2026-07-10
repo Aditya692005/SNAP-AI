@@ -97,6 +97,14 @@ async function findMessageById(id) {
   return data || null;
 }
 
+// Remove a single message (best-effort cleanup). Used to roll back a USER
+// question whose turn failed before an answer was produced, so it doesn't
+// linger as an unanswered turn that the next request would feed back to the LLM.
+async function deleteMessage(id) {
+  const { error } = await supabase.from("ai_messages").delete().eq("id", id);
+  if (error) throw error;
+}
+
 async function addMessage(conversationId, senderType, content, metadata = null) {
   const row = {
     conversation_id: conversationId,
@@ -138,5 +146,6 @@ module.exports = {
   listMessages,
   findMessageById,
   addMessage,
+  deleteMessage,
   recordRetrievedChunks,
 };

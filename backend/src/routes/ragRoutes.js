@@ -30,6 +30,7 @@ const {
   findConversation,
   listMessages,
   addMessage,
+  deleteMessage,
   recordRetrievedChunks,
 } = require("../models/conversationModel");
 
@@ -48,6 +49,28 @@ const RAG_URL = process.env.RAG_SERVICE_URL || "http://localhost:8000";
 //   document_ids    — the docs the user chose for this answer (subset of accessible)
 //   source          — legacy single-file focus by file name
 const MAX_HISTORY_MESSAGES = 20;
+
+// Reduce a chronological message list to well-formed user→assistant exchanges.
+// A turn whose answer never got saved (the LLM/RAG call failed, or persisting the
+// answer hiccuped) leaves the question behind as a dangling USER message. Feeding
+// that back to the LLM makes it answer the stale question again alongside the new
+// one — so keep a USER turn only when it's immediately followed by its AI reply,
+// and drop any unpaired message. This also repairs threads already corrupted by a
+// past failure, since history is rebuilt from the DB on every turn.
+function pairExchanges(history) {
+  const paired = [];
+  for (let i = 0; i < history.length; i++) {
+    const m = history[i];
+    const next = history[i + 1];
+    if (m.role === "user" && next && next.role === "assistant") {
+      paired.push(m, next);
+      i++; // consume the paired assistant reply
+    }
+    // A user with no following assistant (failed/unanswered turn) or a stray
+    // assistant with no preceding user is dropped.
+  }
+  return paired;
+}
 
 router.post("/chat", requireAuth, async (req, res, next) => {
   try {
@@ -92,38 +115,60 @@ router.post("/chat", requireAuth, async (req, res, next) => {
     } else {
       convo = await createConversation(orgId, req.user.id, message.slice(0, 80));
     }
-    const history = (await listMessages(convo.id))
+    const priorMessages = (await listMessages(convo.id))
       .filter((m) => m.sender_type === "USER" || m.sender_type === "AI")
-      .slice(-MAX_HISTORY_MESSAGES)
       .map((m) => ({
         role: m.sender_type === "USER" ? "user" : "assistant",
         content: m.content,
       }));
+    // Pair BEFORE trimming so the cap never slices a paired reply off its
+    // question, and so any dangling unanswered turn is excluded from memory.
+    const history = pairExchanges(priorMessages).slice(-MAX_HISTORY_MESSAGES);
 
     // Persist the user's question BEFORE the (slow) LLM call. If the client
     // navigates away before the answer returns, the request still completes
     // here, so the question is never lost from the thread — reopening the
     // conversation shows it, and the answer once it's saved below. History was
     // built above from prior messages, so this new one isn't double-counted.
-    await addMessage(convo.id, "USER", message).catch(() => {});
+    const userMsg = await addMessage(convo.id, "USER", message).catch(() => null);
 
-    const response = await fetch(`${RAG_URL}/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        message,
-        session_id: `user_${req.user.id}`,
-        history,
-        organization_id: orgId,
-        document_ids: documentIds,
-        focus_document_id: focusDocumentId,
-      }),
-    });
+    // A turn that fails before an answer is produced must NOT leave the question
+    // behind as a dangling, unanswered turn — otherwise the next request's
+    // history would feed it back to the LLM, which then answers this failed
+    // question again alongside the new one. Roll it back on any failure below
+    // (RAG error status, or the RAG service being unreachable). Once an answer is
+    // successfully produced, `answered` flips true and the question stays put.
+    let answered = false;
+    const rollbackQuestion = async () => {
+      if (userMsg?.id && !answered) await deleteMessage(userMsg.id).catch(() => {});
+    };
+
+    let response;
+    try {
+      response = await fetch(`${RAG_URL}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message,
+          session_id: `user_${req.user.id}`,
+          history,
+          organization_id: orgId,
+          document_ids: documentIds,
+          focus_document_id: focusDocumentId,
+        }),
+      });
+    } catch (err) {
+      await rollbackQuestion(); // RAG service unreachable
+      throw err;
+    }
 
     if (!response.ok) {
+      await rollbackQuestion();
       const err = await response.json().catch(() => ({}));
       return res.status(response.status).json({ message: err.detail || "RAG service error" });
     }
+
+    answered = true; // an answer was produced; keep the question in the thread
 
     const data = await response.json();
 
