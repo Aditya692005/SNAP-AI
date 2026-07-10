@@ -264,8 +264,11 @@ function AIAssistant() {
     } catch {
       /* preview unavailable — fall through and answer normally */
     }
-    setLoading(false);
 
+    // Keep `loading` on through the hand-off to askAI. Clearing it here — between
+    // the preview and the answer — would blink the typing dots off for a frame,
+    // making it look like the assistant stopped. askAI owns `loading` from here
+    // (it's already true), so the dots stay visible straight through to the answer.
     // Nothing matched, or preview failed → answer over everything the user can see.
     if (!previewOk || docs.length === 0) {
       await askAI(text, undefined);
@@ -276,7 +279,8 @@ function AIAssistant() {
       await askAI(text, docs.map((d) => d.id));
       return;
     }
-    // Several close matches → let the user disambiguate.
+    // Several close matches → stop the spinner and let the user disambiguate.
+    setLoading(false);
     setMessages((prev) => [
       ...prev,
       {
