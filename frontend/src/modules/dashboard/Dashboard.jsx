@@ -397,6 +397,23 @@ function Dashboard() {
     }
   }
 
+  // Permanently delete everything in the trash.
+  async function emptyTrash() {
+    if (trash.length === 0) return;
+    if (!window.confirm(`Permanently delete all ${trash.length} item(s) in the trash? This can't be undone.`)) {
+      return;
+    }
+    try {
+      await fetch(`${API_BASE}/api/dashboard/widgets/trash`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
+      setTrash([]);
+    } catch {
+      loadTrash(); // resync on failure
+    }
+  }
+
   // Undo an auto-add notice: trash every widget it added.
   async function undoRecent(added) {
     setToast(null);
@@ -1036,6 +1053,13 @@ function Dashboard() {
             ✕
           </button>
         </div>
+        {trash.length > 0 && (
+          <div className="trash-toolbar">
+            <button type="button" className="ghost-btn small danger" onClick={emptyTrash}>
+              🗑 Empty trash ({trash.length})
+            </button>
+          </div>
+        )}
         {trash.length === 0 ? (
           <div className="dashboard-empty">Trash is empty.</div>
         ) : (

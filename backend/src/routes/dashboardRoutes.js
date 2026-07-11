@@ -24,6 +24,7 @@ const {
   deleteDashboard,
   listWidgets,
   listArchivedWidgetsForUser,
+  deleteArchivedWidgetsForUser,
   listRecentMetricWidgetsForUser,
   findWidgetByMessage,
   findMetricWidget,
@@ -371,6 +372,18 @@ router.patch("/widgets/:id", requireAuth, async (req, res, next) => {
     }
     const updated = await updateWidget(widget.personal_dashboard_id, req.params.id, allowed);
     return res.json(updated);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// DELETE /api/dashboard/widgets/trash — empty the trash: permanently delete
+// every trashed widget the user owns. Declared BEFORE /widgets/:id so "trash"
+// isn't matched as an :id.
+router.delete("/widgets/trash", requireAuth, async (req, res, next) => {
+  try {
+    const removed = await deleteArchivedWidgetsForUser(req.user.id);
+    return res.json({ deleted: removed });
   } catch (err) {
     return next(err);
   }

@@ -147,6 +147,26 @@ async function listArchivedWidgetsForUser(userId) {
   return data || [];
 }
 
+// Permanently delete EVERY trashed widget across the user's boards (empty trash).
+// Returns the number removed.
+async function deleteArchivedWidgetsForUser(userId) {
+  const { data: dashes, error: dErr } = await supabase
+    .from("personal_dashboards")
+    .select("id")
+    .eq("user_id", userId);
+  if (dErr) throw dErr;
+  const ids = (dashes || []).map((d) => d.id);
+  if (ids.length === 0) return 0;
+  const { data, error } = await supabase
+    .from("dashboard_widgets")
+    .delete()
+    .in("personal_dashboard_id", ids)
+    .not("archived_at", "is", null)
+    .select("id");
+  if (error) throw error;
+  return (data || []).length;
+}
+
 // Recently auto-added metric widgets across the user's boards, for the
 // "added metrics — undo" toast. `sinceIso` bounds it to the last upload.
 async function listRecentMetricWidgetsForUser(userId, sinceIso) {
@@ -308,6 +328,7 @@ module.exports = {
   deleteDashboard,
   listWidgets,
   listArchivedWidgetsForUser,
+  deleteArchivedWidgetsForUser,
   listRecentMetricWidgetsForUser,
   findWidgetByMessage,
   findMetricWidget,

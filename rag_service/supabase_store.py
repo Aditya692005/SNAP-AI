@@ -8,10 +8,11 @@ its text literal ("[0.1,0.2,...]"), so we format lists that way on the way in.
 import os
 
 from dotenv import load_dotenv
-
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
-
 from supabase import create_client
+
+# Load .env before any client is created (create_client only reads env lazily in
+# sb(), so importing supabase first is fine).
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 _client = None
 
