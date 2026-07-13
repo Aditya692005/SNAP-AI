@@ -7,8 +7,8 @@ const crypto = require("crypto");
 const express = require("express");
 const multer = require("multer");
 const FormData = require("form-data");
-const fetch = require("node-fetch");
 
+const { ragFetch } = require("../utils/ragClient");
 const requireAuth = require("../middleware/requireAuth");
 const {
   markWidgetsStaleForSource,
@@ -23,6 +23,7 @@ const {
   accessibleDocumentIds,
   findByFileName,
   findByContentHash,
+  findDocumentById,
   deleteAllForUser,
 } = require("../models/documentModel");
 const {
@@ -35,8 +36,6 @@ const {
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
-
-const RAG_URL = process.env.RAG_SERVICE_URL || "http://localhost:8000";
 
 // ── POST /api/rag/chat ────────────────────────────────────────────────────────
 // Phase 3: persisted chat. Each turn lives in ai_conversations / ai_messages
@@ -107,18 +106,22 @@ router.post("/chat", requireAuth, async (req, res, next) => {
     // built above from prior messages, so this new one isn't double-counted.
     await addMessage(convo.id, "USER", message).catch(() => {});
 
-    const response = await fetch(`${RAG_URL}/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        message,
-        session_id: `user_${req.user.id}`,
-        history,
-        organization_id: orgId,
-        document_ids: documentIds,
-        focus_document_id: focusDocumentId,
-      }),
-    });
+    const response = await ragFetch(
+      "/chat",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message,
+          session_id: `user_${req.user.id}`,
+          history,
+          organization_id: orgId,
+          document_ids: documentIds,
+          focus_document_id: focusDocumentId,
+        }),
+      },
+      180000 // condense + retrieval + generation can legitimately take a while
+    );
 
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
@@ -194,11 +197,15 @@ router.post("/chat/preview", requireAuth, async (req, res, next) => {
     }
     if (documentIds.length === 0) return res.json({ documents: [] });
 
-    const response = await fetch(`${RAG_URL}/retrieve-preview`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, organization_id: orgId, document_ids: documentIds }),
-    });
+    const response = await ragFetch(
+      "/retrieve-preview",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message, organization_id: orgId, document_ids: documentIds }),
+      },
+      30000
+    );
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
       return res.status(response.status).json({ message: err.detail || "RAG service error" });
@@ -217,11 +224,20 @@ router.post("/visualize", requireAuth, async (req, res, next) => {
     const { instruction, source } = req.body;
     if (!instruction) return res.status(400).json({ message: "instruction is required" });
 
-    const response = await fetch(`${RAG_URL}/visualize`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ instruction, source: source || null }),
-    });
+    // organization_id scopes the on-disk file lookup to this tenant's uploads dir.
+    const response = await ragFetch(
+      "/visualize",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          instruction,
+          source: source || null,
+          organization_id: req.user.organization_id,
+        }),
+      },
+      120000
+    );
 
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
@@ -297,25 +313,31 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
       });
     }
 
-    // 2) Send the file to the RAG service to embed into Supabase (document_chunks
-    //    + document_tables) under this document_id.
+    // 2) Send the file to the RAG service. Indexing runs as a BACKGROUND job
+    //    there — this returns as soon as the file is saved and the job queued.
+    //    The RAG service owns documents.status from here (PROCESSING →
+    //    PROCESSED/FAILED); poll GET /api/rag/index-status/:documentId or the
+    //    documents list to see it land.
     const form = new FormData();
     form.append("file", req.file.buffer, { filename, contentType: req.file.mimetype });
     form.append("document_id", doc.id);
     form.append("organization_id", orgId);
 
-    const response = await fetch(`${RAG_URL}/index`, {
-      method: "POST",
-      body: form,
-      headers: form.getHeaders(),
-    });
+    const response = await ragFetch(
+      "/index",
+      { method: "POST", body: form, headers: form.getHeaders() },
+      60000 // just save + enqueue; the heavy work happens in the background job
+    );
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
       // Row stays PROCESSING; the file can be re-indexed later.
       return res.status(response.status).json({ message: err.detail || "Indexing failed" });
     }
     const data = await response.json();
-    await setDocumentStatus(doc.id, "PROCESSED");
+    if (data.chunks != null) {
+      // Older RAG service that still indexes synchronously.
+      await setDocumentStatus(doc.id, "PROCESSED");
+    }
     // No document_access self-grant: the uploader can already see their own
     // documents via uploaded_by_user_id, and a grant row would (wrongly) show
     // them in the document's "Shared with" list.
@@ -386,11 +408,15 @@ router.post("/ingest", requireAuth, async (req, res, next) => {
       });
     }
 
-    const response = await fetch(`${RAG_URL}/ingest`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ filename, document_id: doc.id, organization_id: orgId }),
-    });
+    const response = await ragFetch(
+      "/ingest",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename, document_id: doc.id, organization_id: orgId }),
+      },
+      300000 // synchronous parse + embed (+ per-table LLM summaries)
+    );
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
       return res.status(response.status).json({ message: err.detail || "Ingest failed" });
@@ -404,12 +430,44 @@ router.post("/ingest", requireAuth, async (req, res, next) => {
   }
 });
 
+// ── GET /api/rag/index-status/:documentId ─────────────────────────────────────
+// Indexing progress for a document ('processing' | 'done' | 'failed' |
+// 'unknown' after a RAG-service restart — fall back to the documents list's
+// status column in that case). Org-checked so users can't probe other tenants.
+router.get("/index-status/:documentId", requireAuth, async (req, res, next) => {
+  try {
+    const doc = await findDocumentById(req.params.documentId);
+    if (!doc || doc.organization_id !== req.user.organization_id) {
+      return res.status(404).json({ message: "Document not found." });
+    }
+    const response = await ragFetch(
+      `/index-status/${encodeURIComponent(req.params.documentId)}`,
+      {},
+      10000
+    );
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      return res.status(response.status).json({ message: err.detail || "RAG service error" });
+    }
+    const data = await response.json();
+    // documents.status is authoritative once the job record is gone (restart).
+    return res.json({ ...data, document_status: doc.status });
+  } catch (err) {
+    return next(err);
+  }
+});
+
 // ── DELETE /api/rag/documents ─────────────────────────────────────────────────
 // Clears the RAG vector store + files on disk, AND wipes this user's stored
 // dashboard metrics so the dashboard resets to "no data yet".
 router.delete("/documents", requireAuth, async (req, res, next) => {
   try {
-    const response = await fetch(`${RAG_URL}/documents`, { method: "DELETE" });
+    // Scoped to this user's org — other tenants' on-disk files are untouched.
+    const response = await ragFetch(
+      `/documents?organization_id=${encodeURIComponent(req.user.organization_id)}`,
+      { method: "DELETE" },
+      30000
+    );
     const data = await response.json();
     await clearAllForUser(req.user.id);
     // Also remove this user's Supabase documents (cascades chunks/tables/access).
@@ -425,8 +483,13 @@ router.delete("/documents", requireAuth, async (req, res, next) => {
 router.get("/download/:filename", requireAuth, async (req, res, next) => {
   try {
     const filename = req.params.filename;
-    const response = await fetch(
-      `${RAG_URL}/download/${encodeURIComponent(filename)}`
+    // organization_id scopes the lookup to this tenant's uploads directory.
+    const response = await ragFetch(
+      `/download/${encodeURIComponent(filename)}?organization_id=${encodeURIComponent(
+        req.user.organization_id
+      )}`,
+      {},
+      60000
     );
 
     if (!response.ok) {

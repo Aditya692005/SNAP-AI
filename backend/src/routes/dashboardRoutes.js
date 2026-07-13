@@ -5,8 +5,8 @@
 // Mount in server.js:  app.use("/api/dashboard", dashboardRoutes);
 
 const express = require("express");
-const fetch = require("node-fetch");
 
+const { ragFetch } = require("../utils/ragClient");
 const requireAuth = require("../middleware/requireAuth");
 const {
   getIncludedMetrics,
@@ -74,7 +74,6 @@ const {
 } = require("../services/widgetRefreshService");
 
 const router = express.Router();
-const RAG_URL = process.env.RAG_SERVICE_URL || "http://localhost:8000";
 
 // Turn a period label ("2024", "2024-03", "2024-Q2") into a sortable number.
 function periodKey(period) {
@@ -767,7 +766,12 @@ router.post("/department/widgets/:id/refresh", requireAuth, async (req, res, nex
     if (!Number.isInteger(expectedVersion)) {
       return res.status(400).json({ message: "expected_version (integer) is required" });
     }
-    const updated = await refreshDepartmentWidget(widget, expectedVersion, req.user.id);
+    const updated = await refreshDepartmentWidget(
+      widget,
+      expectedVersion,
+      req.user.id,
+      req.user.organization_id
+    );
     return res.json(updated);
   } catch (err) {
     if (err.status) return res.status(err.status).json({ message: err.message });
@@ -858,9 +862,13 @@ router.delete("/documents/:source", requireAuth, async (req, res, next) => {
     // Best-effort: also drop the file + vectors from the RAG service. If RAG is
     // down the metrics are still gone; the file can be cleared later.
     try {
-      await fetch(`${RAG_URL}/documents/${encodeURIComponent(req.params.source)}`, {
-        method: "DELETE",
-      });
+      await ragFetch(
+        `/documents/${encodeURIComponent(req.params.source)}?organization_id=${encodeURIComponent(
+          req.user.organization_id
+        )}`,
+        { method: "DELETE" },
+        15000
+      );
     } catch {
       /* RAG unavailable — dashboard data already removed */
     }

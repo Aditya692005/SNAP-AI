@@ -17,8 +17,8 @@
 // document; only the uploader or an org_admin can delete or re-share it).
 
 const express = require("express");
-const fetch = require("node-fetch");
 
+const { ragFetch } = require("../utils/ragClient");
 const requireAuth = require("../middleware/requireAuth");
 const AppError = require("../utils/AppError");
 const {
@@ -39,8 +39,6 @@ const {
 } = require("../models/departmentModel");
 const { findAssignableRole } = require("../models/roleModel");
 const { logAdminAction } = require("../models/auditModel");
-
-const RAG_URL = process.env.RAG_SERVICE_URL || "http://localhost:8000";
 
 const router = express.Router();
 router.use(requireAuth);
@@ -286,11 +284,15 @@ router.delete("/:id", async (req, res, next) => {
     // 2) The documents row (cascades chunks / tables / access in Supabase).
     await deleteDocument(doc.id, orgId);
 
-    // 3) The on-disk file + Chroma vectors in the RAG service (best-effort).
+    // 3) The on-disk file in the RAG service (best-effort).
     try {
-      await fetch(`${RAG_URL}/documents/${encodeURIComponent(doc.file_name)}`, {
-        method: "DELETE",
-      });
+      await ragFetch(
+        `/documents/${encodeURIComponent(doc.file_name)}?organization_id=${encodeURIComponent(
+          orgId
+        )}`,
+        { method: "DELETE" },
+        15000
+      );
     } catch {
       /* RAG down — DB already cleaned */
     }

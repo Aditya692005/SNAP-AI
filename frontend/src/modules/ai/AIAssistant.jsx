@@ -462,7 +462,14 @@ function AIAssistant() {
     for (const file of files) {
       try {
         const data = await uploadResolvingDuplicates(file);
-        succeeded.push({ filename: data.filename, chunks: data.chunks, documentId: data.document_id });
+        succeeded.push({
+          filename: data.filename,
+          chunks: data.chunks,
+          // Indexing now runs in the background on the RAG service; the doc
+          // shows as "processing" in the sidebar until it flips to ready.
+          processing: data.status === "processing",
+          documentId: data.document_id,
+        });
       } catch (err) {
         if (err.message !== "upload cancelled") {
           failed.push({ filename: file.name, error: err.message });
@@ -480,11 +487,13 @@ function AIAssistant() {
 
     if (succeeded.length === 1 && failed.length === 0) {
       notify(
-        `Indexed "${succeeded[0].filename}" (${succeeded[0].chunks} chunks) — selected for this chat.`
+        succeeded[0].processing
+          ? `Uploaded "${succeeded[0].filename}" — indexing in the background; it'll be ready to query in a moment.`
+          : `Indexed "${succeeded[0].filename}" (${succeeded[0].chunks} chunks) — selected for this chat.`
       );
     } else if (succeeded.length > 0) {
       notify(
-        `Indexed ${succeeded.length} documents:\n${succeeded
+        `Uploaded ${succeeded.length} documents (indexing in the background):\n${succeeded
           .map((s) => s.filename)
           .join(", ")}`
       );
@@ -499,6 +508,13 @@ function AIAssistant() {
     }
 
     fetchDocs();
+    // Background indexing: refresh again so "processing" flips to ready
+    // without a manual reload once the RAG service finishes.
+    if (succeeded.some((s) => s.processing)) {
+      setTimeout(fetchDocs, 5000);
+      setTimeout(fetchDocs, 15000);
+      setTimeout(fetchDocs, 45000);
+    }
     setUploading(false);
     setUploadProgress(null);
     e.target.value = "";

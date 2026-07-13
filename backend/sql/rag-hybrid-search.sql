@@ -10,6 +10,7 @@ alter table document_chunks add column if not exists organization_id uuid;
 alter table document_chunks add column if not exists char_start      int;
 alter table document_chunks add column if not exists char_end        int;
 alter table document_chunks add column if not exists metadata        jsonb;
+alter table document_chunks add column if not exists superseded_at   timestamptz;
 
 -- 1) Full-text vector over chunk_text + GIN index for keyword search.
 alter table document_chunks
@@ -23,6 +24,13 @@ create index if not exists idx_document_chunks_tsv
 --    text (FTS). Ranks each independently, fuses by RRF (score = sum 1/(k+rank),
 --    k=60), returns the top match_count. Tenant filter uses the denormalized
 --    document_chunks.organization_id; documents is joined only for file_name.
+--    Superseded chunks (old doc versions kept for citations) are excluded.
+--
+--    HNSW recall (hnsw.ef_search) is raised database-wide by
+--    rag-scale-hardening.sql — NOT via a per-function SET clause: extension
+--    GUCs count as unknown "placeholder" parameters until pgvector's library
+--    loads, and setting a placeholder needs superuser, so a function-level SET
+--    can fail with "permission denied" at create or call time on Supabase.
 drop function if exists hybrid_match_document_chunks(vector, text, uuid, int, uuid[]);
 
 create function hybrid_match_document_chunks(
@@ -58,6 +66,7 @@ as $$
         from document_chunks dc
         where dc.organization_id = p_organization_id
           and dc.embedding is not null
+          and dc.superseded_at is null
           and (p_document_ids is null or dc.document_id = any (p_document_ids))
         order by dc.embedding <=> query_embedding
         limit match_count * 2
@@ -70,6 +79,7 @@ as $$
         where dc.organization_id = p_organization_id
           and q.tsq is not null
           and dc.tsv @@ q.tsq
+          and dc.superseded_at is null
           and (p_document_ids is null or dc.document_id = any (p_document_ids))
         order by ts_rank(dc.tsv, q.tsq) desc
         limit match_count * 2

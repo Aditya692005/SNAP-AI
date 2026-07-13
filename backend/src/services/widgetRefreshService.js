@@ -12,7 +12,7 @@
 // (config.stale). The user clicks "refresh" on the widget to actually rerun the
 // LLM, so we never silently spend on regeneration.
 
-const fetch = require("node-fetch");
+const { ragFetch } = require("../utils/ragClient");
 const { findMessageById, listMessages } = require("../models/conversationModel");
 const {
   getWidgetForUser,
@@ -25,8 +25,6 @@ const {
   updateWidgetConfigUnversioned,
   touchBoard,
 } = require("../models/departmentDashboardModel");
-
-const RAG_URL = process.env.RAG_SERVICE_URL || "http://localhost:8000";
 
 // Recover {instruction, sources} for a pinned chart from the AI message it came
 // from. instruction = the USER message immediately before that AI message.
@@ -51,12 +49,21 @@ async function recoverRequest(aiMessageId) {
 }
 
 // Ask the RAG service to rebuild a chart spec for `instruction` against `source`.
-async function regenerateSpec(instruction, source) {
-  const response = await fetch(`${RAG_URL}/visualize`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ instruction, source: source || null }),
-  });
+// organizationId scopes the on-disk file lookup to that tenant's uploads dir.
+async function regenerateSpec(instruction, source, organizationId) {
+  const response = await ragFetch(
+    "/visualize",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instruction,
+        source: source || null,
+        organization_id: organizationId || null,
+      }),
+    },
+    120000
+  );
   if (!response.ok) {
     const err = await response.json().catch(() => ({}));
     throw new Error(err.detail || "Visualization failed");
@@ -81,7 +88,7 @@ async function refreshWidget(userId, organizationId, widgetId) {
   }
   // Prefer the source flagged stale (the re-uploaded file); else the first source.
   const source = widget.config?.stale_source || recovered.sources[0] || null;
-  const spec = await regenerateSpec(recovered.instruction, source);
+  const spec = await regenerateSpec(recovered.instruction, source, organizationId);
 
   const config = { ...(widget.config || {}), spec };
   delete config.stale;
@@ -93,7 +100,7 @@ async function refreshWidget(userId, organizationId, widgetId) {
 // concurrent editor isn't clobbered. `widget` is the already-fetched+authorized
 // widget row; `expectedVersion` is the client's last-seen version; `userId`
 // records who refreshed it. Throws (404/422/409-tagged) if it can't refresh.
-async function refreshDepartmentWidget(widget, expectedVersion, userId) {
+async function refreshDepartmentWidget(widget, expectedVersion, userId, organizationId) {
   const recovered = await recoverRequest(widget.ai_message_id);
   if (!recovered) {
     const e = new Error("This chart can't be refreshed automatically — it isn't linked to a chat request.");
@@ -101,7 +108,7 @@ async function refreshDepartmentWidget(widget, expectedVersion, userId) {
     throw e;
   }
   const source = widget.config?.stale_source || recovered.sources[0] || null;
-  const spec = await regenerateSpec(recovered.instruction, source);
+  const spec = await regenerateSpec(recovered.instruction, source, organizationId);
 
   const config = { ...(widget.config || {}), spec };
   delete config.stale;

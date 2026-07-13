@@ -3,12 +3,16 @@ RAG microservice — FastAPI + LangChain LCEL + Supabase pgvector + Gemini
 Start with: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 """
 
+import asyncio
 import json
 import os
 import re
 import shutil
+import threading
 import time
-from datetime import datetime
+from collections import OrderedDict, deque
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -18,9 +22,9 @@ import numpy as np
 import pandas as pd
 from fpdf import FPDF
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -49,6 +53,38 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 UPLOAD_DIR = Path("./uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
+# Uploads are namespaced per organization (uploads/<org_id>/<filename>) so two
+# tenants uploading the same filename can never overwrite — or read — each
+# other's files. Files from before the namespacing live flat in uploads/;
+# resolve_source_path falls back to that legacy layout.
+_SAFE_SEGMENT_RE = re.compile(r"[^a-zA-Z0-9_-]")
+
+
+def org_dir(organization_id: str | None) -> Path:
+    safe = _SAFE_SEGMENT_RE.sub("", str(organization_id or ""))
+    if not safe:
+        return UPLOAD_DIR
+    d = UPLOAD_DIR / safe
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def resolve_source_path(source: str | None, organization_id: str | None) -> Path | None:
+    """Locate an uploaded/generated file: the org's directory first, then the
+    legacy flat layout. Never escapes UPLOAD_DIR; never looks in OTHER orgs'
+    directories. None if the file doesn't exist."""
+    safe_name = Path(source or "").name
+    if not safe_name:
+        return None
+    bases = [org_dir(organization_id)] if organization_id else []
+    bases.append(UPLOAD_DIR)
+    root = UPLOAD_DIR.resolve()
+    for base in bases:
+        p = (base / safe_name).resolve()
+        if root in p.parents and p.is_file():
+            return p
+    return None
+
 # ── LangChain components ───────────────────────────────────────────────────────
 embeddings = HuggingFaceEmbeddings(
     model_name="all-MiniLM-L6-v2",
@@ -75,11 +111,21 @@ except Exception as _rerank_exc:  # noqa: BLE001
     reranker = None
     print(f"[rag] cross-encoder reranker unavailable ({_rerank_exc}); using fused order")
 
-llm = ChatGoogleGenerativeAI(
-    model=GEMINI_MODEL,
-    google_api_key=GOOGLE_API_KEY,
-    temperature=0.2,
-)
+# Bound every Gemini call so a hung upstream can't pile requests up behind it.
+LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "90"))
+try:
+    llm = ChatGoogleGenerativeAI(
+        model=GEMINI_MODEL,
+        google_api_key=GOOGLE_API_KEY,
+        temperature=0.2,
+        timeout=LLM_TIMEOUT_SECONDS,
+    )
+except TypeError:  # older langchain-google-genai without a timeout kwarg
+    llm = ChatGoogleGenerativeAI(
+        model=GEMINI_MODEL,
+        google_api_key=GOOGLE_API_KEY,
+        temperature=0.2,
+    )
 
 splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
 
@@ -154,7 +200,12 @@ def semantic_split(text: str) -> list[dict] | None:
     return merged
 
 # ── Per-session chat history (list of HumanMessage / AIMessage) ───────────────
-session_histories: dict[str, list] = {}
+# Bounded LRU: histories are a legacy fallback (the backend sends persisted
+# history), so an unbounded dict here is just a slow memory leak under many
+# users. Oldest sessions are evicted past MAX_SESSIONS.
+MAX_SESSIONS = int(os.getenv("MAX_SESSIONS", "500"))
+session_histories: "OrderedDict[str, list]" = OrderedDict()
+_sessions_lock = threading.Lock()
 
 # ── Prompts ────────────────────────────────────────────────────────────────────
 CONDENSE_PROMPT = ChatPromptTemplate.from_messages([
@@ -184,13 +235,36 @@ PLAIN_PROMPT = ChatPromptTemplate.from_messages([
 # ── FastAPI app ────────────────────────────────────────────────────────────────
 app = FastAPI(title="SNAP AI RAG Service")
 
+# Env-driven origins so a deployment doesn't silently run with localhost-only CORS.
+ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.getenv(
+        "ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:5000"
+    ).split(",")
+    if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:5000"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Optional shared-secret auth: this service does no user auth of its own (the
+# Node backend enforces per-user document access), so if it's ever reachable
+# beyond localhost, set RAG_INTERNAL_TOKEN on both sides — every request except
+# /health and /metrics must then carry the matching x-internal-token header.
+RAG_INTERNAL_TOKEN = os.getenv("RAG_INTERNAL_TOKEN", "")
+
+
+@app.middleware("http")
+async def _require_internal_token(request: Request, call_next):
+    if RAG_INTERNAL_TOKEN and request.url.path not in ("/health", "/metrics"):
+        if request.headers.get("x-internal-token") != RAG_INTERNAL_TOKEN:
+            return JSONResponse(status_code=401, content={"detail": "Invalid internal token."})
+    return await call_next(request)
 
 # ── File loaders ───────────────────────────────────────────────────────────────
 ALLOWED_EXTENSIONS = {".pdf", ".csv", ".txt", ".xlsx", ".xls", ".docx", ".pptx"}
@@ -234,8 +308,22 @@ def summarize_table(table) -> str:
 
 def index_document(document_id: str, organization_id: str, path: Path, filename: str) -> dict:
     """Parse a file into Supabase: tables -> document_tables, and text + table
-    summaries -> embedded document_chunks. Returns {chunks, tables}."""
+    summaries -> embedded document_chunks. Returns {chunks, tables, version}.
+
+    Versioned, no visibility gap: the new version's rows are inserted FIRST,
+    then the old version is retired (chunks soft-superseded so cited chunk ids
+    keep resolving; old table rows deleted). A failure mid-way cleans up the
+    partial new version and leaves the old one live."""
     parsed = parse_file(path)
+
+    # Strictly newer than both documents.version (backend bumps on re-upload)
+    # and whatever version the existing chunks carry, so old rows can always be
+    # told apart from the ones inserted below.
+    new_version = max(
+        store.get_document_version(document_id),
+        store.get_max_chunk_version(document_id) + 1,
+    )
+    index_started = datetime.now(timezone.utc).isoformat()
 
     chunk_texts: list[str] = []
     chunk_metas: list[dict] = []  # parallel: {char_start, char_end, page} per chunk
@@ -259,66 +347,145 @@ def index_document(document_id: str, organization_id: str, path: Path, filename:
                 chunk_texts.append(c["text"])
                 chunk_metas.append({"char_start": c["start"], "char_end": c["end"], "page": page})
 
-    # Table summaries → short generated text (not a verbatim source span, so no
-    # offsets); the recursive splitter is fine.
-    for table in parsed.tables:
-        store.insert_document_table(document_id, table)
-        summary = summarize_table(table)
-        if summary and summary.strip():
-            for c in splitter.split_text(summary):
-                if c.strip():
-                    chunk_texts.append(c)
-                    chunk_metas.append({})
+    try:
+        # Table summaries → short generated text (not a verbatim source span, so
+        # no offsets); the recursive splitter is fine.
+        for table in parsed.tables:
+            store.insert_document_table(document_id, table, doc_version=new_version)
+            summary = summarize_table(table)
+            if summary and summary.strip():
+                for c in splitter.split_text(summary):
+                    if c.strip():
+                        chunk_texts.append(c)
+                        chunk_metas.append({})
 
-    if chunk_texts:
-        vectors = embeddings.embed_documents(chunk_texts)
-        store.insert_document_chunks(
-            document_id,
-            chunk_texts,
-            vectors,
-            organization_id=organization_id,
-            doc_version=store.get_document_version(document_id),
-            source=filename,
-            metas=chunk_metas,
-        )
+        if chunk_texts:
+            vectors = embeddings.embed_documents(chunk_texts)
+            store.insert_document_chunks(
+                document_id,
+                chunk_texts,
+                vectors,
+                organization_id=organization_id,
+                doc_version=new_version,
+                source=filename,
+                metas=chunk_metas,
+            )
+    except Exception:
+        store.delete_version(document_id, new_version)
+        raise
 
-    return {"chunks": len(chunk_texts), "tables": len(parsed.tables)}
+    # New version fully live → retire the old one.
+    store.supersede_old_versions(document_id, new_version, before_iso=index_started)
+
+    return {"chunks": len(chunk_texts), "tables": len(parsed.tables), "version": new_version}
 
 
-@app.post("/index")
+# ── Background indexing (P3) ──────────────────────────────────────────────────
+# Parsing + sentence embedding + per-table LLM summaries can take minutes for a
+# big file; doing that inside the request handler ties a worker up for the whole
+# time. /index now saves the file, queues a job on a small executor, and returns
+# immediately; the job owns documents.status (PROCESSING → PROCESSED/FAILED).
+INDEX_WORKERS = int(os.getenv("INDEX_WORKERS", "2"))
+_index_executor = ThreadPoolExecutor(max_workers=INDEX_WORKERS, thread_name_prefix="rag-index")
+_index_jobs: dict[str, dict] = {}
+_jobs_lock = threading.Lock()
+_JOB_PUBLIC_FIELDS = ("document_id", "filename", "status", "error", "chunks", "tables", "version")
+
+
+def _job_public(job: dict) -> dict:
+    return {k: job.get(k) for k in _JOB_PUBLIC_FIELDS}
+
+
+def _run_index_job(document_id: str, organization_id: str, path: Path, filename: str) -> None:
+    with _jobs_lock:
+        job = _index_jobs[document_id]
+        job["status"] = "processing"
+        job["started_at"] = time.time()
+    store.set_document_status(document_id, "PROCESSING")
+    try:
+        result = index_document(document_id, organization_id, path, filename)
+        store.set_document_status(document_id, "PROCESSED")
+        with _jobs_lock:
+            job.update(status="done", finished_at=time.time(), **result)
+    except Exception as exc:  # noqa: BLE001 — job must record any failure
+        print(f"[rag] indexing failed for {filename} ({document_id}): {exc}")
+        store.set_document_status(document_id, "FAILED", error=exc)
+        with _jobs_lock:
+            job.update(status="failed", finished_at=time.time(), error=str(exc)[:500])
+
+
+def _save_upload(fileobj, dest: Path) -> None:
+    with dest.open("wb") as f:
+        shutil.copyfileobj(fileobj, f)
+
+
+@app.post("/index", status_code=202)
 async def index_endpoint(
     file: UploadFile = File(...),
     document_id: str = Form(...),
     organization_id: str = Form(...),
 ):
     """Phase 2 ingestion. The backend creates the documents row (with org + user)
-    then posts the file here with its document_id to embed into Supabase."""
+    then posts the file here with its document_id. The file is saved and indexing
+    is queued; poll /index-status/{document_id} (or documents.status) for the
+    outcome."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided.")
-    suffix = Path(file.filename).suffix.lower()
+    safe_name = Path(file.filename).name
+    suffix = Path(safe_name).suffix.lower()
     if suffix not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported type '{suffix}'. Allowed: {sorted(ALLOWED_EXTENSIONS)}",
         )
 
-    dest = UPLOAD_DIR / file.filename
-    with dest.open("wb") as f:
-        shutil.copyfileobj(file.file, f)
+    dest = org_dir(organization_id) / safe_name
+    await asyncio.to_thread(_save_upload, file.file, dest)
 
-    # Idempotent re-index: clear any existing chunks/tables for this document.
-    store.delete_document_data(document_id)
-    try:
-        result = index_document(document_id, organization_id, dest, file.filename)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Indexing failed: {exc}")
+    with _jobs_lock:
+        existing = _index_jobs.get(document_id)
+        if existing and existing["status"] in ("queued", "processing"):
+            # Same document already being indexed — don't stack a second job.
+            return {**_job_public(existing), "status": "processing"}
+        _index_jobs[document_id] = {
+            "document_id": document_id,
+            "filename": safe_name,
+            "status": "queued",
+            "queued_at": time.time(),
+        }
+        # Bound the registry: drop the oldest finished jobs past 1000 entries.
+        if len(_index_jobs) > 1000:
+            done = [k for k, j in _index_jobs.items() if j["status"] in ("done", "failed")]
+            for k in done[:500]:
+                _index_jobs.pop(k, None)
 
-    return {"document_id": document_id, "filename": file.filename, **result}
+    _index_executor.submit(_run_index_job, document_id, organization_id, dest, safe_name)
+    return {"document_id": document_id, "filename": safe_name, "status": "processing"}
+
+
+@app.get("/index-status/{document_id}")
+def index_status(document_id: str):
+    """Status of a queued/running/finished indexing job. 'unknown' after a
+    service restart — fall back to documents.status in that case."""
+    with _jobs_lock:
+        job = _index_jobs.get(document_id)
+        return _job_public(job) if job else {"document_id": document_id, "status": "unknown"}
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def get_history(session_id: str) -> list:
-    return session_histories.setdefault(session_id, [])
+    with _sessions_lock:
+        hist = session_histories.setdefault(session_id, [])
+        session_histories.move_to_end(session_id)
+        while len(session_histories) > MAX_SESSIONS:
+            session_histories.popitem(last=False)
+    return hist
+
+
+def set_history(session_id: str, messages: list) -> None:
+    with _sessions_lock:
+        session_histories[session_id] = messages
+        session_histories.move_to_end(session_id)
 
 
 # Max characters of context fed to the model when summarizing a whole document.
@@ -443,16 +610,15 @@ def references_prior_output(question: str) -> bool:
 MAX_VIZ_CHARS = 60_000
 
 
-def load_dataframe(source: str) -> "pd.DataFrame | None":
+def load_dataframe(source: str, organization_id: str | None = None) -> "pd.DataFrame | None":
     """Re-read the original uploaded file as a DataFrame (CSV / Excel only).
 
     Charts need accurate numeric data, so for tabular files we parse the source
     on disk rather than relying on the chunked/embedded text. Returns None for
     non-tabular files or if parsing fails.
     """
-    safe_name = Path(source).name
-    path = (UPLOAD_DIR / safe_name).resolve()
-    if UPLOAD_DIR.resolve() not in path.parents or not path.is_file():
+    path = resolve_source_path(source, organization_id)
+    if path is None:
         return None
     suffix = path.suffix.lower()
     try:
@@ -465,19 +631,18 @@ def load_dataframe(source: str) -> "pd.DataFrame | None":
     return None
 
 
-def build_source_context(source: str | None) -> tuple[str, bool]:
+def build_source_context(source: str | None, organization_id: str | None = None) -> tuple[str, bool]:
     """Disk-only context for a single uploaded file — used by dashboard metric
     extraction and the standalone /visualize and /generate-document endpoints.
     Tabular files -> CSV text; other types -> extracted text. No vector store."""
     if not source:
         return "", False
-    df = load_dataframe(source)
+    df = load_dataframe(source, organization_id)
     if df is not None:
         text = "TABULAR DATA (CSV, first rows):\n" + df.head(500).to_csv(index=False)
         return text[:MAX_VIZ_CHARS], True
-    safe = Path(source).name
-    path = (UPLOAD_DIR / safe).resolve()
-    if UPLOAD_DIR.resolve() in path.parents and path.is_file():
+    path = resolve_source_path(source, organization_id)
+    if path is not None:
         try:
             parsed = parse_file(path)
             text = "DOCUMENT TEXT:\n" + "\n\n".join(parsed.text_chunks)
@@ -611,14 +776,17 @@ async def _visualize_from_dataset(dataset: str, is_tabular: bool, instruction: s
     return spec
 
 
-async def run_visualization(source: str | None, instruction: str) -> dict:
-    dataset, is_tabular = build_source_context(source)
+async def run_visualization(source: str | None, instruction: str, organization_id: str | None = None) -> dict:
+    # File parsing is blocking I/O + pandas — keep it off the event loop.
+    dataset, is_tabular = await asyncio.to_thread(build_source_context, source, organization_id)
     return await _visualize_from_dataset(dataset, is_tabular, instruction, source or "document")
 
 
 async def run_visualization_supabase(instruction: str, organization_id, document_ids, focus_document_id) -> tuple[dict, list]:
-    dataset, is_tabular, used_ids = build_viz_context_supabase(instruction, organization_id, document_ids, focus_document_id)
-    source_files = store.file_names_for_documents(used_ids)
+    dataset, is_tabular, used_ids = await asyncio.to_thread(
+        build_viz_context_supabase, instruction, organization_id, document_ids, focus_document_id
+    )
+    source_files = await asyncio.to_thread(store.file_names_for_documents, used_ids)
     spec = await _visualize_from_dataset(dataset, is_tabular, instruction, "")
     return spec, source_files
 
@@ -1121,14 +1289,13 @@ EXTRACT_CHUNK_OVERLAP = 500
 MAX_EXTRACT_CHUNKS = 12
 
 
-def _full_source_text(source: str) -> str:
+def _full_source_text(source: str, organization_id: str | None = None) -> str:
     """Whole-document text for extraction — NOT capped at MAX_VIZ_CHARS."""
-    df = load_dataframe(source)
+    df = load_dataframe(source, organization_id)
     if df is not None:
         return "TABULAR DATA (CSV):\n" + df.head(MAX_TABULAR_ROWS).to_csv(index=False)
-    safe = Path(source).name
-    path = (UPLOAD_DIR / safe).resolve()
-    if UPLOAD_DIR.resolve() in path.parents and path.is_file():
+    path = resolve_source_path(source, organization_id)
+    if path is not None:
         try:
             return "DOCUMENT TEXT:\n" + "\n\n".join(parse_file(path).text_chunks)
         except Exception:
@@ -1170,7 +1337,9 @@ async def _extract_chunk(text: str, system_text: str) -> list[dict]:
     return [m for m in (normalize_metric(i) for i in items if isinstance(i, dict)) if m]
 
 
-async def extract_metrics(source: str, custom_defs: list[dict] | None = None) -> list[dict]:
+async def extract_metrics(
+    source: str, custom_defs: list[dict] | None = None, organization_id: str | None = None
+) -> list[dict]:
     """Metric extraction from one uploaded document.
 
     Tabular files are melted deterministically (every period captured, no LLM
@@ -1178,14 +1347,14 @@ async def extract_metrics(source: str, custom_defs: list[dict] | None = None) ->
     by the LLM chunk-by-chunk over the WHOLE document and merged, so periods no
     longer fall past a truncation cap. `custom_defs` steer the LLM path and set
     the kind on the tabular path."""
-    df = load_dataframe(source)
+    df = await asyncio.to_thread(load_dataframe, source, organization_id)
     if df is not None:
-        tabular = extract_metrics_tabular(df, custom_defs)
+        tabular = await asyncio.to_thread(extract_metrics_tabular, df, custom_defs)
         if tabular:
             return tabular
         # Couldn't structure the table → fall through to the LLM.
 
-    text = _full_source_text(source)
+    text = await asyncio.to_thread(_full_source_text, source, organization_id)
     if not text.strip():
         return []
     system_text = build_metrics_system(custom_defs)
@@ -1196,9 +1365,8 @@ async def extract_metrics(source: str, custom_defs: list[dict] | None = None) ->
 
 
 # ── Document generation helpers ──────────────────────────────────────────────
-# Where generated reports (PDFs) are written. They live alongside uploads so the
-# existing /download endpoint can serve them and they can be re-indexed.
-GENERATED_DIR = UPLOAD_DIR
+# Generated reports (PDFs) are written into the org's uploads dir so the
+# /download endpoint can serve them and they can be re-indexed.
 MAX_DOC_CONTEXT_CHARS = 80_000
 
 # Bundled Unicode font. fpdf2's core fonts (Helvetica) are Latin-1 only and choke
@@ -1294,7 +1462,9 @@ def build_doc_context_supabase(instruction: str, organization_id, document_ids, 
     return context, used
 
 
-async def _generate_doc_from_context(context: str, instruction: str, source_label) -> dict:
+async def _generate_doc_from_context(
+    context: str, instruction: str, source_label, organization_id: str | None = None
+) -> dict:
     if not context.strip():
         raise HTTPException(status_code=400, detail="No document content to work from.")
 
@@ -1303,24 +1473,28 @@ async def _generate_doc_from_context(context: str, instruction: str, source_labe
 
     title = extract_title(md_text)
     filename = f"{slugify(title)}-{datetime.now():%Y%m%d-%H%M%S}.pdf"
-    out_path = (GENERATED_DIR / filename).resolve()
+    # Generated reports live in the org's uploads dir so /download and /ingest
+    # resolve them under the same tenant scoping as uploads.
+    out_path = (org_dir(organization_id) / filename).resolve()
     try:
-        markdown_to_pdf(md_text, out_path)
+        await asyncio.to_thread(markdown_to_pdf, md_text, out_path)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {exc}")
 
     return {"filename": filename, "title": title, "markdown": md_text, "source": source_label}
 
 
-async def run_document_generation(instruction: str, source: str | None) -> dict:
-    context, _ = build_source_context(source)
-    return await _generate_doc_from_context(context, instruction, source)
+async def run_document_generation(instruction: str, source: str | None, organization_id: str | None = None) -> dict:
+    context, _ = await asyncio.to_thread(build_source_context, source, organization_id)
+    return await _generate_doc_from_context(context, instruction, source, organization_id)
 
 
 async def run_document_generation_supabase(instruction: str, organization_id, document_ids, focus_document_id) -> tuple[dict, list]:
-    context, used_ids = build_doc_context_supabase(instruction, organization_id, document_ids, focus_document_id)
-    source_files = store.file_names_for_documents(used_ids)
-    doc = await _generate_doc_from_context(context, instruction, focus_document_id)
+    context, used_ids = await asyncio.to_thread(
+        build_doc_context_supabase, instruction, organization_id, document_ids, focus_document_id
+    )
+    source_files = await asyncio.to_thread(store.file_names_for_documents, used_ids)
+    doc = await _generate_doc_from_context(context, instruction, focus_document_id, organization_id)
     return doc, source_files
 
 
@@ -1343,14 +1517,67 @@ def to_lc_messages(history: list[dict] | None) -> list:
 # so the cross-encoder reranker has a real pool to reorder).
 HYBRID_CANDIDATES = 30
 
-# ── Retrieval caches (P1.5) ───────────────────────────────────────────────────
+# ── Retrieval caches (P1.5 / P3) ──────────────────────────────────────────────
 # (a) embedding cache: identical/whitespace-different queries skip re-embedding.
+#     Per-process lru_cache — cheap to miss, so it needn't be shared.
 # (b) result cache: a full retrieval result is reused for a short TTL, so re-asks
 #     within a turn are instant. Time-based invalidation is safe because a new
 #     upload only needs to be reflected after the TTL (a few seconds).
+#     Backed by Redis when REDIS_URL is set, so multiple uvicorn workers /
+#     replicas share hits and survive restarts; else an in-process dict (now
+#     lock-guarded, since retrieval runs on worker threads).
 _RESULT_TTL_SECONDS = 60
 _result_cache: dict[str, tuple[float, list]] = {}
+_result_lock = threading.Lock()
 _cache_stats = {"result_hits": 0, "result_miss": 0}
+
+_redis = None
+if os.getenv("REDIS_URL"):
+    try:
+        import redis as _redis_mod
+        _redis = _redis_mod.Redis.from_url(
+            os.environ["REDIS_URL"], socket_timeout=2, decode_responses=True
+        )
+        _redis.ping()
+        print("[rag] result cache: Redis")
+    except Exception as _redis_exc:  # noqa: BLE001
+        _redis = None
+        print(f"[rag] REDIS_URL set but unusable ({_redis_exc}); using in-process cache")
+
+
+def _result_cache_get(key: str) -> list | None:
+    if _redis is not None:
+        try:
+            raw = _redis.get("rag:res:" + key)
+            return json.loads(raw) if raw else None
+        except Exception:
+            return None
+    now = time.time()
+    with _result_lock:
+        cached = _result_cache.get(key)
+        return cached[1] if cached and cached[0] > now else None
+
+
+def _result_cache_set(key: str, result: list) -> None:
+    if _redis is not None:
+        try:
+            _redis.setex("rag:res:" + key, _RESULT_TTL_SECONDS, json.dumps(result))
+        except Exception:
+            pass
+        return
+    now = time.time()
+    with _result_lock:
+        _result_cache[key] = (now + _RESULT_TTL_SECONDS, result)
+        if len(_result_cache) > 1024:  # bound: drop expired, else oldest-ish
+            stale = [k2 for k2, v in _result_cache.items() if v[0] <= now][:512]
+            for kk in stale or list(_result_cache)[:256]:
+                _result_cache.pop(kk, None)
+
+
+# Retrieval latency samples (ms) for /metrics — cache misses only, i.e. real
+# embed + search + rerank round-trips.
+_retrieval_latencies: deque = deque(maxlen=500)
+_latency_lock = threading.Lock()
 
 
 def _norm_query(q: str) -> str:
@@ -1372,16 +1599,19 @@ def retrieve_chunks(question: str, organization_id: str, document_ids=None, k: i
     """Retrieve the most relevant chunks, scoped to an org and (optionally) the
     accessible document ids. Hybrid dense + full-text (RRF) → cross-encoder
     rerank; falls back to dense-only if the P1.3 migration isn't applied.
-    Caches the query embedding and the final result (short TTL)."""
+    Caches the query embedding and the final result (short TTL).
+
+    CPU-bound (query embedding + cross-encoder) — call from async code via
+    asyncio.to_thread so it never blocks the event loop."""
     norm_q = _norm_query(question)
     key = _result_key(organization_id, document_ids, norm_q, k)
-    now = time.time()
-    cached = _result_cache.get(key)
-    if cached and cached[0] > now:
+    cached = _result_cache_get(key)
+    if cached is not None:
         _cache_stats["result_hits"] += 1
-        return cached[1]
+        return cached
     _cache_stats["result_miss"] += 1
 
+    started = time.perf_counter()
     query_vec = list(_embed_query_cached(norm_q))
     try:
         hits = store.hybrid_match_chunks(
@@ -1391,11 +1621,10 @@ def retrieve_chunks(question: str, organization_id: str, document_ids=None, k: i
     except Exception:
         hits = store.match_chunks(query_vec, organization_id, document_ids=document_ids, match_count=k)
     result = rerank_hits(question, hits, k)
+    with _latency_lock:
+        _retrieval_latencies.append((time.perf_counter() - started) * 1000.0)
 
-    _result_cache[key] = (now + _RESULT_TTL_SECONDS, result)
-    if len(_result_cache) > 1024:  # bound: drop expired, else oldest-ish
-        for kk in [k2 for k2, v in list(_result_cache.items()) if v[0] <= now][:512] or list(_result_cache)[:256]:
-            _result_cache.pop(kk, None)
+    _result_cache_set(key, result)
     return result
 
 
@@ -1457,9 +1686,13 @@ async def run_rag_chain(
         standalone = question
 
     # Step 2 — Supabase pgvector retrieval, scoped by org + the docs the user may
-    # see. A focus_document_id narrows the search to a single document.
+    # see. A focus_document_id narrows the search to a single document. Run on a
+    # worker thread: embedding + reranking are CPU-bound and would otherwise
+    # freeze the event loop for every other request.
     ids = [focus_document_id] if focus_document_id else document_ids
-    hits = retrieve_chunks(standalone, organization_id or "", ids, k=8 if focus_document_id else 5)
+    hits = await asyncio.to_thread(
+        retrieve_chunks, standalone, organization_id or "", ids, 8 if focus_document_id else 5
+    )
 
     # Include the ACTUAL tabular data (document_tables) for the relevant documents
     # so questions over "the whole document" use real rows, not just the embedded
@@ -1478,11 +1711,9 @@ async def run_rag_chain(
             if len(table_doc_ids) >= MAX_TABLE_DOCS:
                 break
 
-    context_parts = []
-    for did in table_doc_ids:
-        table_text = render_document_tables(did)
-        if table_text:
-            context_parts.append(table_text)
+    context_parts = await asyncio.to_thread(
+        lambda: [t for t in (render_document_tables(did) for did in table_doc_ids) if t]
+    )
     chunk_text = "\n\n".join(h["chunk_text"] for h in hits)
     if chunk_text:
         context_parts.append(chunk_text)
@@ -1504,7 +1735,7 @@ async def run_rag_chain(
     # Sources are the source FILE NAMES (downloadable), not document ids.
     sources: list[str] = list({str(h["file_name"]) for h in hits if h.get("file_name")})
     if focus_document_id and not sources:
-        sources = store.file_names_for_documents([focus_document_id])
+        sources = await asyncio.to_thread(store.file_names_for_documents, [focus_document_id])
 
     # Step 3 — generate answer (cap context length for very large documents)
     if len(context) > MAX_CONTEXT_CHARS:
@@ -1523,7 +1754,7 @@ async def run_rag_chain(
         mem.append(HumanMessage(content=question))
         mem.append(AIMessage(content=answer))
         if len(mem) > 12:
-            session_histories[session_id] = mem[-12:]
+            set_history(session_id, mem[-12:])
 
     return answer, sources, retrieved
 
@@ -1542,7 +1773,7 @@ async def run_plain_chain(question: str, session_id: str, history: list[dict] | 
         mem.append(HumanMessage(content=question))
         mem.append(AIMessage(content=answer))
         if len(mem) > 12:
-            session_histories[session_id] = mem[-12:]
+            set_history(session_id, mem[-12:])
 
     return answer
 
@@ -1605,9 +1836,10 @@ async def chat(req: ChatRequest):
         # rows are lost to the context cap and the numbers are precise. Handles
         # both the chart form and the plain-answer form; falls through when the
         # request isn't a (numeric agg BY category) over a table.
-        agg = run_aggregation_supabase(
+        agg = await asyncio.to_thread(
+            run_aggregation_supabase,
             req.message, req.organization_id, req.document_ids, req.focus_document_id,
-            want_chart=wants_chart(req.message) or wants_table(req.message),
+            wants_chart(req.message) or wants_table(req.message),
         )
         if agg is not None:
             return ChatResponse(
@@ -1677,7 +1909,11 @@ class RetrievePreviewRequest(BaseModel):
 # A query is "ambiguous" (→ show the picker) only when 2+ docs survive with
 # similar scores; otherwise the client answers directly without a picker step.
 PREVIEW_REL_MARGIN = 0.06
-PREVIEW_ABS_FLOOR = 0.30
+# 0.15, not higher: table/list-heavy documents (syllabi, spec sheets) embed
+# weakly — MiniLM tops out near ~0.30 dense similarity even for on-topic
+# queries against them, and hybrid FTS-only hits carry similarity 0 by design.
+# Off-topic chunks sit around ~0.10, so 0.15 still guards against junk.
+PREVIEW_ABS_FLOOR = 0.15
 MAX_PREVIEW_DOCS = 4
 
 
@@ -1691,7 +1927,9 @@ async def retrieve_preview(req: RetrievePreviewRequest):
     if not req.document_ids or is_meta_question(req.message):
         return {"documents": [], "ambiguous": False}
 
-    hits = retrieve_chunks(req.message, req.organization_id, req.document_ids, k=10)
+    hits = await asyncio.to_thread(
+        retrieve_chunks, req.message, req.organization_id, req.document_ids, 10
+    )
 
     # Distinct documents, keeping each one's best similarity.
     best: dict[str, float] = {}
@@ -1714,7 +1952,8 @@ async def retrieve_preview(req: RetrievePreviewRequest):
     if not kept:
         return {"documents": [], "ambiguous": False}
 
-    names = {str(d["id"]): d.get("file_name") for d in store.documents_by_ids([d for d, _ in kept])}
+    docs_rows = await asyncio.to_thread(store.documents_by_ids, [d for d, _ in kept])
+    names = {str(d["id"]): d.get("file_name") for d in docs_rows}
     documents = [
         {"id": did, "file_name": names.get(did) or "unknown", "similarity": round(sim, 4)}
         for did, sim in kept
@@ -1729,6 +1968,7 @@ async def retrieve_preview(req: RetrievePreviewRequest):
 class VisualizeRequest(BaseModel):
     instruction: str
     source: str | None = None  # which uploaded document to chart
+    organization_id: str | None = None  # tenant whose uploads dir holds `source`
 
 
 @app.post("/visualize")
@@ -1736,7 +1976,7 @@ async def visualize(req: VisualizeRequest):
     if not req.source:
         raise HTTPException(status_code=400, detail="Select a document to chart.")
     try:
-        return await run_visualization(req.source, req.instruction)
+        return await run_visualization(req.source, req.instruction, req.organization_id)
     except ChatGoogleGenerativeAIError as e:
         msg = str(e)
         if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
@@ -1754,12 +1994,13 @@ async def visualize(req: VisualizeRequest):
 class ExtractMetricsRequest(BaseModel):
     source: str  # which uploaded document to extract dashboard metrics from
     custom_metrics: list[dict] = []  # user-defined defs [{key,label,kind,description}]
+    organization_id: str | None = None  # tenant whose uploads dir holds `source`
 
 
 @app.post("/extract-metrics")
 async def extract_metrics_endpoint(req: ExtractMetricsRequest):
     try:
-        metrics = await extract_metrics(req.source, req.custom_metrics)
+        metrics = await extract_metrics(req.source, req.custom_metrics, req.organization_id)
         return {"source": req.source, "metrics": metrics}
     except ChatGoogleGenerativeAIError as e:
         msg = str(e)
@@ -1778,6 +2019,7 @@ async def extract_metrics_endpoint(req: ExtractMetricsRequest):
 class GenerateDocRequest(BaseModel):
     instruction: str
     source: str | None = None  # which uploaded document to base the report on
+    organization_id: str | None = None  # tenant whose uploads dir holds `source`
 
 
 @app.post("/generate-document")
@@ -1785,7 +2027,7 @@ async def generate_document(req: GenerateDocRequest):
     if not req.source:
         raise HTTPException(status_code=400, detail="Select a document to base the report on.")
     try:
-        return await run_document_generation(req.instruction, req.source)
+        return await run_document_generation(req.instruction, req.source, req.organization_id)
     except ChatGoogleGenerativeAIError as e:
         msg = str(e)
         if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
@@ -1809,12 +2051,14 @@ class IngestRequest(BaseModel):
 @app.post("/ingest")
 def ingest_document(req: IngestRequest):
     """Index a file already on disk (e.g. a generated report) into Supabase under
-    the given document_id, so the AI can answer questions about it."""
+    the given document_id, so the AI can answer questions about it. Synchronous
+    (files here are small, and the caller wants the chunk count) — but a sync
+    `def` endpoint, so FastAPI runs it on its threadpool, off the event loop.
+    Versioned re-index: old chunks are superseded only after the new ones land."""
     safe_name = Path(req.filename).name
-    path = (UPLOAD_DIR / safe_name).resolve()
-    if UPLOAD_DIR.resolve() not in path.parents or not path.is_file():
+    path = resolve_source_path(safe_name, req.organization_id)
+    if path is None:
         raise HTTPException(status_code=404, detail=f"File '{safe_name}' not found")
-    store.delete_document_data(req.document_id)  # idempotent re-index
     try:
         result = index_document(req.document_id, req.organization_id, path, safe_name)
     except Exception as exc:
@@ -1823,32 +2067,52 @@ def ingest_document(req: IngestRequest):
 
 
 @app.delete("/documents")
-def clear_documents():
-    """Clear the on-disk uploads/generated files + in-memory chat history. The
-    Supabase chunks/tables are removed by the backend (documents cascade)."""
-    session_histories.clear()
+def clear_documents(organization_id: str | None = None):
+    """Clear on-disk uploads/generated files + in-memory chat history. With an
+    organization_id, ONLY that org's directory is cleared. Legacy flat files
+    (pre-namespacing) are deliberately NOT touched by an org-scoped clear:
+    they can't be attributed to an org, so deleting them here would let one
+    tenant destroy another tenant's files — only the unscoped (admin) form
+    removes them. The Supabase chunks/tables are removed by the backend
+    (documents cascade)."""
+    with _sessions_lock:
+        session_histories.clear()
     removed = 0
-    for path in UPLOAD_DIR.iterdir():
-        if path.is_file():
-            try:
-                path.unlink()
-                removed += 1
-            except OSError:
-                pass
+
+    def _clear_dir(d: Path):
+        nonlocal removed
+        if not d.is_dir():
+            return
+        for path in d.iterdir():
+            if path.is_file():
+                try:
+                    path.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+
+    if organization_id:
+        _clear_dir(org_dir(organization_id))
+    else:
+        _clear_dir(UPLOAD_DIR)
+        for sub in UPLOAD_DIR.iterdir():
+            if sub.is_dir():
+                _clear_dir(sub)
     return {"status": "cleared", "files_removed": removed}
 
 
 @app.delete("/documents/{filename}")
-def delete_document(filename: str):
-    """Delete a single document's on-disk file. Its Supabase chunks/tables are
-    removed by the backend (documents cascade)."""
+def delete_document(filename: str, organization_id: str | None = None):
+    """Delete a single document's on-disk file (the org's dir, or the legacy
+    flat layout). Its Supabase chunks/tables are removed by the backend
+    (documents cascade)."""
     safe_name = Path(filename).name
     if not safe_name:
         raise HTTPException(status_code=400, detail="Invalid filename.")
 
     file_removed = False
-    path = (UPLOAD_DIR / safe_name).resolve()
-    if UPLOAD_DIR.resolve() in path.parents and path.is_file():
+    path = resolve_source_path(safe_name, organization_id)
+    if path is not None:
         try:
             path.unlink()
             file_removed = True
@@ -1860,19 +2124,53 @@ def delete_document(filename: str):
 
 @app.delete("/session/{session_id}")
 def clear_session(session_id: str):
-    session_histories.pop(session_id, None)
+    with _sessions_lock:
+        session_histories.pop(session_id, None)
     return {"status": "cleared", "session_id": session_id}
 
 
 @app.get("/download/{filename}")
-def download_document(filename: str):
-    # Resolve against UPLOAD_DIR and reject anything that escapes it (path traversal).
+def download_document(filename: str, organization_id: str | None = None):
+    # Resolved via the org's dir (then legacy flat layout); resolve_source_path
+    # rejects anything that escapes UPLOAD_DIR (path traversal).
     safe_name = Path(filename).name
-    file_path = (UPLOAD_DIR / safe_name).resolve()
-    if UPLOAD_DIR.resolve() not in file_path.parents or not file_path.is_file():
+    file_path = resolve_source_path(safe_name, organization_id)
+    if file_path is None:
         raise HTTPException(status_code=404, detail=f"File '{safe_name}' not found")
     return FileResponse(
         path=str(file_path),
         filename=safe_name,
         media_type="application/octet-stream",
     )
+
+
+@app.get("/metrics")
+def service_metrics():
+    """Operational counters for monitoring: cache effectiveness, retrieval
+    latency (cache misses = real embed+search+rerank round-trips), indexing
+    job states, and which optional components are active."""
+    with _latency_lock:
+        lat = sorted(_retrieval_latencies)
+    latency: dict = {"samples": len(lat)}
+    if lat:
+        latency.update(
+            avg_ms=round(sum(lat) / len(lat), 1),
+            p50_ms=round(lat[len(lat) // 2], 1),
+            p95_ms=round(lat[min(len(lat) - 1, int(len(lat) * 0.95))], 1),
+            max_ms=round(lat[-1], 1),
+        )
+    with _jobs_lock:
+        jobs: dict[str, int] = {}
+        for j in _index_jobs.values():
+            jobs[j["status"]] = jobs.get(j["status"], 0) + 1
+    embed_info = _embed_query_cached.cache_info()
+    with _sessions_lock:
+        n_sessions = len(session_histories)
+    return {
+        "result_cache": {**_cache_stats, "backend": "redis" if _redis is not None else "memory"},
+        "embed_cache": {"hits": embed_info.hits, "misses": embed_info.misses, "size": embed_info.currsize},
+        "retrieval_latency": latency,
+        "index_jobs": jobs,
+        "sessions": n_sessions,
+        "reranker": reranker is not None,
+    }

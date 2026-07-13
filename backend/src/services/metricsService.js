@@ -3,7 +3,7 @@
 // Bridges the RAG service's metric extraction with Supabase storage. Used both
 // when a document is uploaded (auto-extract) and when the user clicks Recompute.
 
-const fetch = require("node-fetch");
+const { ragFetch } = require("../utils/ragClient");
 const { replaceDocumentMetrics, upsertStatus } = require("../models/metricsModel");
 const { listMetricDefinitions } = require("../models/metricDefinitionsModel");
 const {
@@ -11,8 +11,6 @@ const {
   metricKeysOnDashboard,
   addWidget,
 } = require("../models/dashboardModel");
-
-const RAG_URL = process.env.RAG_SERVICE_URL || "http://localhost:8000";
 
 // "customer_churn" -> "Customer Churn"
 function prettyLabel(key) {
@@ -163,11 +161,21 @@ async function extractAndStore(userId, source, opts = {}) {
       /* metric_definitions table not available */
     }
 
-    const response = await fetch(`${RAG_URL}/extract-metrics`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source, custom_metrics: customMetrics }),
-    });
+    // organization_id scopes the on-disk file lookup to this tenant's uploads
+    // dir. Chunked whole-document LLM extraction can be slow → generous timeout.
+    const response = await ragFetch(
+      "/extract-metrics",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source,
+          custom_metrics: customMetrics,
+          organization_id: organizationId,
+        }),
+      },
+      300000
+    );
 
     if (!response.ok) {
       await upsertStatus(userId, source, { status: "error" });
