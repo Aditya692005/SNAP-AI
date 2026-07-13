@@ -25,6 +25,10 @@ const {
   updateWidgetConfigUnversioned,
   touchBoard,
 } = require("../models/departmentDashboardModel");
+const {
+  listWidgetsForOrganization,
+  touchBoard: touchOrgBoard,
+} = require("../models/organizationDashboardModel");
 
 const RAG_URL = process.env.RAG_SERVICE_URL || "http://localhost:8000";
 
@@ -111,6 +115,47 @@ async function refreshDepartmentWidget(widget, expectedVersion, userId) {
   return updated;
 }
 
+// Regenerate ONE organization-board widget from fresh data, version-guarded so a
+// concurrent admin isn't clobbered. Mirrors refreshDepartmentWidget one scope up.
+async function refreshOrganizationWidget(widget, expectedVersion, userId) {
+  const recovered = await recoverRequest(widget.ai_message_id);
+  if (!recovered) {
+    const e = new Error("This chart can't be refreshed automatically — it isn't linked to a chat request.");
+    e.status = 422;
+    throw e;
+  }
+  const source = widget.config?.stale_source || recovered.sources[0] || null;
+  const spec = await regenerateSpec(recovered.instruction, source);
+
+  const config = { ...(widget.config || {}), spec };
+  delete config.stale;
+  delete config.stale_source;
+  const updated = await updateWidgetVersioned(widget.id, expectedVersion, { config });
+  touchOrgBoard(widget.organization_dashboard_id, userId); // audit only, best-effort
+  return updated;
+}
+
+// After a same-named file is re-uploaded, flag every ORGANIZATION-board widget
+// charted from that file as stale so any admin can refresh it. Best-effort; never
+// throws. Un-versioned (system op): see updateWidgetConfigUnversioned.
+async function markOrganizationWidgetsStaleForSource(organizationId, source) {
+  try {
+    const widgets = await listWidgetsForOrganization(organizationId);
+    let flagged = 0;
+    for (const w of widgets) {
+      if (w.widget_type !== "ai_chart" || !w.ai_message_id) continue;
+      const recovered = await recoverRequest(w.ai_message_id);
+      if (!recovered || !recovered.sources.includes(source)) continue;
+      const config = { ...(w.config || {}), stale: true, stale_source: source };
+      await updateWidgetConfigUnversioned(w.id, config);
+      flagged += 1;
+    }
+    return flagged;
+  } catch {
+    return 0;
+  }
+}
+
 // After a same-named file is re-uploaded, flag every DEPARTMENT-board widget in
 // the org charted from that file as stale, so any editor of the board can
 // refresh it — not just the pinner. Best-effort; never throws. Returns the
@@ -159,4 +204,6 @@ module.exports = {
   markWidgetsStaleForSource,
   refreshDepartmentWidget,
   markDepartmentWidgetsStaleForSource,
+  refreshOrganizationWidget,
+  markOrganizationWidgetsStaleForSource,
 };

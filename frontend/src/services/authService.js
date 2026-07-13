@@ -198,6 +198,19 @@ export const authService = {
     if (this.isAdmin()) return true;
     return this.getPermissions().includes("MANAGE_DEPARTMENT_DASHBOARD") && !!this.getDepartmentId();
   },
+
+  // Organization dashboard: a single org-wide board. VIEW is admins + managers by
+  // default; EDIT (pin/rename/remove) is admins by default. UI gating only — the
+  // server is the source of truth.
+  canViewOrganizationDashboard() {
+    if (this.isAdmin()) return true;
+    return this.getPermissions().includes("VIEW_ORGANIZATION_DASHBOARD");
+  },
+
+  canManageOrganizationDashboard() {
+    if (this.isAdmin()) return true;
+    return this.getPermissions().includes("MANAGE_ORGANIZATION_DASHBOARD");
+  },
 };
 
 async function handle(res) {

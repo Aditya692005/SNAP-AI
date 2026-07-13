@@ -45,8 +45,19 @@ const {
   deleteDocument: deleteDocumentRow,
   listUploadedFileNames,
   documentIdsForDepartment,
+  documentIdsForOrganization,
 } = require("../models/documentModel");
 const { listDepartments } = require("../models/departmentModel");
+const {
+  getOrCreateDefaultOrganizationDashboard,
+  getOrganizationDashboard,
+  listOrganizationWidgets,
+  findWidgetByMessage: findOrgWidgetByMessage,
+  findMetricWidget: findOrgMetricWidget,
+  addOrganizationWidget,
+  renameOrganizationDashboardVersioned,
+  touchBoard: touchOrgBoard,
+} = require("../models/organizationDashboardModel");
 const {
   getOrCreateDefaultDepartmentDashboard,
   listDefaultDashboardsByDepartmentIds,
@@ -66,10 +77,13 @@ const {
   viewableDepartmentIds,
   canViewDepartmentBoard,
   canEditDepartmentBoard,
+  canViewOrganizationBoard,
+  canEditOrganizationBoard,
 } = require("../services/departmentDashboardAccess");
 const {
   refreshWidget,
   refreshDepartmentWidget,
+  refreshOrganizationWidget,
 } = require("../services/widgetRefreshService");
 
 const router = express.Router();
@@ -515,6 +529,100 @@ router.delete("/metric-definitions/:id", requireAuth, async (req, res, next) => 
   }
 });
 
+// ── POST /api/dashboard/track-metric ──────────────────────────────────────────
+// Turn an AI "create a metric" proposal into a tracked KPI card. Same machinery
+// as defining a metric on the dashboard (a personal definition steers extraction
+// and backfills existing docs), but the card can land on a personal OR a
+// department board. Idempotent per (metric_key, board). Body:
+//   { label, kind?, metric_key?, target: "personal"|"department", board_id? }
+router.post("/track-metric", requireAuth, async (req, res, next) => {
+  try {
+    const { label, kind, target, board_id } = req.body || {};
+    if (!label || !String(label).trim()) {
+      return res.status(400).json({ message: "label is required" });
+    }
+    const metricKey = String(req.body.metric_key || label)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 40);
+    if (!metricKey) return res.status(400).json({ message: "could not derive a metric key from label" });
+
+    // 1) Track it: a personal definition steers extraction, and re-extracting the
+    //    user's existing docs backfills any values already present (background,
+    //    best-effort — mirrors POST /metric-definitions).
+    const def = await createMetricDefinition("PERSONAL", req.user.id, req.user.organization_id, {
+      metric_key: metricKey,
+      label: String(label).trim(),
+      kind: kind || "number",
+    });
+    listUploadedFileNames(req.user.id, req.user.organization_id)
+      .then((sources) =>
+        sources.reduce(
+          (chain, s) =>
+            chain.then(() =>
+              extractAndStore(req.user.id, s, { organizationId: req.user.organization_id }).catch(() => {})
+            ),
+          Promise.resolve()
+        )
+      )
+      .catch(() => {});
+
+    const config = { metric_key: metricKey, kind: def.kind, label: def.label };
+
+    // 2) Place the KPI card on the chosen board (idempotent / un-trash existing).
+    if (target === "organization") {
+      if (!canEditOrganizationBoard(req.user)) {
+        return res.status(403).json({ message: "You don't have permission to edit this dashboard." });
+      }
+      const board = await getOrCreateDefaultOrganizationDashboard(req.user.organization_id, req.user.id);
+      const existing = await findOrgMetricWidget(board.id, metricKey);
+      if (existing) return res.status(200).json(existing);
+      const widget = await addOrganizationWidget(board.id, {
+        widget_type: "metric",
+        title: def.label,
+        config,
+        ai_message_id: null,
+      });
+      touchOrgBoard(board.id, req.user.id);
+      return res.status(201).json(widget);
+    }
+    if (target === "department") {
+      if (!board_id) return res.status(400).json({ message: "board_id is required for a department board" });
+      const board = await getDepartmentDashboard(board_id);
+      if (!board) return res.status(404).json({ message: "Dashboard not found" });
+      if (!canEditDepartmentBoard(req.user, board)) {
+        return res.status(403).json({ message: "You don't have permission to edit this dashboard." });
+      }
+      const existing = await findDeptMetricWidget(board.id, metricKey);
+      if (existing) return res.status(200).json(existing);
+      const widget = await addDepartmentWidget(board.id, {
+        widget_type: "metric",
+        title: def.label,
+        config,
+        ai_message_id: null,
+      });
+      touchBoard(board.id, req.user.id);
+      return res.status(201).json(widget);
+    }
+
+    // Personal board (default board when board_id is omitted).
+    const dashboard = await resolveDashboard(req, board_id);
+    const existing = await findMetricWidget(dashboard.id, metricKey);
+    if (existing) {
+      if (existing.archived_at) {
+        return res.status(200).json(await setWidgetArchived(dashboard.id, existing.id, false));
+      }
+      return res.status(200).json(existing);
+    }
+    const widget = await addWidget(dashboard.id, { widget_type: "metric", title: def.label, config });
+    return res.status(201).json(widget);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ message: err.message });
+    return next(err);
+  }
+});
+
 // ── Department dashboards ─────────────────────────────────────────────────────
 // Shared boards scoped to a department. Employees VIEW their own department's
 // board; managers EDIT only their OWN department's board (exact match, NOT the
@@ -733,6 +841,211 @@ router.patch("/department/:id", requireAuth, async (req, res, next) => {
       return res.status(400).json({ message: "expected_version (integer) is required" });
     }
     const updated = await renameDepartmentDashboardVersioned(board.id, expectedVersion, name, req.user.id);
+    return res.json(updated);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ message: err.message });
+    return next(err);
+  }
+});
+
+// ── Organization dashboard ────────────────────────────────────────────────────
+// A single shared board per organization. Everyone with VIEW_ORGANIZATION_DASHBOARD
+// (org admins + managers by default) views it; org admins / MANAGE_ORGANIZATION_
+// DASHBOARD holders edit it. Aggregates metrics over EVERY document in the org.
+// Edits are optimistic (client passes the last-seen `version`; a stale write 409s).
+
+// Resolve an org-board widget and authorize the caller to EDIT it. Throws a
+// status-tagged error (404 not-an-org-widget / 403 no edit rights).
+async function loadEditableOrganizationWidget(req) {
+  const widget = await getWidgetOwner(req.params.id);
+  if (!widget || !widget.organization_dashboard_id) {
+    const e = new Error("Widget not found");
+    e.status = 404;
+    throw e;
+  }
+  const board = await getOrganizationDashboard(widget.organization_dashboard_id);
+  if (!board || board.organization_id !== req.user.organization_id) {
+    const e = new Error("Widget not found");
+    e.status = 404;
+    throw e;
+  }
+  if (!canEditOrganizationBoard(req.user)) {
+    const e = new Error("You don't have permission to edit this dashboard.");
+    e.status = 403;
+    throw e;
+  }
+  return { widget, board };
+}
+
+// GET /api/dashboard/organization — the org's shared board (view-gated), created
+// on first use. `can_edit` tells the UI whether to show edit controls.
+router.get("/organization", requireAuth, async (req, res, next) => {
+  try {
+    if (!canViewOrganizationBoard(req.user)) {
+      return res.status(403).json({ message: "You don't have access to the organization dashboard." });
+    }
+    const board = await getOrCreateDefaultOrganizationDashboard(req.user.organization_id, req.user.id);
+    return res.json({
+      dashboard: {
+        id: board.id,
+        name: board.name,
+        version: board.version,
+        updated_by_user_id: board.updated_by_user_id,
+        updated_at: board.updated_at,
+        can_edit: canEditOrganizationBoard(req.user),
+      },
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// GET /api/dashboard/organization/metrics — live KPI numbers aggregated over
+// EVERY document in the organization (view-gated).
+router.get("/organization/metrics", requireAuth, async (req, res, next) => {
+  try {
+    if (!canViewOrganizationBoard(req.user)) {
+      return res.status(403).json({ message: "You don't have access to the organization dashboard." });
+    }
+    const docIds = await documentIdsForOrganization(req.user.organization_id);
+    return res.json(shapeMetrics(await getMetricsForDocumentIds(docIds)));
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// GET /api/dashboard/organization/widgets — the board's widgets (view-gated).
+router.get("/organization/widgets", requireAuth, async (req, res, next) => {
+  try {
+    if (!canViewOrganizationBoard(req.user)) {
+      return res.status(403).json({ message: "You don't have access to the organization dashboard." });
+    }
+    const board = await getOrCreateDefaultOrganizationDashboard(req.user.organization_id, req.user.id);
+    return res.json({
+      dashboard_id: board.id,
+      version: board.version,
+      can_edit: canEditOrganizationBoard(req.user),
+      widgets: await listOrganizationWidgets(board.id),
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// POST /api/dashboard/organization/widgets — pin a chart/metric (edit-gated).
+// Idempotent by ai_message_id (chart) / metric_key (metric).
+router.post("/organization/widgets", requireAuth, async (req, res, next) => {
+  try {
+    if (!canEditOrganizationBoard(req.user)) {
+      return res.status(403).json({ message: "You don't have permission to edit this dashboard." });
+    }
+    const board = await getOrCreateDefaultOrganizationDashboard(req.user.organization_id, req.user.id);
+    const { widget_type, title, config, ai_message_id } = req.body || {};
+    if (widget_type !== "ai_chart" && widget_type !== "metric") {
+      return res.status(400).json({ message: 'widget_type must be "ai_chart" or "metric"' });
+    }
+    if (!config || typeof config !== "object") {
+      return res.status(400).json({ message: "config (object) is required" });
+    }
+    if (widget_type === "metric" && !config.metric_key) {
+      return res.status(400).json({ message: "config.metric_key is required for a metric widget" });
+    }
+    if (widget_type === "ai_chart" && ai_message_id) {
+      const existing = await findOrgWidgetByMessage(board.id, ai_message_id);
+      if (existing) return res.status(200).json(existing);
+    }
+    if (widget_type === "metric") {
+      const existing = await findOrgMetricWidget(board.id, config.metric_key);
+      if (existing) return res.status(200).json(existing);
+    }
+    const widget = await addOrganizationWidget(board.id, {
+      widget_type,
+      title: title ?? null,
+      config,
+      ai_message_id: ai_message_id ?? null,
+    });
+    touchOrgBoard(board.id, req.user.id);
+    return res.status(201).json(widget);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// PATCH /api/dashboard/organization/widgets/:id — edit a widget (edit-gated,
+// version-guarded). Body must include expected_version.
+router.patch("/organization/widgets/:id", requireAuth, async (req, res, next) => {
+  try {
+    const { widget } = await loadEditableOrganizationWidget(req);
+    const expectedVersion = req.body?.expected_version;
+    if (!Number.isInteger(expectedVersion)) {
+      return res.status(400).json({ message: "expected_version (integer) is required" });
+    }
+    const allowed = {};
+    for (const k of ["title", "config", "position_x", "position_y", "width", "height"]) {
+      if (k in (req.body || {})) allowed[k] = req.body[k];
+    }
+    if (Object.keys(allowed).length === 0) {
+      return res.status(400).json({ message: "no updatable fields provided" });
+    }
+    const updated = await updateWidgetVersioned(widget.id, expectedVersion, allowed);
+    touchOrgBoard(widget.organization_dashboard_id, req.user.id);
+    return res.json(updated);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ message: err.message });
+    return next(err);
+  }
+});
+
+// DELETE /api/dashboard/organization/widgets/:id?expected_version= — remove a
+// widget (edit-gated, version-guarded).
+router.delete("/organization/widgets/:id", requireAuth, async (req, res, next) => {
+  try {
+    const { widget } = await loadEditableOrganizationWidget(req);
+    const expectedVersion = Number(req.query.expected_version);
+    if (!Number.isInteger(expectedVersion)) {
+      return res.status(400).json({ message: "expected_version (integer) is required" });
+    }
+    await deleteWidgetVersioned(widget.id, expectedVersion);
+    touchOrgBoard(widget.organization_dashboard_id, req.user.id);
+    return res.json({ deleted: true });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ message: err.message });
+    return next(err);
+  }
+});
+
+// POST /api/dashboard/organization/widgets/:id/refresh — regenerate a stale chart
+// against the latest data (edit-gated, version-guarded). Body: expected_version.
+router.post("/organization/widgets/:id/refresh", requireAuth, async (req, res, next) => {
+  try {
+    const { widget } = await loadEditableOrganizationWidget(req);
+    const expectedVersion = req.body?.expected_version;
+    if (!Number.isInteger(expectedVersion)) {
+      return res.status(400).json({ message: "expected_version (integer) is required" });
+    }
+    const updated = await refreshOrganizationWidget(widget, expectedVersion, req.user.id);
+    return res.json(updated);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ message: err.message });
+    return next(err);
+  }
+});
+
+// PATCH /api/dashboard/organization — rename the board (edit-gated,
+// version-guarded). Body: name, expected_version.
+router.patch("/organization", requireAuth, async (req, res, next) => {
+  try {
+    if (!canEditOrganizationBoard(req.user)) {
+      return res.status(403).json({ message: "You don't have permission to edit this dashboard." });
+    }
+    const board = await getOrCreateDefaultOrganizationDashboard(req.user.organization_id, req.user.id);
+    const name = (req.body?.name || "").trim();
+    if (!name) return res.status(400).json({ message: "name is required" });
+    const expectedVersion = req.body?.expected_version;
+    if (!Number.isInteger(expectedVersion)) {
+      return res.status(400).json({ message: "expected_version (integer) is required" });
+    }
+    const updated = await renameOrganizationDashboardVersioned(board.id, expectedVersion, name, req.user.id);
     return res.json(updated);
   } catch (err) {
     if (err.status) return res.status(err.status).json({ message: err.message });

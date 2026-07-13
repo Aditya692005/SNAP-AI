@@ -13,6 +13,7 @@ const requireAuth = require("../middleware/requireAuth");
 const {
   markWidgetsStaleForSource,
   markDepartmentWidgetsStaleForSource,
+  markOrganizationWidgetsStaleForSource,
 } = require("../services/widgetRefreshService");
 const { extractAndStore, autoAddMetricWidgets } = require("../services/metricsService");
 const { upsertStatus, getStatus, clearAllForUser } = require("../models/metricsModel");
@@ -70,6 +71,52 @@ function pairExchanges(history) {
     // assistant with no preceding user is dropped.
   }
   return paired;
+}
+
+// "create a metric of X" / "track X as a KPI" — the user wants a tracked KPI, not
+// a one-off answer. Detected here so the chat returns a metric PROPOSAL the client
+// can add to a dashboard, instead of the RAG service just answering with a number.
+// Kept deliberately explicit so ordinary questions ("what is our revenue?") don't
+// trip it — it needs an action verb next to the word metric/kpi.
+const METRIC_INTENT_RE =
+  /\b(create|make|add|define|track|set up|start tracking)\b[^.?!]{0,40}\b(metric|kpi|kpis)\b|\bkpi\b[^.?!]{0,20}\bfor\b/i;
+
+function wantsMetric(message) {
+  return METRIC_INTENT_RE.test(message || "");
+}
+
+// Pull the KPI name + value kind out of a "create a metric" request. Heuristic
+// (no LLM call): strip the intent phrasing to get the metric's name, and infer
+// the kind from money/percent/count keywords. Good enough for the common
+// phrasings; the user can rename the card on the dashboard afterwards.
+function parseMetricRequest(message) {
+  const raw = String(message || "");
+  let label = raw
+    .replace(/\b(can|could|would|will|please)\b/gi, " ")
+    .replace(/\byou\b/gi, " ")
+    .replace(/\b(create|make|add|define|track|set up|start tracking)\b/gi, " ")
+    .replace(/\b(a|an|new)\b/gi, " ")
+    .replace(/\b(metric|kpi|kpis)\b/gi, " ")
+    .replace(/\b(of|for|called|named|to track|that tracks|to|on|the|as)\b/gi, " ")
+    .replace(/[?."'`]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!label) label = "New metric";
+  label = label.replace(/\b\w/g, (c) => c.toUpperCase()).slice(0, 60);
+
+  const lower = raw.toLowerCase();
+  let kind = "number";
+  if (/\b(revenue|sales|cost|price|profit|income|expense|spend|budget|dollar|usd|eur|gbp|amount|\$)\b/.test(lower)) {
+    kind = "currency";
+  } else if (/\b(rate|percent|percentage|margin|ratio|churn|growth|share|%)\b/.test(lower)) {
+    kind = "percent";
+  } else if (/\b(count|number of|volume|quantity|headcount|users|customers|orders|units|#)\b/.test(lower)) {
+    kind = "count";
+  }
+
+  const metricKey =
+    label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40) || "new_metric";
+  return { metric_key: metricKey, label, kind };
 }
 
 router.post("/chat", requireAuth, async (req, res, next) => {
@@ -143,34 +190,50 @@ router.post("/chat", requireAuth, async (req, res, next) => {
       if (userMsg?.id && !answered) await deleteMessage(userMsg.id).catch(() => {});
     };
 
-    let response;
-    try {
-      response = await fetch(`${RAG_URL}/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message,
-          session_id: `user_${req.user.id}`,
-          history,
-          organization_id: orgId,
-          document_ids: documentIds,
-          focus_document_id: focusDocumentId,
-        }),
-      });
-    } catch (err) {
-      await rollbackQuestion(); // RAG service unreachable
-      throw err;
-    }
+    let data;
+    if (wantsMetric(message)) {
+      // Metric-creation intent: don't spend an LLM answer on it. Return a metric
+      // PROPOSAL the client renders with an "Add to dashboard" action; the actual
+      // definition + KPI card are created by /api/dashboard/track-metric when the
+      // user places it. This is why asking used to "just give a number back".
+      const metric = parseMetricRequest(message);
+      data = {
+        answer:
+          `I can track **${metric.label}** as a metric. Use **Add to dashboard** below to ` +
+          `start tracking it — the value fills in as your documents are read.`,
+        metric,
+        sources: [],
+        doc_count: 0,
+      };
+    } else {
+      let response;
+      try {
+        response = await fetch(`${RAG_URL}/chat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message,
+            session_id: `user_${req.user.id}`,
+            history,
+            organization_id: orgId,
+            document_ids: documentIds,
+            focus_document_id: focusDocumentId,
+          }),
+        });
+      } catch (err) {
+        await rollbackQuestion(); // RAG service unreachable
+        throw err;
+      }
 
-    if (!response.ok) {
-      await rollbackQuestion();
-      const err = await response.json().catch(() => ({}));
-      return res.status(response.status).json({ message: err.detail || "RAG service error" });
+      if (!response.ok) {
+        await rollbackQuestion();
+        const err = await response.json().catch(() => ({}));
+        return res.status(response.status).json({ message: err.detail || "RAG service error" });
+      }
+      data = await response.json();
     }
 
     answered = true; // an answer was produced; keep the question in the thread
-
-    const data = await response.json();
 
     // Persist the AI answer (the question was already saved above). Best-effort:
     // a storage hiccup must not eat the answer.
@@ -180,6 +243,7 @@ router.post("/chat", requireAuth, async (req, res, next) => {
       if (data.sources?.length) metadata.sources = data.sources;
       if (data.chart) metadata.chart = data.chart;
       if (data.document) metadata.document = data.document;
+      if (data.metric) metadata.metric = data.metric; // metric proposal, re-addable after reload
       // Persist a slim citation list (source + page + span) so provenance chips
       // survive a reload, not just the live response.
       if (data.retrieved?.length) {
@@ -389,11 +453,12 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
         }
       })
       .catch(() => {});
-    // Department boards are shared, so an UPDATE by ANY member (org-level
-    // re-upload, detected above via findByFileName → `existing`) must flag their
-    // charts stale — not just the re-uploader's own personal charts.
+    // Department and organization boards are shared, so an UPDATE by ANY member
+    // (org-level re-upload, detected above via findByFileName → `existing`) must
+    // flag their charts stale — not just the re-uploader's own personal charts.
     if (existing) {
       markDepartmentWidgetsStaleForSource(orgId, filename).catch(() => {});
+      markOrganizationWidgetsStaleForSource(orgId, filename).catch(() => {});
     }
 
     return res.json({ document_id: doc.id, filename, ...data });

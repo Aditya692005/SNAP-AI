@@ -392,6 +392,14 @@
   white-space: nowrap;
 }
 
+/* Value-kind hint on a metric proposal card (e.g. "· currency"). */
+.metric-kind-tag {
+  font-weight: 400;
+  color: #94a3b8;
+  font-size: 0.85em;
+  text-transform: capitalize;
+}
+
 .doc-card-actions {
   display: flex;
   gap: 0.5rem;

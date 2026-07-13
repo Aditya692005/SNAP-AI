@@ -197,6 +197,17 @@ async function documentIdsForDepartment(departmentId) {
   return [...new Set((data || []).map((a) => a.document_id))];
 }
 
+// Every document id in an organization — scopes the org-wide dashboard's metric
+// aggregation to all of the org's documents, regardless of uploader or sharing.
+async function documentIdsForOrganization(organizationId) {
+  const { data, error } = await supabase
+    .from("documents")
+    .select("id")
+    .eq("organization_id", organizationId);
+  if (error) throw error;
+  return [...new Set((data || []).map((d) => d.id))];
+}
+
 async function accessibleDocumentIds(userId, organizationId, { subtreeDepartments = false } = {}) {
   const { data: u } = await supabase
     .from("users")
@@ -330,6 +341,7 @@ module.exports = {
   findByFileName,
   findByContentHash,
   documentIdsForDepartment,
+  documentIdsForOrganization,
   deleteDocument,
   deleteAllForUser,
   grantAccess,
