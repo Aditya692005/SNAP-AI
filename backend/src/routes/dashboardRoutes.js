@@ -87,6 +87,39 @@ function periodKey(period) {
   return year * 100;
 }
 
+// Deterministic value-kind override from the metric name — mirrors the RAG
+// service's infer_kind so a money metric never renders as a percentage and a
+// rate never renders as a raw count, whatever the stored/LLM kind says.
+const MONEY_WORDS = new Set([
+  "revenue", "profit", "sales", "income", "cost", "costs", "expense", "expenses",
+  "expenditure", "price", "cash", "fee", "fees", "spend", "spending", "budget",
+  "turnover", "earnings", "salary", "payroll", "valuation", "arr", "mrr", "ebitda",
+]);
+const RATE_WORDS = new Set([
+  "rate", "ratio", "percent", "percentage", "margin", "share", "utilization",
+  "occupancy", "conversion", "churn", "growth", "cagr", "yield", "apr", "apy",
+]);
+// Count nouns disambiguate a money word: "sales closed"/"units sold"/"deals"
+// are COUNTS, not dollars — a count word wins over a money word.
+const COUNT_WORDS = new Set([
+  "closed", "won", "deal", "deals", "count", "counts", "number", "num", "unit",
+  "units", "quantity", "qty", "volume", "order", "orders", "transaction",
+  "transactions", "signed", "signups", "tickets", "items", "leads", "customer",
+  "customers", "subscribers", "users", "visits", "clicks", "sessions",
+  "headcount", "hires", "employees", "downloads", "installs",
+]);
+// Deterministic value-kind from the metric name (mirrors the RAG infer_kind).
+// Precedence: count > rate > money > the majority stored kind.
+function resolveKind(metric, majorityKind) {
+  const maj = majorityKind || "number";
+  const toks = new Set(String(metric || "").split("_"));
+  const has = (set) => [...toks].some((t) => set.has(t));
+  if (has(COUNT_WORDS)) return maj === "count" ? "count" : "number";
+  if (has(RATE_WORDS)) return "percent";
+  if (has(MONEY_WORDS)) return "currency";
+  return maj;
+}
+
 // Aggregate a set of values for one metric by its `kind`: money and counts SUM;
 // rates/levels/percentages AVERAGE (summing a percentage or a concentration is
 // meaningless). Unknown kinds fall back to sum.
@@ -163,10 +196,22 @@ function shapeMetrics(metrics) {
 
   const present = [...new Set(metrics.map((r) => r.metric))];
   const departments = {};
-  const kinds = {};
+  // Tally kinds per metric so ONE mislabeled row can't set the metric's kind
+  // (the "$840,000 shown as 840,000%" bug). Majority wins, then a name-based
+  // override forces money/rate concepts regardless of the LLM's guess.
+  const kindTally = {};
   for (const r of metrics) {
     if (r.department && !departments[r.metric]) departments[r.metric] = r.department;
-    if (r.kind && !kinds[r.metric]) kinds[r.metric] = r.kind;
+    if (r.kind) {
+      (kindTally[r.metric] || (kindTally[r.metric] = {}))[r.kind] =
+        (kindTally[r.metric][r.kind] || 0) + 1;
+    }
+  }
+  const kinds = {};
+  for (const m of present) {
+    const majority =
+      Object.entries(kindTally[m] || {}).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+    kinds[m] = resolveKind(m, majority);
   }
 
   const kpis = present

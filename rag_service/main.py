@@ -866,6 +866,46 @@ def parse_json_array(raw: str) -> list:
     return data if isinstance(data, list) else []
 
 
+# Word stems that pin a metric's value kind regardless of what the LLM guessed,
+# so a money metric can't be shown as a percentage (the "$840,000 -> 840,000%"
+# bug) and a rate can't be shown as a raw count.
+_MONEY_WORDS = {
+    "revenue", "profit", "sales", "income", "cost", "costs", "expense", "expenses",
+    "expenditure", "price", "cash", "fee", "fees", "spend", "spending", "budget",
+    "turnover", "earnings", "salary", "payroll", "valuation", "arr", "mrr", "ebitda",
+}
+_RATE_WORDS = {
+    "rate", "ratio", "percent", "percentage", "margin", "share", "utilization",
+    "occupancy", "conversion", "churn", "growth", "cagr", "yield", "apr", "apy",
+}
+# Count nouns disambiguate a money word: "sales closed"/"units sold"/"deals" are
+# COUNTS, not dollars — so a count word wins over a money word.
+_COUNT_WORDS = {
+    "closed", "won", "deal", "deals", "count", "counts", "number", "num", "unit",
+    "units", "quantity", "qty", "volume", "order", "orders", "transaction",
+    "transactions", "signed", "signups", "tickets", "items", "leads", "customer",
+    "customers", "subscribers", "users", "visits", "clicks", "sessions",
+    "headcount", "hires", "employees", "downloads", "installs",
+}
+
+
+def infer_kind(metric: str, llm_kind: str, value: float, currency) -> str:
+    """Deterministic value-kind from the metric name, so display is consistent
+    regardless of LLM drift. Precedence: count nouns ("sales closed" = number) >
+    rate words ("conversion rate" = percent) > money words ("revenue" =
+    currency) > whatever the LLM said (with an absurd percent demoted)."""
+    toks = set(metric.split("_"))
+    if toks & _COUNT_WORDS:
+        return "count" if llm_kind == "count" else "number"
+    if toks & _RATE_WORDS:
+        return "percent" if abs(value) <= 1000 else "number"
+    if (toks & _MONEY_WORDS) or currency:
+        return "currency"
+    if llm_kind == "percent" and abs(value) > 1000:
+        return "number"
+    return llm_kind
+
+
 def normalize_metric(raw: dict) -> dict | None:
     """Validate/normalize one extracted metric; drop anything unusable.
 
@@ -889,6 +929,7 @@ def normalize_metric(raw: dict) -> dict | None:
     kind = str(raw.get("kind") or "number").strip().lower()
     if kind not in _ALLOWED_KINDS:
         kind = "number"
+    kind = infer_kind(metric, kind, value, currency)
     try:
         confidence = float(raw.get("confidence", 0.5))
     except (TypeError, ValueError):
