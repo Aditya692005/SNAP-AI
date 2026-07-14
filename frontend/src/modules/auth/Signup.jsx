@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { authService } from "../../services/authService";
+import { passwordProblems } from "../../utils/password";
 import "./Signup.css";
 
 function Signup() {
@@ -29,20 +30,10 @@ function Signup() {
 
   const isNewOrg = orgStatus?.valid && orgStatus.exists === false;
 
-  const validatePasswordStrength = (password) => {
-    const requirements = [];
-    if (password.length < 12) requirements.push("At least 12 characters");
-    if (!/[A-Z]/.test(password)) requirements.push("One uppercase letter");
-    if (!/[a-z]/.test(password)) requirements.push("One lowercase letter");
-    if (!/[0-9]/.test(password)) requirements.push("One number");
-    if (!/[!@#$%^&*_-]/.test(password)) requirements.push("One special character");
-    return requirements;
-  };
-
   const handleChange = (e) => {
     const { name, value } = e.target;
     setFormData((prev) => ({ ...prev, [name]: value }));
-    if (name === "password") setPasswordRequirements(validatePasswordStrength(value));
+    if (name === "password") setPasswordRequirements(passwordProblems(value));
     // Email changed -> previous org check no longer applies.
     if (name === "email") setOrgStatus(null);
     setError("");

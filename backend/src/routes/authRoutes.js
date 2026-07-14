@@ -6,6 +6,7 @@ const {
   signup,
   verifyEmailToken,
   getCurrentUser,
+  updateProfile,
   orgStatus,
   forgotPassword,
   resetPassword,
@@ -21,6 +22,7 @@ router.post("/login", login);
 router.post("/signup", signup);
 router.post("/verify", verifyEmailToken); // Verify email with token
 router.get("/me", requireAuth, getCurrentUser);
+router.patch("/me", requireAuth, updateProfile); // self-service: name only
 // Public: does this email's domain already have an organization? Drives whether
 // the signup form shows the "set up your organization" fields.
 router.get("/org-status", orgStatus);

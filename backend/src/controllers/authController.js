@@ -22,6 +22,8 @@ const {
   updateFailedLoginAttempts,
   setVerificationToken,
   updatePassword,
+  updateProfile: updateProfileRow,
+  setLastLogin,
   findInviteByToken,
   completeInvite,
   setPasswordResetOtp,
@@ -39,6 +41,7 @@ const {
   validatePasswordStrength,
   passwordsTooSimilar,
   isValidEmail,
+  sanitizeInput,
 } = require("../utils/validators");
 const {
   sendVerificationEmail,
@@ -155,6 +158,10 @@ async function login(req, res, next) {
     }
 
     console.log(`[LOGIN] ✅ Login successful for user: ${email}`);
+    // Best-effort: a stamp failure must not cost the user their login.
+    await setLastLogin(user.id).catch((e) =>
+      console.error(`[LOGIN] last_login stamp failed for ${email}:`, e.message)
+    );
     const permissions = await getPermissionsForRole(user.role_id);
     const safeUser = {
       id: user.id,
@@ -355,6 +362,33 @@ async function getCurrentUser(req, res, next) {
   }
 }
 
+// PATCH /api/auth/me  { name }   (protected)
+// Self-service profile update. `name` is the ONLY field a user may change about
+// themselves — role, department, status and organization stay admin-only, so this
+// route can never become a privilege-escalation path. The response mirrors
+// getCurrentUser's shape so the client can reuse its user-cache write.
+async function updateProfile(req, res, next) {
+  try {
+    const name = sanitizeInput(req.body.name);
+    if (name.length < 2 || name.length > 255) {
+      throw new AppError("Name must be between 2 and 255 characters.", 400);
+    }
+
+    const user = await updateProfileRow(req.user.id, { name });
+    if (!user) {
+      throw new AppError("User not found.", 404);
+    }
+
+    const permissions = await getPermissionsForRole(user.role_id);
+    const department = user.department_id ? await findDepartmentById(user.department_id) : null;
+    return res
+      .status(200)
+      .json({ user: { ...user, permissions, department_name: department?.name ?? null } });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 // POST /api/auth/forgot-password  { email }   (public)
 // Checks the account exists; if so, generates a 6-digit OTP, stores its hash,
 // and emails the code to THAT user's address. The OTP email is never sent for a
@@ -533,6 +567,7 @@ module.exports = {
   signup,
   verifyEmailToken,
   getCurrentUser,
+  updateProfile,
   orgStatus,
   forgotPassword,
   resetPassword,

@@ -174,6 +174,24 @@ export const authService = {
     }
   },
 
+  // Self-service profile update (name only — see PATCH /api/auth/me). Writes the
+  // fresh user straight into the cache and announces it, because there is no
+  // global store: UserMenu keeps its own copy of the user and would otherwise show
+  // the old name/initials until it happened to remount. A `storage` event is no
+  // help here — the browser only fires that in OTHER tabs.
+  async updateProfile(fields) {
+    const { user } = await handle(
+      await fetch(`${API_BASE_URL}/api/auth/me`, {
+        method: "PATCH",
+        headers: authHeaders(),
+        body: JSON.stringify(fields),
+      })
+    );
+    localStorage.setItem("user", JSON.stringify(user));
+    window.dispatchEvent(new Event("snap:user-updated"));
+    return user;
+  },
+
   isAuthenticated() {
     return !!this.getToken();
   },

@@ -1,17 +1,8 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { authService } from "../../services/authService";
+import { passwordProblems } from "../../utils/password";
 import "./Login.css";
-
-function passwordProblems(password) {
-  const out = [];
-  if (password.length < 12) out.push("At least 12 characters");
-  if (!/[A-Z]/.test(password)) out.push("One uppercase letter");
-  if (!/[a-z]/.test(password)) out.push("One lowercase letter");
-  if (!/[0-9]/.test(password)) out.push("One number");
-  if (!/[!@#$%^&*_-]/.test(password)) out.push("One special character");
-  return out;
-}
 
 function AcceptInvite() {
   const navigate = useNavigate();
