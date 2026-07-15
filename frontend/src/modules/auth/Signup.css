@@ -61,7 +61,7 @@
 .signup-card {
   width: 450px;
 
-  padding: 40px;
+  padding: 20px;
 
   position: relative;
 
@@ -138,7 +138,7 @@
 
   background: #0f0f0f;
 
-  color: #f5f5f5;
+  color: #ffffff;
 
   font-size: 1rem;
 
@@ -148,7 +148,7 @@
 
   box-sizing: border-box;
 
-  opacity: 0.4;
+  opacity: 0.6;
 
   box-shadow: 0 0 7px 0px#ffffff;
 }
@@ -163,12 +163,47 @@
   color: #7d7d7d;
 }
 
+/* Show/hide password toggle */
+.input-with-toggle {
+  position: relative;
+}
+.input-with-toggle input {
+  padding-right: 72px;
+}
+.show-password-toggle {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: transparent;
+  border: none;
+  color: #d4d4dd;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 6px 8px;
+  border-radius: 4px;
+  opacity: 0.8;
+  outline: none;
+  box-shadow: none;
+}
+
+/* Keep an accessible focus indicator for keyboard users */
+.show-password-toggle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.08);
+}
+
 .signup-form input:-webkit-autofill,
 .signup-form input:-webkit-autofill:hover,
 .signup-form input:-webkit-autofill:focus,
 .signup-form input:-webkit-autofill:active {
+  border: 1px solid #2f2f2f !important;
+  background: #0f0f0f !important;
+  color: #f5f5f5 !important;
+  box-shadow:
+    0 0 7px 0px #ffffff,
+    inset 0 0 0 1000px #0f0f0f !important;
   -webkit-text-fill-color: #f5f5f5 !important;
-  box-shadow: 0 0 0px 1000px #0f0f0f inset !important;
   transition: background-color 5000s ease-in-out 0s !important;
 }
 
@@ -193,9 +228,9 @@
   flex-direction: column;
   gap: 12px;
   padding: 16px;
-  border: 1px solid #2f2f2f;
+  /* border: 1px solid #2f2f2f; */
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.03);
+  /* background: transparent; */
 }
 
 .org-setup-title {
@@ -246,7 +281,7 @@
 
   font-size: 1rem;
 
-  font-weight: 700;
+  font-weight: 600;
 
   cursor: pointer;
 
@@ -254,9 +289,9 @@
 
   transition: all 0.3s ease;
 
-  width: 70px;
+  width: 90px;
 
-  height: 30px;
+  height: 35px;
 
   align-self: flex-end;
 }
@@ -349,7 +384,7 @@
 }
 
 .requirement-valid {
-  color: #f5f5f5;
+  color: #cfcfcf;
   margin: 0;
   font-weight: 500;
 }
