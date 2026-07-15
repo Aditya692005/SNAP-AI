@@ -24,16 +24,30 @@ function Signup() {
   const [checkingOrg, setCheckingOrg] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const [passwordRequirements, setPasswordRequirements] = useState([]);
   const [success, setSuccess] = useState(false);
   const [successEmail, setSuccessEmail] = useState("");
+  const [step, setStep] = useState(1);
 
   const isNewOrg = orgStatus?.valid && orgStatus.exists === false;
+
+  const validatePasswordStrength = (password) => {
+    const requirements = [];
+    if (password.length < 12) requirements.push("At least 12 characters");
+    if (!/[A-Z]/.test(password)) requirements.push("One uppercase letter");
+    if (!/[a-z]/.test(password)) requirements.push("One lowercase letter");
+    if (!/[0-9]/.test(password)) requirements.push("One number");
+    if (!/[!@#$%^&*_-]/.test(password))
+      requirements.push("One special character");
+    return requirements;
+  };
 
   const handleChange = (e) => {
     const { name, value } = e.target;
     setFormData((prev) => ({ ...prev, [name]: value }));
-    if (name === "password") setPasswordRequirements(passwordProblems(value));
+    if (name === "password")
+      setPasswordRequirements(validatePasswordStrength(value));
     // Email changed -> previous org check no longer applies.
     if (name === "email") setOrgStatus(null);
     setError("");
@@ -55,7 +69,10 @@ function Signup() {
       setOrgStatus(status);
       if (status?.valid && status.exists === false) {
         // Prefill the org name with the domain-derived suggestion.
-        setOrg((prev) => ({ ...prev, name: prev.name || status.organizationName || "" }));
+        setOrg((prev) => ({
+          ...prev,
+          name: prev.name || status.organizationName || "",
+        }));
       }
       return status;
     } catch {
@@ -69,17 +86,33 @@ function Signup() {
     e.preventDefault();
     setError("");
     setLoading(true);
-
     try {
+      // Step 1: check email + password, then advance to step 2
+      if (step === 1) {
+        if (!formData.email || !formData.password) {
+          throw new Error("Please fill in all fields");
+        }
+        if (passwordRequirements.length > 0) {
+          throw new Error("Password does not meet requirements");
+        }
+
+        const exists = await authService.checkEmailExists(formData.email);
+        if (exists) {
+          throw new Error("Account already exists");
+        }
+
+        // advance to second step where we collect name/org details
+        setStep(2);
+        setLoading(false);
+        return;
+      }
+
+      // Step 2: final submission
       if (!formData.name || !formData.email || !formData.password) {
         throw new Error("Please fill in all fields");
       }
-      if (passwordRequirements.length > 0) {
-        throw new Error("Password does not meet requirements");
-      }
 
-      // Make sure we know whether this email's domain has an org (in case the
-      // user never blurred the email field).
+      // Ensure org status is known
       let status = orgStatus;
       if (!status || !status.valid) {
         status = await checkOrg(formData.email);
@@ -89,7 +122,8 @@ function Signup() {
       let orgPayload;
       if (creatingOrg) {
         if (!org.name.trim()) throw new Error("Organization name is required");
-        if (!org.bio.trim()) throw new Error("Please add a short bio for your organization");
+        if (!org.bio.trim())
+          throw new Error("Please add a short bio for your organization");
         if (!org.country.trim()) throw new Error("Please select your country");
         orgPayload = {
           name: org.name.trim(),
@@ -100,7 +134,12 @@ function Signup() {
         };
       }
 
-      await authService.signup(formData.name, formData.email, formData.password, orgPayload);
+      await authService.signup(
+        formData.name,
+        formData.email,
+        formData.password,
+        orgPayload,
+      );
 
       setSuccess(true);
       setSuccessEmail(formData.email);
@@ -113,8 +152,7 @@ function Signup() {
 
   return (
     <div className="signup-page">
-      <div className="glow glow-1"></div>
-      <div className="glow glow-2"></div>
+      {/* <div className="glow"></div> */}
 
       <div className="signup-card">
         {success ? (
@@ -134,7 +172,13 @@ function Signup() {
                 onClick={() => {
                   setSuccess(false);
                   setFormData({ name: "", email: "", password: "" });
-                  setOrg({ name: "", bio: "", industry: "", country: "", subscriptionPlan: "FREE" });
+                  setOrg({
+                    name: "",
+                    bio: "",
+                    industry: "",
+                    country: "",
+                    subscriptionPlan: "FREE",
+                  });
                   setOrgStatus(null);
                   setPasswordRequirements([]);
                 }}
@@ -146,40 +190,185 @@ function Signup() {
           </>
         ) : (
           <>
-            <h1>Create Account</h1>
+            <p className="brand">SNAP AI</p>
+            {step === 2 ? <h1>Setup Organization</h1> : <h1>Create Account</h1>}
 
-            <p className="subtitle">
-              Join SNAP AI and unlock <br /> intelligent business insights
-            </p>
-
+            {step === 2 ? (
+              <p className="signup-subtitle">
+                You're the first person from this domain, so you'll be the
+                organization admin.
+              </p>
+            ) : (
+              <p className="signup-subtitle">
+                Unlock Intelligent Business Insights
+              </p>
+            )}
+            {/* <p className="steps">Step {step} of 2</p> */}
             <form className="signup-form" onSubmit={handleSubmit}>
-              <input
+              {step === 1 && (
+                <>
+                  <input
+                    type="email"
+                    name="email"
+                    placeholder="Email Address"
+                    value={formData.email}
+                    onChange={handleChange}
+                    onBlur={(e) => checkOrg(e.target.value)}
+                    disabled={loading}
+                  />
+                  <div className="input-with-toggle">
+                    <input
+                      type={showPassword ? "text" : "password"}
+                      name="password"
+                      placeholder="Password"
+                      value={formData.password}
+                      onChange={handleChange}
+                      disabled={loading}
+                    />
+                    <button
+                      type="button"
+                      className="show-password-toggle"
+                      onClick={() => setShowPassword((s) => !s)}
+                      aria-pressed={showPassword}
+                      aria-label={
+                        showPassword ? "Hide password" : "Show password"
+                      }
+                    >
+                      {showPassword ? "Hide" : "Show"}
+                    </button>
+                  </div>
+                </>
+              )}
+              {step === 2 && (
+                <>
+                  {isNewOrg && (
+                    <div className="org-setup">
+                      {/* <p className="org-setup-title">
+                        Set up your organization
+                      </p>
+                      <p className="field-hint">
+                        You're the first person from this domain, so you'll be
+                        the organization admin.
+                      </p> */}
+                      <input
+                        type="text"
+                        name="name"
+                        placeholder="Full Name"
+                        value={formData.name}
+                        onChange={handleChange}
+                        disabled={loading}
+                      />
+                      <input
+                        type="text"
+                        name="name"
+                        placeholder="Organization name"
+                        value={org.name}
+                        onChange={handleOrgChange}
+                        disabled={loading}
+                      />
+                      <textarea
+                        name="bio"
+                        placeholder="Organization bio"
+                        value={org.bio}
+                        onChange={handleOrgChange}
+                        disabled={loading}
+                        rows={2}
+                      />
+                      <input
+                        type="text"
+                        name="industry"
+                        placeholder="Industry (optional)"
+                        value={org.industry}
+                        onChange={handleOrgChange}
+                        disabled={loading}
+                      />
+                      <select
+                        name="country"
+                        value={org.country}
+                        onChange={handleOrgChange}
+                        disabled={loading}
+                      >
+                        <option value="">Select a country</option>
+                        <option value="United States">United States</option>
+                        <option value="Canada">Canada</option>
+                        <option value="United Kingdom">United Kingdom</option>
+                        <option value="Australia">Australia</option>
+                        <option value="India">India</option>
+                        <option value="Germany">Germany</option>
+                        <option value="France">France</option>
+                        <option value="Brazil">Brazil</option>
+                        <option value="Japan">Japan</option>
+                        <option value="Other">Other</option>
+                      </select>
+                      <select
+                        name="subscriptionPlan"
+                        value={org.subscriptionPlan}
+                        onChange={handleOrgChange}
+                        disabled={loading}
+                      >
+                        <option value="FREE">Free</option>
+                        <option value="STARTER">Starter</option>
+                        <option value="PRO">Pro</option>
+                        <option value="ENTERPRISE">Enterprise</option>
+                      </select>
+                    </div>
+                  )}
+                </>
+              )}
+              {/* <input
                 type="text"
                 name="name"
-                placeholder="Full Name"
-                value={formData.name}
-                onChange={handleChange}
+                placeholder="Organization name"
+                value={org.name}
+                onChange={handleOrgChange}
+                disabled={loading}
+              />
+              <textarea
+                name="bio"
+                placeholder="Organization bio — what does your company do?"
+                value={org.bio}
+                onChange={handleOrgChange}
+                disabled={loading}
+                rows={3}
+              />
+              <input
+                type="text"
+                name="industry"
+                placeholder="Industry (optional)"
+                value={org.industry}
+                onChange={handleOrgChange}
                 disabled={loading}
               />
               <input
-                type="email"
-                name="email"
-                placeholder="Work Email Address"
-                value={formData.email}
-                onChange={handleChange}
-                onBlur={(e) => checkOrg(e.target.value)}
+                type="text"
+                name="country"
+                placeholder="Country"
+                value={org.country}
+                onChange={handleOrgChange}
                 disabled={loading}
               />
-
-              {checkingOrg && <p className="field-hint">Checking your organization…</p>}
+              <select
+                name="subscriptionPlan"
+                value={org.subscriptionPlan}
+                onChange={handleOrgChange}
+                disabled={loading}
+              >
+                <option value="FREE">Free</option>
+                <option value="STARTER">Starter</option>
+                <option value="PRO">Pro</option>
+                <option value="ENTERPRISE">Enterprise</option>
+              </select>
+              {checkingOrg && (
+                <p className="field-hint">Checking your organization…</p>
+              )}
 
               {orgStatus?.valid && orgStatus.exists === true && (
                 <p className="field-hint">
                   You'll join <strong>{orgStatus.organizationName}</strong>.
                 </p>
-              )}
+              )} */}
 
-              {/* New domain -> this person sets up the organization (org_admin). */}
+              {/* New domain -> this person sets up the organization (org_admin).
               {isNewOrg && (
                 <div className="org-setup">
                   <p className="org-setup-title">Set up your organization</p>
@@ -231,37 +420,26 @@ function Signup() {
                     <option value="ENTERPRISE">Enterprise</option>
                   </select>
                 </div>
-              )}
+              )} */}
 
-              <input
-                type="password"
-                name="password"
-                placeholder="Password"
-                value={formData.password}
-                onChange={handleChange}
-                disabled={loading}
-              />
-              {formData.password && (
+              {formData.password && passwordRequirements.length > 0 && (
                 <div className="password-requirements">
-                  {passwordRequirements.length === 0 ? (
-                    <p className="requirement-valid">✅ Password meets all requirements</p>
-                  ) : (
-                    <>
-                      <p className="requirement-label">Password must have:</p>
-                      <ul className="requirement-list">
-                        {passwordRequirements.map((req, idx) => (
-                          <li key={idx} className="requirement-item">
-                            ❌ {req}
-                          </li>
-                        ))}
-                      </ul>
-                    </>
-                  )}
+                  <p className="requirement-label">Password must have:</p>
+                  <ul className="requirement-list">
+                    {passwordRequirements.map((req, idx) => (
+                      <li key={idx} className="requirement-item">
+                        {req}
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               )}
               {error && <p className="error-message">{error}</p>}
-              <button type="submit" className="signup-btn" disabled={loading}>
-                {loading ? "Creating Account..." : "Create Account"}
+              {/* <button type="submit" className="signup-btn" disabled={loading}>
+                {loading ? "Creating Account..." : "Next"}
+              </button> */}
+              <button className="next-btn" disabled={loading}>
+                {step === 1 ? "Next" : "Create"}
               </button>
             </form>
           </>
