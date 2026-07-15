@@ -313,6 +313,8 @@
   animation: bounce 0.6s ease;
 }
 
+/* Body copy on the success ("Check Your Email") screen uses Manrope to match the
+   form's subtitle/inputs, rather than inheriting the page's Playfair serif. */
 .email-highlight {
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.14);
@@ -322,6 +324,11 @@
   font-weight: 600;
   margin: 15px 0;
   word-break: break-all;
+  font-family:
+    "Manrope",
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
 }
 
 .instruction {
@@ -329,12 +336,25 @@
   font-size: 0.95rem;
   line-height: 1.6;
   margin: 20px 0;
+  font-family:
+    "Manrope",
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+    text-align: center;
 }
 
 .secondary-text {
   color: #bdbdbd;
   font-size: 0.9rem;
   margin-top: 15px;
+  font-family:
+    "Manrope",
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+        text-align: center;
+
 }
 
 @keyframes bounce {

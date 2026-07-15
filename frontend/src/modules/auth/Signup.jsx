@@ -29,6 +29,8 @@ function Signup() {
   const [success, setSuccess] = useState(false);
   const [successEmail, setSuccessEmail] = useState("");
   const [step, setStep] = useState(1);
+  const [resending, setResending] = useState(false);
+  const [resendMsg, setResendMsg] = useState("");
 
   const isNewOrg = orgStatus?.valid && orgStatus.exists === false;
 
@@ -150,6 +152,28 @@ function Signup() {
     }
   };
 
+  // Resend the verification email without leaving the success screen. The
+  // sanctioned resend path is "log in again": for an unverified account the
+  // backend issues a fresh link and rejects the login (403), so we treat that
+  // rejection as the confirmation. If the account got verified in the meantime,
+  // the login succeeds and we send the user straight to their dashboard.
+  const handleResend = async () => {
+    if (resending) return;
+    setResending(true);
+    setResendMsg("");
+    try {
+      await authService.login(successEmail, formData.password);
+      navigate("/dashboard"); // already verified — just log them in
+    } catch (err) {
+      setResendMsg(
+        err.message ||
+          "We've sent a new verification link — it expires in 10 minutes.",
+      );
+    } finally {
+      setResending(false);
+    }
+  };
+
   return (
     <div className="signup-page">
       {/* <div className="glow"></div> */}
@@ -157,35 +181,30 @@ function Signup() {
       <div className="signup-card">
         {success ? (
           <>
+            <p className="brand">SNAP AI</p>
             <h1>Check Your Email</h1>
-            <p className="subtitle">We've sent a verification link to</p>
+            <p className="signup-subtitle">We've sent a verification link to</p>
             <p className="email-highlight">{successEmail}</p>
             <p className="instruction">
               Click the link in the email to verify your account. <br />
-              The link expires in 10 minutes — if it does, just log in again to
+              The link expires in 10 minutes, if it does, just log in again to
               get a new one.
             </p>
             <p className="secondary-text">
               Didn't receive the email?{" "}
               <span
-                onClick={() => {
-                  setSuccess(false);
-                  setFormData({ name: "", email: "", password: "" });
-                  setOrg({
-                    name: "",
-                    bio: "",
-                    industry: "",
-                    country: "",
-                    subscriptionPlan: "FREE",
-                  });
-                  setOrgStatus(null);
-                  setPasswordRequirements([]);
+                onClick={handleResend}
+                style={{
+                  cursor: resending ? "default" : "pointer",
+                  color: "#ffffff",
+                  fontWeight: 600,
+                  opacity: resending ? 0.6 : 1,
                 }}
-                style={{ cursor: "pointer", color: "#ec4899" }}
               >
-                Try again
+                {resending ? "Sending…" : "Resend email"}
               </span>
             </p>
+            {resendMsg && <p className="instruction">{resendMsg}</p>}
           </>
         ) : (
           <>
@@ -441,12 +460,12 @@ function Signup() {
                 {step === 1 ? "Next" : "Create"}
               </button>
             </form>
+            <p className="login-text">
+              Already have an account?
+              <span onClick={() => navigate("/login")}> Log In</span>
+            </p>
           </>
         )}
-        <p className="login-text">
-          Already have an account?
-          <span onClick={() => navigate("/login")}> Log In</span>
-        </p>
       </div>
     </div>
   );
