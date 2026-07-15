@@ -834,57 +834,43 @@ function Dashboard() {
 
   return (
     <div className="dashboard">
-      <Sidebar />
-
-      <main className="dashboard-content">
-        {/* Header */}
-        <div className="dashboard-header">
-          <div className="dashboard-title-wrap">
-            <span className="dashboard-eyebrow">SNAP AI · {org?.name || "Studio"}</span>
-            <h1>{org?.name ? `${org.name} — Insights Dashboard` : "Insights Dashboard"}</h1>
-            <p>
-              {org?.description ||
-                "Charts you pin from the AI Assistant live here — ask for a chart, then pin it."}
-            </p>
-            {org && (org.industry || org.country || org.subscription_plan) && (
-              <p className="dashboard-org-meta">
-                {[org.industry, org.country, org.subscription_plan]
-                  .filter(Boolean)
-                  .join(" · ")}
-              </p>
-            )}
-          </div>
-
-          <div className="dashboard-toolbar">
-            <button className="ghost-btn" onClick={refresh} disabled={loading}>
-              ⟳ Refresh
-            </button>
-            <button className="sources-btn" onClick={() => setSourcesOpen(true)}>
-              <span className="chip-dot" /> Sources
-              <span className="sources-count">
-                {includedCount}/{documents.length}
-              </span>
-            </button>
-          </div>
+      {/* Full-width top bar. It sits ABOVE the sidebar so it spans the whole
+          window and never shrinks when the sidebar expands. */}
+      <div className="dashboard-topbar">
+        <span className="topbar-company">{org?.name || "Company"}</span>
+        <span className="topbar-brand">SNAP AI</span>
+        <div className="topbar-actions">
+          <button className="ghost-btn" onClick={refresh} disabled={loading}>
+            ⟳ Refresh
+          </button>
+          <button className="sources-btn" onClick={() => setSourcesOpen(true)}>
+            <span className="chip-dot" /> Sources
+            <span className="sources-count">
+              {includedCount}/{documents.length}
+            </span>
+          </button>
         </div>
+      </div>
 
-        {/* Scope switch — shown when the user can see a department or org board */}
-        {(deptBoards.length > 0 || showOrgScope) && (
-          <div className="scope-switch">
-            <button
-              className={`scope-btn ${scope === "personal" ? "active" : ""}`}
-              onClick={() => setScope("personal")}
-            >
-              My dashboards
-            </button>
-            {deptBoards.length > 0 && (
-              <button
-                className={`scope-btn ${scope === "department" ? "active" : ""}`}
-                onClick={() => setScope("department")}
-              >
-                Department
-              </button>
-            )}
+      <div className="dashboard-shell">
+        <Sidebar />
+
+        <main className="dashboard-content">
+
+        {/* Create + scope switch. Clicking a scope reveals that scope's list of
+            dashboard names in the row below. */}
+        <div className="dashboard-controls">
+          <button
+            className="control-btn"
+            onClick={() => {
+              setScope("personal");
+              setDraftName("");
+              setCreating(true);
+            }}
+          >
+            ＋ Create new dashboard
+          </button>
+          <div className="scope-group">
             {showOrgScope && (
               <button
                 className={`scope-btn ${scope === "organization" ? "active" : ""}`}
@@ -893,8 +879,25 @@ function Dashboard() {
                 Organization
               </button>
             )}
+            {deptBoards.length > 0 && (
+              <button
+                className={`scope-btn ${scope === "department" ? "active" : ""}`}
+                onClick={() => setScope("department")}
+              >
+                Department
+              </button>
+            )}
+            <button
+              className={`scope-btn ${scope === "personal" ? "active" : ""}`}
+              onClick={() => setScope("personal")}
+            >
+              Personal
+            </button>
           </div>
-        )}
+        </div>
+
+        <div className="dashboard-body">
+          <div className="dashboard-main-col">
 
         {scope === "personal" && (
           <>
@@ -911,7 +914,7 @@ function Dashboard() {
             </button>
           ))}
 
-          {creating ? (
+          {creating && (
             <input
               className="dash-tab-input"
               autoFocus
@@ -930,17 +933,6 @@ function Dashboard() {
                 setDraftName("");
               }}
             />
-          ) : (
-            <button
-              className="dash-tab new"
-              onClick={() => {
-                setDraftName("");
-                setCreating(true);
-              }}
-              title="New dashboard"
-            >
-              + New
-            </button>
           )}
         </div>
 
@@ -1437,7 +1429,23 @@ function Dashboard() {
             )}
           </>
         )}
+          </div>
+
+          {/* Updates: notifications about shared files and new dashboard
+              widgets/metrics/charts. Wired up in a later pass. */}
+          <aside className="updates-col">
+            <p className="updates-title">Updates</p>
+            <div className="updates-panel">
+              <p className="updates-empty">
+                Notifications about files shared with you and new widgets,
+                metrics or charts added to your organization or department
+                dashboards will show up here.
+              </p>
+            </div>
+          </aside>
+        </div>
       </main>
+      </div>
 
       {/* Data sources drawer */}
       <div

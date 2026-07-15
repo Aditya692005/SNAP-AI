@@ -5,7 +5,6 @@ import { VscEditSparkle } from "react-icons/vsc";
 import { HiOutlineDocumentReport } from "react-icons/hi";
 import { GrUserAdmin } from "react-icons/gr";
 import { IoSettingsSharp } from "react-icons/io5";
-import { SiSnapcraft } from "react-icons/si";
 import { IoIosArrowForward } from "react-icons/io";
 import { IoIosArrowBack } from "react-icons/io";
 import { Link, useLocation } from "react-router-dom";
@@ -42,25 +41,13 @@ function Sidebar() {
   return (
     <aside className={`sidebar ${collapsed ? "collapsed" : ""}`}>
       <div className="sidebar-top">
-        <div className="sidebar-logo">
-          <span className="logo-mark">
-            <SiSnapcraft />
-          </span>
-          {!collapsed && (
-            <div className="logo-text">
-              <h2>SNAP AI</h2>
-            </div>
-          )}
-        </div>
         <button
           className="sidebar-toggle"
           onClick={toggle}
           title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           aria-label="Toggle sidebar"
         >
-          {/* {collapsed ? "»" : "«"} */}
           {collapsed ? <IoIosArrowForward /> : <IoIosArrowBack />}
-          {/* {collapsed ? ">" : "<"} */}
         </button>
       </div>
 

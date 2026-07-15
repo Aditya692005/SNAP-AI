@@ -19,9 +19,6 @@ function Signup() {
     country: "",
     subscriptionPlan: "FREE",
   });
-  // null = unknown yet; otherwise { valid, exists, organizationName }
-  const [orgStatus, setOrgStatus] = useState(null);
-  const [checkingOrg, setCheckingOrg] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
@@ -31,8 +28,6 @@ function Signup() {
   const [step, setStep] = useState(1);
   const [resending, setResending] = useState(false);
   const [resendMsg, setResendMsg] = useState("");
-
-  const isNewOrg = orgStatus?.valid && orgStatus.exists === false;
 
   const validatePasswordStrength = (password) => {
     const requirements = [];
@@ -50,8 +45,6 @@ function Signup() {
     setFormData((prev) => ({ ...prev, [name]: value }));
     if (name === "password")
       setPasswordRequirements(validatePasswordStrength(value));
-    // Email changed -> previous org check no longer applies.
-    if (name === "email") setOrgStatus(null);
     setError("");
   };
 
@@ -61,27 +54,26 @@ function Signup() {
     setError("");
   };
 
-  // When the email loses focus, find out if its domain already has an org so we
-  // can show/hide the "set up your organization" section.
-  const checkOrg = async (email) => {
-    if (!email || !email.includes("@") || !email.split("@")[1]) return null;
-    setCheckingOrg(true);
-    try {
-      const status = await authService.checkOrgStatus(email);
-      setOrgStatus(status);
-      if (status?.valid && status.exists === false) {
-        // Prefill the org name with the domain-derived suggestion.
-        setOrg((prev) => ({
-          ...prev,
-          name: prev.name || status.organizationName || "",
-        }));
-      }
-      return status;
-    } catch {
-      return null;
-    } finally {
-      setCheckingOrg(false);
-    }
+  // Suggest an organization name from the email domain (skips free providers,
+  // whose domain says nothing about a company). Local-only — signup no longer
+  // asks the server whether a domain already has an org, because a matching
+  // domain must not auto-join anyone to it.
+  const suggestOrgName = (email) => {
+    const domain = (email.split("@")[1] || "").toLowerCase();
+    if (!domain) return "";
+    const free = [
+      "gmail.com",
+      "yahoo.com",
+      "outlook.com",
+      "hotmail.com",
+      "icloud.com",
+      "aol.com",
+      "proton.me",
+      "protonmail.com",
+    ];
+    if (free.includes(domain)) return "";
+    const base = domain.split(".")[0];
+    return base ? base.charAt(0).toUpperCase() + base.slice(1) : "";
   };
 
   const handleSubmit = async (e) => {
@@ -103,38 +95,34 @@ function Signup() {
           throw new Error("Account already exists");
         }
 
-        // advance to second step where we collect name/org details
+        // Advance to org setup and suggest an org name from the email domain.
+        setOrg((prev) => ({
+          ...prev,
+          name: prev.name || suggestOrgName(formData.email),
+        }));
         setStep(2);
         setLoading(false);
         return;
       }
 
-      // Step 2: final submission
+      // Step 2: create the account and its organization. Every signup creates
+      // its OWN org (the signer becomes its admin) — joining an existing org is
+      // invite-only, so there's no "join by email domain" path here anymore.
       if (!formData.name || !formData.email || !formData.password) {
         throw new Error("Please fill in all fields");
       }
+      if (!org.name.trim()) throw new Error("Organization name is required");
+      if (!org.bio.trim())
+        throw new Error("Please add a short bio for your organization");
+      if (!org.country.trim()) throw new Error("Please select your country");
 
-      // Ensure org status is known
-      let status = orgStatus;
-      if (!status || !status.valid) {
-        status = await checkOrg(formData.email);
-      }
-      const creatingOrg = status?.valid && status.exists === false;
-
-      let orgPayload;
-      if (creatingOrg) {
-        if (!org.name.trim()) throw new Error("Organization name is required");
-        if (!org.bio.trim())
-          throw new Error("Please add a short bio for your organization");
-        if (!org.country.trim()) throw new Error("Please select your country");
-        orgPayload = {
-          name: org.name.trim(),
-          bio: org.bio.trim(),
-          industry: org.industry.trim(),
-          country: org.country.trim(),
-          subscriptionPlan: org.subscriptionPlan,
-        };
-      }
+      const orgPayload = {
+        name: org.name.trim(),
+        bio: org.bio.trim(),
+        industry: org.industry.trim(),
+        country: org.country.trim(),
+        subscriptionPlan: org.subscriptionPlan,
+      };
 
       await authService.signup(
         formData.name,
@@ -213,8 +201,8 @@ function Signup() {
 
             {step === 2 ? (
               <p className="signup-subtitle">
-                You're the first person from this domain, so you'll be the
-                organization admin.
+                Set up your organization — you'll be its admin. To join an
+                existing organization instead, ask its admin to invite you.
               </p>
             ) : (
               <p className="signup-subtitle">
@@ -231,7 +219,6 @@ function Signup() {
                     placeholder="Email Address"
                     value={formData.email}
                     onChange={handleChange}
-                    onBlur={(e) => checkOrg(e.target.value)}
                     disabled={loading}
                   />
                   <div className="input-with-toggle">

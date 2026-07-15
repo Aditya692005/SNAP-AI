@@ -289,40 +289,32 @@ async function signup(req, res, next) {
       throw new AppError("An account with this email already exists.", 409);
     }
 
-    // Resolve (or create) the organization for this email. When none exists,
-    // this user is the org_admin and sets up the org here. Free email providers
-    // are keyed by full address so unrelated people don't share an org.
-    let organization = await findOrgForEmail(normalizedEmail, domain);
-    let roleName = "employee";
-    if (!organization) {
-      const orgName =
-        (organizationName && organizationName.trim()) || deriveOrgName(domain);
-      let plan = String(organizationSubscriptionPlan || "FREE").toUpperCase();
-      if (!SUBSCRIPTION_PLANS.includes(plan)) plan = "FREE";
-      try {
-        organization = await createOrganization({
-          name: orgName,
-          contactEmail: normalizedEmail,
-          description: organizationBio ? String(organizationBio).trim() : null,
-          industry: organizationIndustry
-            ? String(organizationIndustry).trim()
-            : null,
-          country: organizationCountry
-            ? String(organizationCountry).trim()
-            : "Unknown",
-          subscriptionPlan: plan,
-        });
-        roleName = "org_admin"; // first user of a brand-new org runs it
-        console.log(
-          `[SIGNUP] Created organization '${organization.name}' (${plan}) for ${normalizedEmail}`,
-        );
-      } catch (e) {
-        // Race: another signup created the org first. Re-fetch and join instead.
-        organization = await findOrgForEmail(normalizedEmail, domain);
-        if (!organization) throw e;
-        roleName = "employee";
-      }
-    }
+    // Every public signup creates its OWN organization, and the signer runs it
+    // (org_admin). We deliberately do NOT look up an org by email domain: sharing
+    // a domain with an existing organization must never place someone inside it.
+    // Joining an existing org is invite-only — an admin pre-creates the account
+    // against their org (see acceptInvite), which is the only path that puts a
+    // user into an organization they didn't create.
+    const orgName =
+      (organizationName && organizationName.trim()) || deriveOrgName(domain);
+    let plan = String(organizationSubscriptionPlan || "FREE").toUpperCase();
+    if (!SUBSCRIPTION_PLANS.includes(plan)) plan = "FREE";
+    const organization = await createOrganization({
+      name: orgName,
+      contactEmail: normalizedEmail,
+      description: organizationBio ? String(organizationBio).trim() : null,
+      industry: organizationIndustry
+        ? String(organizationIndustry).trim()
+        : null,
+      country: organizationCountry
+        ? String(organizationCountry).trim()
+        : "Unknown",
+      subscriptionPlan: plan,
+    });
+    const roleName = "org_admin"; // the creator of a new org runs it
+    console.log(
+      `[SIGNUP] Created organization '${organization.name}' (${plan}) for ${normalizedEmail}`,
+    );
 
     const role = await findRoleByName(roleName);
     if (!role) {
