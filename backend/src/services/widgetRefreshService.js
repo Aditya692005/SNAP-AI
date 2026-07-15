@@ -55,11 +55,20 @@ async function recoverRequest(aiMessageId) {
 }
 
 // Ask the RAG service to rebuild a chart spec for `instruction` against `source`.
-async function regenerateSpec(instruction, source) {
+//
+// `organizationId` is what lets the RAG service find the source's ORIGINAL bytes in
+// Storage: a widget only remembers a file NAME, and a name is ambiguous across the whole
+// system — two organizations can each have a `sales.csv`. Scoping the lookup to the org
+// that owns the widget keeps a refresh from ever charting another tenant's data.
+async function regenerateSpec(instruction, source, organizationId) {
   const response = await fetch(`${RAG_URL}/visualize`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ instruction, source: source || null }),
+    body: JSON.stringify({
+      instruction,
+      source: source || null,
+      organization_id: organizationId || null,
+    }),
   });
   if (!response.ok) {
     const err = await response.json().catch(() => ({}));
@@ -85,7 +94,7 @@ async function refreshWidget(userId, organizationId, widgetId) {
   }
   // Prefer the source flagged stale (the re-uploaded file); else the first source.
   const source = widget.config?.stale_source || recovered.sources[0] || null;
-  const spec = await regenerateSpec(recovered.instruction, source);
+  const spec = await regenerateSpec(recovered.instruction, source, organizationId);
 
   const config = { ...(widget.config || {}), spec };
   delete config.stale;
@@ -97,7 +106,7 @@ async function refreshWidget(userId, organizationId, widgetId) {
 // concurrent editor isn't clobbered. `widget` is the already-fetched+authorized
 // widget row; `expectedVersion` is the client's last-seen version; `userId`
 // records who refreshed it. Throws (404/422/409-tagged) if it can't refresh.
-async function refreshDepartmentWidget(widget, expectedVersion, userId) {
+async function refreshDepartmentWidget(widget, expectedVersion, userId, organizationId) {
   const recovered = await recoverRequest(widget.ai_message_id);
   if (!recovered) {
     const e = new Error("This chart can't be refreshed automatically — it isn't linked to a chat request.");
@@ -105,7 +114,7 @@ async function refreshDepartmentWidget(widget, expectedVersion, userId) {
     throw e;
   }
   const source = widget.config?.stale_source || recovered.sources[0] || null;
-  const spec = await regenerateSpec(recovered.instruction, source);
+  const spec = await regenerateSpec(recovered.instruction, source, organizationId);
 
   const config = { ...(widget.config || {}), spec };
   delete config.stale;
@@ -117,7 +126,7 @@ async function refreshDepartmentWidget(widget, expectedVersion, userId) {
 
 // Regenerate ONE organization-board widget from fresh data, version-guarded so a
 // concurrent admin isn't clobbered. Mirrors refreshDepartmentWidget one scope up.
-async function refreshOrganizationWidget(widget, expectedVersion, userId) {
+async function refreshOrganizationWidget(widget, expectedVersion, userId, organizationId) {
   const recovered = await recoverRequest(widget.ai_message_id);
   if (!recovered) {
     const e = new Error("This chart can't be refreshed automatically — it isn't linked to a chat request.");
@@ -125,7 +134,7 @@ async function refreshOrganizationWidget(widget, expectedVersion, userId) {
     throw e;
   }
   const source = widget.config?.stale_source || recovered.sources[0] || null;
-  const spec = await regenerateSpec(recovered.instruction, source);
+  const spec = await regenerateSpec(recovered.instruction, source, organizationId);
 
   const config = { ...(widget.config || {}), spec };
   delete config.stale;

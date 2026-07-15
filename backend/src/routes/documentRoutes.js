@@ -39,6 +39,8 @@ const {
 } = require("../models/departmentModel");
 const { findAssignableRole } = require("../models/roleModel");
 const { logAdminAction } = require("../models/auditModel");
+const { getObject, removeObject } = require("../services/storageService");
+const { canRead, sendBuffer } = require("../services/documentDownload");
 
 const RAG_URL = process.env.RAG_SERVICE_URL || "http://localhost:8000";
 
@@ -260,11 +262,30 @@ router.delete("/:id/access/:accessId", async (req, res, next) => {
   }
 });
 
+// GET /api/documents/:id/download — the document's ORIGINAL bytes.
+// The canonical download route: keyed by id, so there is nothing to guess and nothing
+// to disambiguate. Prefer it over the filename-keyed /api/rag/download/:filename, which
+// exists only because a cited source in the chat gives the client a name, not an id.
+router.get("/:id/download", async (req, res, next) => {
+  try {
+    const doc = await findDocumentById(req.params.id);
+    // Wrong org, or shared with someone else: report missing rather than forbidden, so
+    // the route can't be used to probe for which documents exist.
+    if (!doc || doc.organization_id !== req.user.organization_id || !(await canRead(req, doc.id))) {
+      throw new AppError("Document not found.", 404);
+    }
+    const buf = await getObject(doc.storage_path);
+    return sendBuffer(res, buf, doc.file_name, doc.mime_type);
+  } catch (err) {
+    return next(err);
+  }
+});
+
 // DELETE /api/documents/:id
 // Remove a document EVERYWHERE: the documents row (cascades document_chunks /
-// document_tables / document_access in Supabase), the RAG file + vectors, and
-// the uploader's dashboard metrics — so the dashboard updates too. Allowed for
-// the uploader or an org_admin.
+// document_tables / document_access in Supabase), the stored original, the RAG
+// vectors + cache, and the uploader's dashboard metrics — so the dashboard updates
+// too. Allowed for the uploader or an org_admin.
 router.delete("/:id", async (req, res, next) => {
   try {
     const orgId = req.user.organization_id;
@@ -286,13 +307,21 @@ router.delete("/:id", async (req, res, next) => {
     // 2) The documents row (cascades chunks / tables / access in Supabase).
     await deleteDocument(doc.id, orgId);
 
-    // 3) The on-disk file + Chroma vectors in the RAG service (best-effort).
+    // 3) The original bytes in Storage (best-effort — an orphaned object is invisible
+    //    garbage, and the row it belonged to is already gone).
+    try {
+      await removeObject(doc.storage_path);
+    } catch {
+      /* orphaned object; DB already cleaned */
+    }
+
+    // 4) The RAG service's local cache copy (best-effort).
     try {
       await fetch(`${RAG_URL}/documents/${encodeURIComponent(doc.file_name)}`, {
         method: "DELETE",
       });
     } catch {
-      /* RAG down — DB already cleaned */
+      /* RAG down — DB and Storage already cleaned */
     }
 
     await logAdminAction(req.user.id, "document.delete", {

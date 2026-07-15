@@ -817,7 +817,12 @@ router.post("/department/widgets/:id/refresh", requireAuth, async (req, res, nex
     if (!Number.isInteger(expectedVersion)) {
       return res.status(400).json({ message: "expected_version (integer) is required" });
     }
-    const updated = await refreshDepartmentWidget(widget, expectedVersion, req.user.id);
+    const updated = await refreshDepartmentWidget(
+      widget,
+      expectedVersion,
+      req.user.id,
+      req.user.organization_id
+    );
     return res.json(updated);
   } catch (err) {
     if (err.status) return res.status(err.status).json({ message: err.message });
@@ -1023,7 +1028,12 @@ router.post("/organization/widgets/:id/refresh", requireAuth, async (req, res, n
     if (!Number.isInteger(expectedVersion)) {
       return res.status(400).json({ message: "expected_version (integer) is required" });
     }
-    const updated = await refreshOrganizationWidget(widget, expectedVersion, req.user.id);
+    const updated = await refreshOrganizationWidget(
+      widget,
+      expectedVersion,
+      req.user.id,
+      req.user.organization_id
+    );
     return res.json(updated);
   } catch (err) {
     if (err.status) return res.status(err.status).json({ message: err.message });

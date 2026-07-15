@@ -163,10 +163,14 @@ async function extractAndStore(userId, source, opts = {}) {
       /* metric_definitions table not available */
     }
 
+    // document_id, not just the file name: the RAG service fetches the original bytes
+    // from Storage by resolving the id to a storage_path. Resolving by name alone was
+    // ambiguous across organizations — two orgs with a `report.pdf` would extract each
+    // other's numbers.
     const response = await fetch(`${RAG_URL}/extract-metrics`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source, custom_metrics: customMetrics }),
+      body: JSON.stringify({ source, document_id: documentId, custom_metrics: customMetrics }),
     });
 
     if (!response.ok) {

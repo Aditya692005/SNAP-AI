@@ -25,7 +25,17 @@ const {
   findByFileName,
   findByContentHash,
   deleteAllForUser,
+  listStoragePathsForUser,
 } = require("../models/documentModel");
+const {
+  documentKey,
+  generatedKey,
+  putObject,
+  getObject,
+  removeObjects,
+  removePrefix,
+} = require("../services/storageService");
+const { canRead, sendBuffer } = require("../services/documentDownload");
 const {
   createConversation,
   findConversation,
@@ -326,10 +336,17 @@ router.post("/visualize", requireAuth, async (req, res, next) => {
     const { instruction, source } = req.body;
     if (!instruction) return res.status(400).json({ message: "instruction is required" });
 
+    // organization_id scopes the RAG service's filename -> storage_path lookup. `source`
+    // is only a file name, which is ambiguous system-wide; without the org it could
+    // resolve to a same-named document belonging to another tenant.
     const response = await fetch(`${RAG_URL}/visualize`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ instruction, source: source || null }),
+      body: JSON.stringify({
+        instruction,
+        source: source || null,
+        organization_id: req.user.organization_id,
+      }),
     });
 
     if (!response.ok) {
@@ -368,15 +385,14 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
       });
     }
 
-    // 1) Register the document (org + uploader). A same-named document may
-    //    already exist — the on-disk file, vectors, and dashboard metrics all
-    //    key on the filename, so uploading it again is an UPDATE of that
-    //    document, never a silent duplicate. Unless the client already
-    //    confirmed the update (overwrite=true), reply 409 so it can ask the
-    //    user to update the existing document or rename the new file.
-    //    Updating follows the delete rule: only the uploader or an org_admin.
+    // 1) Decide whether this is a new document or an UPDATE of an existing one.
+    //    A same-named document may already exist — vectors and dashboard metrics
+    //    key on the filename, so uploading it again is an UPDATE of that document,
+    //    never a silent duplicate. Unless the client already confirmed the update
+    //    (overwrite=true), reply 409 so it can ask the user to update the existing
+    //    document or rename the new file. Updating follows the delete rule: only
+    //    the uploader or an org_admin.
     const existing = await findByFileName(orgId, filename);
-    let doc = existing;
     if (existing) {
       const canOverwrite =
         existing.uploaded_by_user_id === req.user.id || req.user.role === "org_admin";
@@ -389,25 +405,43 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
             : `"${filename}" was already uploaded by someone else in your organization — rename your file to upload it.`,
         });
       }
-      // Reuse the row: the RAG service clears this document_id's old
-      // chunks/tables before re-indexing, so the content is replaced in place.
+    }
+
+    // 2) Persist the ORIGINAL bytes to Supabase Storage — the store of record.
+    //    The id is minted here rather than by Postgres because the key embeds it and
+    //    we want the bytes safely stored BEFORE the row exists: if this upload fails,
+    //    no row is created, so the user never sees a document that can't be opened.
+    //    A re-upload reuses the existing id, so it resolves to the same key and
+    //    overwrites in place instead of stacking a second copy.
+    const documentId = existing ? existing.id : crypto.randomUUID();
+    const storagePath = documentKey(orgId, documentId, filename);
+    await putObject(storagePath, req.file.buffer, req.file.mimetype);
+
+    // 3) Register (or reset) the document row.
+    let doc = existing;
+    if (existing) {
+      // Reuse the row: the RAG service clears this document_id's old chunks/tables
+      // before re-indexing, so the content is replaced in place.
       await resetDocumentForReupload(existing.id, {
         mimeType: req.file.mimetype,
         fileSize: req.file.size,
         contentHash,
+        storagePath,
       });
     } else {
       doc = await createDocument(orgId, req.user.id, {
+        id: documentId,
         fileName: filename,
-        storagePath: `uploads/${filename}`,
+        storagePath,
         mimeType: req.file.mimetype,
         fileSize: req.file.size,
         contentHash,
       });
     }
 
-    // 2) Send the file to the RAG service to embed into Supabase (document_chunks
-    //    + document_tables) under this document_id.
+    // 4) Send the file to the RAG service to embed into Supabase (document_chunks
+    //    + document_tables) under this document_id. It gets the bytes directly — it
+    //    has no reason to re-fetch what we already hold in memory.
     const form = new FormData();
     form.append("file", req.file.buffer, { filename, contentType: req.file.mimetype });
     form.append("document_id", doc.id);
@@ -429,12 +463,12 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
     // documents via uploaded_by_user_id, and a grant row would (wrongly) show
     // them in the document's "Shared with" list.
 
-    // 3) Record the document's dashboard status. Metric extraction is NOT run on
+    // 5) Record the document's dashboard status. Metric extraction is NOT run on
     //    upload — the dashboard shows only pinned AI charts, so there's no metrics
     //    view to feed and we don't want to spend an LLM call per upload. If a file
     //    of the same name was uploaded before, this is an UPDATE: flag any pinned
     //    charts built from it as stale so the user can refresh them (their Refresh
-    //    button reruns /visualize against the now-updated on-disk file).
+    //    button reruns /visualize against the now-updated file).
     const isReupload = !!(await getStatus(req.user.id, filename).catch(() => null));
     upsertStatus(req.user.id, filename, { status: "ready", included: true }).catch(() => {});
     if (isReupload) {
@@ -468,15 +502,21 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
 });
 
 // ── POST /api/rag/ingest ──────────────────────────────────────────────────────
-// Indexes a file already on disk (e.g. a generated report) so the AI can answer
-// questions about it — used by the "Add to AI" action on generated documents.
+// Indexes an AI-generated report so the AI can answer questions about it — the
+// "Add to AI" action. The PDF is already in Storage under the org's `generated/`
+// prefix (the RAG service put it there when it built it); this gives it a documents
+// row so it becomes a first-class, shareable, searchable document.
 router.post("/ingest", requireAuth, async (req, res, next) => {
   try {
     const { filename } = req.body;
     if (!filename) return res.status(400).json({ message: "filename is required" });
     const orgId = req.user.organization_id;
 
-    // Register the generated file as a document, then index it into Supabase.
+    // The generated PDF keeps its `generated/<org>/<name>` key rather than being copied
+    // to a `<org>/<doc>/<name>` one: storage_path is authoritative everywhere, so nothing
+    // downstream cares which prefix a document's bytes happen to live under.
+    const storagePath = generatedKey(orgId, filename);
+
     // "Add to AI" clicked twice for the same report reuses the existing row
     // (re-indexing replaces its chunks) instead of creating a duplicate.
     const existing = await findByFileName(orgId, filename);
@@ -487,11 +527,12 @@ router.post("/ingest", requireAuth, async (req, res, next) => {
           message: `"${filename}" already belongs to another user in your organization.`,
         });
       }
-      await resetDocumentForReupload(existing.id, { mimeType: "application/pdf" });
+      await resetDocumentForReupload(existing.id, { mimeType: "application/pdf", storagePath });
     } else {
       doc = await createDocument(orgId, req.user.id, {
+        id: crypto.randomUUID(),
         fileName: filename,
-        storagePath: `uploads/${filename}`,
+        storagePath,
         mimeType: "application/pdf",
       });
     }
@@ -515,15 +556,27 @@ router.post("/ingest", requireAuth, async (req, res, next) => {
 });
 
 // ── DELETE /api/rag/documents ─────────────────────────────────────────────────
-// Clears the RAG vector store + files on disk, AND wipes this user's stored
-// dashboard metrics so the dashboard resets to "no data yet".
+// Removes this user's documents everywhere: the stored originals, the documents rows
+// (which cascade to chunks/tables/access), their dashboard metrics, and the RAG
+// service's local cache. The dashboard resets to "no data yet".
 router.delete("/documents", requireAuth, async (req, res, next) => {
   try {
+    const orgId = req.user.organization_id;
+
+    // Collect the storage keys BEFORE deleting the rows — once they're gone there is no
+    // way left to find their objects, and the bucket would silently fill with orphans.
+    const keys = await listStoragePathsForUser(req.user.id, orgId).catch(() => []);
+
     const response = await fetch(`${RAG_URL}/documents`, { method: "DELETE" });
     const data = await response.json();
     await clearAllForUser(req.user.id);
-    // Also remove this user's Supabase documents (cascades chunks/tables/access).
-    await deleteAllForUser(req.user.id, req.user.organization_id).catch(() => {});
+    await deleteAllForUser(req.user.id, orgId).catch(() => {});
+
+    // Objects last, best-effort: an orphaned object is invisible garbage, whereas a row
+    // whose bytes we already deleted would be a document the user can't open.
+    await removeObjects(keys).catch(() => {});
+    await removePrefix(`generated/${orgId}`).catch(() => {});
+
     return res.json(data);
   } catch (err) {
     return next(err);
@@ -531,34 +584,45 @@ router.delete("/documents", requireAuth, async (req, res, next) => {
 });
 
 // ── GET /api/rag/download/:filename ───────────────────────────────────────────
-// Streams the original uploaded source document back to the client.
+// Streams a document's ORIGINAL bytes back to the client, from Supabase Storage.
+//
+// This route used to proxy to the RAG service, which handed back any file sitting in
+// its uploads/ directory — it verified you were logged in, but never that you could see
+// *that* document, so any user could pull any other org's file by name. It now resolves
+// the name to a real document in the caller's own org and checks access.
+//
+// Kept keyed by filename because that's all the client has for a cited source or a
+// freshly generated report; GET /api/documents/:id/download is the canonical form.
 router.get("/download/:filename", requireAuth, async (req, res, next) => {
   try {
     const filename = req.params.filename;
-    const response = await fetch(
-      `${RAG_URL}/download/${encodeURIComponent(filename)}`
-    );
+    const orgId = req.user.organization_id;
 
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({}));
-      return res
-        .status(response.status)
-        .json({ message: err.detail || "Download failed" });
+    // 1) An uploaded document — must exist in the caller's org AND be one they can read.
+    //    A document they can't read is reported as missing, not forbidden: whether a file
+    //    of a given name exists in another org isn't theirs to learn.
+    const doc = await findByFileName(orgId, filename);
+    if (doc) {
+      if (!(await canRead(req, doc.id))) {
+        return res.status(404).json({ message: "Document not found." });
+      }
+      const buf = await getObject(doc.storage_path);
+      return sendBuffer(res, buf, doc.file_name, doc.mime_type);
     }
 
-    // Forward the download headers so the browser saves it with the right name.
-    res.setHeader(
-      "Content-Type",
-      response.headers.get("content-type") || "application/octet-stream"
-    );
-    res.setHeader(
-      "Content-Disposition",
-      response.headers.get("content-disposition") ||
-        `attachment; filename="${filename}"`
-    );
+    // 2) An AI-generated report that hasn't been "Add to AI"-ed yet, so it has no
+    //    documents row and can only be found by name. Safe to serve on name alone: the
+    //    key is built from the caller's own organization_id, so it cannot reach another
+    //    org's file, and a generated report only ever contains content from documents
+    //    this user could already read.
+    try {
+      const buf = await getObject(generatedKey(orgId, filename));
+      return sendBuffer(res, buf, filename, "application/pdf");
+    } catch {
+      /* not a generated report either — fall through to 404 */
+    }
 
-    // node-fetch v2 returns a Node stream; pipe it straight to the response.
-    return response.body.pipe(res);
+    return res.status(404).json({ message: "Document not found." });
   } catch (err) {
     return next(err);
   }
