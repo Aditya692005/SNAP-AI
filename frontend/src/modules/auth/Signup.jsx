@@ -156,7 +156,6 @@ function Signup() {
       <div className="signup-card">
         {success ? (
           <>
-            <div className="success-icon">✅</div>
             <h1>Check Your Email</h1>
             <p className="subtitle">We've sent a verification link to</p>
             <p className="email-highlight">{successEmail}</p>
@@ -240,7 +239,7 @@ function Signup() {
               )}
               {step === 2 && (
                 <>
-                  {isNewOrg && (
+                  {/* {isNewOrg && ( */}
                     <div className="org-setup">
                       {/* <p className="org-setup-title">
                         Set up your organization
@@ -311,7 +310,7 @@ function Signup() {
                         <option value="ENTERPRISE">Enterprise</option>
                       </select>
                     </div>
-                  )}
+                  {/* )} */}
                 </>
               )}
               {/* <input
