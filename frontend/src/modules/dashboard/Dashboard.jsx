@@ -182,6 +182,7 @@ function Dashboard() {
   const [deptMetricError, setDeptMetricError] = useState(null);
   const [trashOpen, setTrashOpen] = useState(false);
   const [trash, setTrash] = useState([]); // archived widgets
+  const [updatesOpen, setUpdatesOpen] = useState(true); // Updates side column
   const [toast, setToast] = useState(null); // { widgets:[...], } auto-added notice
 
   // Department dashboards: shared boards scoped to a department. The server
@@ -886,7 +887,7 @@ function Dashboard() {
           </div>
         </div>
 
-        <div className="dashboard-body">
+        <div className={`dashboard-body ${updatesOpen ? "" : "updates-collapsed"}`}>
           <div className="dashboard-main-col">
 
         {scope === "personal" && (
@@ -1422,8 +1423,18 @@ function Dashboard() {
           </div>
 
           {/* Updates: notifications about shared files and new dashboard
-              widgets/metrics/charts. Wired up in a later pass. */}
-          <aside className="updates-col">
+              widgets/metrics/charts. Wired up in a later pass. Collapsible —
+              the edge arrow points out (‹) to expand and in (›) to collapse. */}
+          <aside className={`updates-col ${updatesOpen ? "" : "collapsed"}`}>
+            <button
+              type="button"
+              className="updates-toggle"
+              onClick={() => setUpdatesOpen((v) => !v)}
+              aria-label={updatesOpen ? "Collapse updates" : "Expand updates"}
+              title={updatesOpen ? "Collapse updates" : "Expand updates"}
+            >
+              {updatesOpen ? "›" : "‹"}
+            </button>
             <p className="updates-title">Updates</p>
             <div className="updates-panel">
               <p className="updates-empty">
