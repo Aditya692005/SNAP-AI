@@ -244,6 +244,13 @@ export const authService = {
     if (this.isAdmin()) return true;
     return this.getPermissions().includes("MANAGE_ORGANIZATION_DASHBOARD");
   },
+
+  // AI assistant (chat + history). UI gating only — /api/rag/chat and
+  // /api/conversations enforce the same permission server-side.
+  canUseAIAssistant() {
+    if (this.isAdmin()) return true;
+    return this.getPermissions().includes("USE_AI_ASSISTANT");
+  },
 };
 
 async function handle(res) {

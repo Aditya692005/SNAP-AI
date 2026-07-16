@@ -12,6 +12,7 @@
 const express = require("express");
 
 const requireAuth = require("../middleware/requireAuth");
+const requirePermission = require("../middleware/requirePermission");
 const AppError = require("../utils/AppError");
 const {
   listConversations,
@@ -22,6 +23,8 @@ const {
 
 const router = express.Router();
 router.use(requireAuth);
+// Chat threads are part of the AI-assistant surface — same gate as /api/rag/chat.
+router.use(requirePermission("USE_AI_ASSISTANT"));
 
 router.get("/", async (req, res, next) => {
   try {

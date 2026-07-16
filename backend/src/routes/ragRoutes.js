@@ -10,6 +10,7 @@ const FormData = require("form-data");
 const fetch = require("node-fetch");
 
 const requireAuth = require("../middleware/requireAuth");
+const requirePermission = require("../middleware/requirePermission");
 const {
   markWidgetsStaleForSource,
   markDepartmentWidgetsStaleForSource,
@@ -129,7 +130,11 @@ function parseMetricRequest(message) {
   return { metric_key: metricKey, label, kind };
 }
 
-router.post("/chat", requireAuth, async (req, res, next) => {
+// The AI-assistant surface (chat + its preview + re-indexing a generated
+// report) is gated by USE_AI_ASSISTANT. Deliberately NOT gated: /upload and
+// /download (the Documents page uses them) and /visualize (dashboard chart
+// refresh uses it).
+router.post("/chat", requireAuth, requirePermission("USE_AI_ASSISTANT"), async (req, res, next) => {
   try {
     const { message, source, conversation_id, document_ids: selectedIds } = req.body;
     if (!message) return res.status(400).json({ message: "message is required" });
@@ -296,7 +301,7 @@ router.post("/chat", requireAuth, async (req, res, next) => {
 // vector search as /chat but stops before the LLM, so the client can show the
 // matched documents and let the user trim the set before asking for the answer.
 // Body: { message, document_ids? } → { documents: [{ id, file_name, similarity }] }
-router.post("/chat/preview", requireAuth, async (req, res, next) => {
+router.post("/chat/preview", requireAuth, requirePermission("USE_AI_ASSISTANT"), async (req, res, next) => {
   try {
     const { message, document_ids: selectedIds } = req.body;
     if (!message) return res.status(400).json({ message: "message is required" });
@@ -506,7 +511,7 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
 // "Add to AI" action. The PDF is already in Storage under the org's `generated/`
 // prefix (the RAG service put it there when it built it); this gives it a documents
 // row so it becomes a first-class, shareable, searchable document.
-router.post("/ingest", requireAuth, async (req, res, next) => {
+router.post("/ingest", requireAuth, requirePermission("USE_AI_ASSISTANT"), async (req, res, next) => {
   try {
     const { filename } = req.body;
     if (!filename) return res.status(400).json({ message: "filename is required" });

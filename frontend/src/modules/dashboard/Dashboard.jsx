@@ -199,8 +199,15 @@ function Dashboard() {
   const deptActive = deptBoards.find((b) => b.id === activeDeptId) || null;
 
   // Organization dashboard: a single org-wide shared board (view-gated; editable
-  // by org admins / MANAGE_ORGANIZATION_DASHBOARD holders).
-  const canViewOrg = authService.canViewOrganizationDashboard();
+  // by org admins / MANAGE_ORGANIZATION_DASHBOARD holders). State (not a plain
+  // read of the cached user) so a permission granted mid-session — surfaced by
+  // SessionWatcher's "snap:user-updated" — reveals the tab without a re-login.
+  const [canViewOrg, setCanViewOrg] = useState(authService.canViewOrganizationDashboard());
+  useEffect(() => {
+    const sync = () => setCanViewOrg(authService.canViewOrganizationDashboard());
+    window.addEventListener("snap:user-updated", sync);
+    return () => window.removeEventListener("snap:user-updated", sync);
+  }, []);
   const [orgBoard, setOrgBoard] = useState(null); // { id, name, version, can_edit, updated_at }
   const [orgWidgets, setOrgWidgets] = useState([]);
   const [orgMetrics, setOrgMetrics] = useState(null);
@@ -216,9 +223,14 @@ function Dashboard() {
   useEffect(() => {
     loadDashboards();
     loadDepartmentBoards();
-    if (canViewOrg) loadOrgBoard();
     refreshDocuments();
   }, []);
+
+  // Load (or reload) the org board whenever view access appears — at mount for
+  // admins/managers, or mid-session when the permission is granted.
+  useEffect(() => {
+    if (canViewOrg) loadOrgBoard();
+  }, [canViewOrg]);
 
   // Fetch this dashboard's widgets whenever the active board changes, and
   // remember the choice so the AI Assistant pins to the same board.
