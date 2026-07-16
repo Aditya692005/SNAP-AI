@@ -14,6 +14,58 @@ function statusLabel(status) {
   return { text: status || "Unknown", className: "pending" };
 }
 
+// How the preview modal renders a file, by extension. PDFs use the browser's
+// built-in viewer; txt/csv render as text/table; office formats have no native
+// in-browser renderer, so they get a download-only fallback.
+function previewKind(fileName) {
+  const ext = String(fileName).slice(fileName.lastIndexOf(".") + 1).toLowerCase();
+  if (ext === "pdf") return "pdf";
+  if (ext === "txt") return "text";
+  if (ext === "csv") return "csv";
+  return "none";
+}
+
+// Minimal RFC-4180-ish CSV parser (quoted fields, embedded commas/newlines).
+// Enough for previewing; the authoritative parsing happens server-side.
+function parseCsv(text, maxRows = 500) {
+  const rows = [];
+  let row = [];
+  let field = "";
+  let inQuotes = false;
+  for (let i = 0; i < text.length && rows.length < maxRows; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') {
+          field += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        field += c;
+      }
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === ",") {
+      row.push(field);
+      field = "";
+    } else if (c === "\n") {
+      row.push(field);
+      field = "";
+      if (row.some((v) => v !== "")) rows.push(row);
+      row = [];
+    } else if (c !== "\r") {
+      field += c;
+    }
+  }
+  if ((field !== "" || row.length > 0) && rows.length < maxRows) {
+    row.push(field);
+    if (row.some((v) => v !== "")) rows.push(row);
+  }
+  return rows;
+}
+
 function Documents() {
   const [docs, setDocs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -24,6 +76,8 @@ function Documents() {
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(null); // { done, total }
   const [deletingId, setDeletingId] = useState(null);
+  // Preview modal: { doc, loading, url?, kind?, text?, rows?, error? }
+  const [viewer, setViewer] = useState(null);
   // Transient popup notifications (auto-dismiss after a few seconds).
   const [toasts, setToasts] = useState([]);
 
@@ -169,6 +223,52 @@ function Documents() {
     e.target.value = "";
   }
 
+  // ── In-app preview ─────────────────────────────────────────────────────────
+  // Fetch the original bytes and open the viewer. Works for any document the
+  // list shows (own uploads AND shared) — the backend enforces access.
+  async function openViewer(d) {
+    setViewer({ doc: d, loading: true });
+    try {
+      const blob = await documentService.downloadBlob(d.id);
+      const kind = previewKind(d.file_name);
+      // Re-type the blob for the PDF case so the iframe always gets
+      // application/pdf even if the stored mime type is generic.
+      const typed = kind === "pdf" ? new Blob([blob], { type: "application/pdf" }) : blob;
+      const url = URL.createObjectURL(typed);
+      const next = { doc: d, loading: false, url, kind };
+      if (kind === "text") next.text = await blob.text();
+      if (kind === "csv") next.rows = parseCsv(await blob.text());
+      setViewer((v) => {
+        if (!v || v.doc.id !== d.id) {
+          URL.revokeObjectURL(url); // closed (or switched) while loading
+          return v;
+        }
+        return next;
+      });
+    } catch (err) {
+      setViewer((v) =>
+        v && v.doc.id === d.id ? { doc: d, loading: false, error: err.message } : v
+      );
+    }
+  }
+
+  function closeViewer() {
+    setViewer((v) => {
+      if (v?.url) URL.revokeObjectURL(v.url);
+      return null;
+    });
+  }
+
+  function downloadViewer() {
+    if (!viewer?.url) return;
+    const a = document.createElement("a");
+    a.href = viewer.url;
+    a.download = viewer.doc.file_name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
   // Remove a document everywhere (DB, AI vectors, dashboard metrics).
   async function handleDelete(d) {
     if (
@@ -259,7 +359,12 @@ function Documents() {
               const badge = statusLabel(d.status);
               return (
                 <div key={d.id} className="document-row">
-                  <div className="document-info">
+                  <button
+                    type="button"
+                    className="document-info document-open"
+                    onClick={() => openViewer(d)}
+                    title={`Preview "${d.file_name}"`}
+                  >
                     <h3>{d.title || d.file_name}</h3>
                     <p>
                       {d.file_name}
@@ -267,7 +372,7 @@ function Documents() {
                         ? ` · Added ${new Date(d.created_at).toLocaleDateString()}`
                         : ""}
                     </p>
-                  </div>
+                  </button>
 
                   <div className="document-actions">
                     <span className={`status ${badge.className}`}>
@@ -308,6 +413,91 @@ function Documents() {
           targets={targets}
           onClose={() => setShareDoc(null)}
         />
+      )}
+
+      {/* Document preview — PDF via the browser viewer, txt/csv inline, other
+          formats download-only. The ⬇ in the header always downloads. */}
+      {viewer && (
+        <>
+          <div className="viewer-overlay" onClick={closeViewer} />
+          <div
+            className="viewer-modal"
+            role="dialog"
+            aria-label={`Preview of ${viewer.doc.file_name}`}
+          >
+            <div className="viewer-header">
+              <span className="viewer-title" title={viewer.doc.file_name}>
+                {viewer.doc.file_name}
+              </span>
+              <div className="viewer-actions">
+                <button
+                  type="button"
+                  className="viewer-btn"
+                  onClick={downloadViewer}
+                  disabled={!viewer.url}
+                  title="Download"
+                  aria-label="Download"
+                >
+                  ⬇
+                </button>
+                <button
+                  type="button"
+                  className="viewer-btn"
+                  onClick={closeViewer}
+                  title="Close"
+                  aria-label="Close preview"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            <div className="viewer-body">
+              {viewer.loading ? (
+                <p className="viewer-msg">Loading…</p>
+              ) : viewer.error ? (
+                <p className="viewer-msg viewer-error">❌ {viewer.error}</p>
+              ) : viewer.kind === "pdf" ? (
+                <iframe
+                  className="viewer-frame"
+                  src={viewer.url}
+                  title={viewer.doc.file_name}
+                />
+              ) : viewer.kind === "text" ? (
+                <pre className="viewer-pre">{viewer.text}</pre>
+              ) : viewer.kind === "csv" && viewer.rows?.length > 0 ? (
+                <div className="viewer-table-wrap">
+                  <table className="viewer-table">
+                    <thead>
+                      <tr>
+                        {viewer.rows[0].map((h, i) => (
+                          <th key={i}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {viewer.rows.slice(1).map((r, i) => (
+                        <tr key={i}>
+                          {r.map((c, j) => (
+                            <td key={j}>{c}</td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="viewer-fallback">
+                  <span className="viewer-fallback-icon">📄</span>
+                  <p>No in-browser preview for this file type.</p>
+                  <button type="button" className="viewer-download-btn" onClick={downloadViewer}>
+                    ⬇ Download {viewer.doc.file_name}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </>
       )}
     </AppShell>
   );

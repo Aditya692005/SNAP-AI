@@ -485,6 +485,19 @@ export const documentService = {
       }),
     );
   },
+  // The document's original bytes as a Blob — powers the in-app preview and its
+  // download button. The backend enforces access (own uploads + shared docs).
+  async downloadBlob(documentId) {
+    const res = await fetch(
+      `${API_BASE_URL}/api/documents/${documentId}/download`,
+      { headers: authHeaders() },
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || "Could not load the document");
+    }
+    return res.blob();
+  },
 };
 
 // Organization details (read for everyone; edit requires MANAGE_ORGANIZATION).

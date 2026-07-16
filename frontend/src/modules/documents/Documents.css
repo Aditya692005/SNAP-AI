@@ -85,6 +85,22 @@
   min-width: 0;
 }
 
+/* The info block is a button now — click to preview. Reset button chrome so it
+   still reads as plain text, with a hover cue on the title. */
+.document-open {
+  background: none;
+  border: none;
+  padding: 0;
+  text-align: left;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.document-open:hover h3 {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
 .document-info h3 {
   margin-bottom: 0.35rem;
   font-size: 1rem;
@@ -430,6 +446,188 @@
 
 .share-revoke:hover {
   background: rgba(239, 68, 68, 0.18);
+}
+
+/* ── Document preview modal ───────────────────────────────────────────────── */
+.viewer-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 9, 12, 0.72);
+  backdrop-filter: blur(2px);
+  z-index: 50;
+}
+
+.viewer-modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(960px, calc(100vw - 2rem));
+  height: min(85vh, 900px);
+  display: flex;
+  flex-direction: column;
+  background: #17181d;
+  border: 1px solid #33343b;
+  box-shadow: 0 24px 60px -20px rgba(0, 0, 0, 0.8);
+  z-index: 51;
+  color: #f5f5f5;
+  font-family: "Manrope", -apple-system, "Segoe UI", sans-serif;
+}
+
+.viewer-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.8rem 1.1rem;
+  border-bottom: 1px solid #2a2b31;
+}
+
+.viewer-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: #f0f0f0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewer-actions {
+  display: flex;
+  gap: 0.45rem;
+  flex-shrink: 0;
+}
+
+.viewer-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid #3a3b42;
+  color: #cfd2da;
+  font-size: 0.95rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.viewer-btn:hover:not(:disabled) {
+  border-color: #ffffff;
+  color: #ffffff;
+}
+
+.viewer-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.viewer-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.viewer-frame {
+  flex: 1;
+  width: 100%;
+  border: none;
+  background: #2a2b31; /* pdf viewer chrome edge while it loads */
+}
+
+.viewer-pre {
+  flex: 1;
+  margin: 0;
+  padding: 1.1rem 1.3rem;
+  overflow: auto;
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  color: #e4e4e7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.viewer-table-wrap {
+  flex: 1;
+  overflow: auto;
+  padding: 1rem;
+}
+
+.viewer-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.85rem;
+}
+
+.viewer-table th,
+.viewer-table td {
+  border: 1px solid #2f3037;
+  padding: 6px 10px;
+  text-align: left;
+  color: #cfd2da;
+  white-space: nowrap;
+}
+
+.viewer-table th {
+  background: rgba(255, 255, 255, 0.07);
+  color: #e8e8e8;
+  position: sticky;
+  top: -1rem; /* offsets the wrap padding so headers pin to the top edge */
+}
+
+.viewer-table tbody tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.viewer-msg {
+  margin: auto;
+  color: #9a9da8;
+  font-size: 0.95rem;
+}
+
+.viewer-msg.viewer-error {
+  color: #fca5a5;
+}
+
+.viewer-fallback {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.9rem;
+  color: #9a9da8;
+  text-align: center;
+  padding: 2rem;
+}
+
+.viewer-fallback-icon {
+  font-size: 2.4rem;
+}
+
+.viewer-download-btn {
+  border: none;
+  padding: 10px 20px;
+  background: linear-gradient(135deg, #ffffff, #d6d6d6);
+  color: #0b0b0d;
+  font-family: inherit;
+  font-weight: 600;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: opacity 0.18s ease;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewer-download-btn:hover {
+  opacity: 0.9;
 }
 
 @media (max-width: 900px) {
