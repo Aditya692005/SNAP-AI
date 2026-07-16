@@ -24,14 +24,12 @@
   white-space: nowrap;
   z-index: 30;
 
-  transition:
-    width 0.2s ease,
-    padding 0.2s ease;
+  transition: width 0.2s ease;
 }
 
+/* Only the width changes on hover — padding stays fixed so the icons never move. */
 .sidebar:hover {
   width: 220px;
-  padding: 1.4rem 1rem;
 }
 
 .sidebar nav {
@@ -40,26 +38,22 @@
   gap: 0.5rem;
 }
 
+/* Constant layout collapsed and expanded: the icon sits at a fixed left offset
+   (which centres it within the 64px rail) and the label simply fades in beside it. */
 .sidebar a {
   text-decoration: none;
   color: #a9adb8;
-  padding: 11px 0;
+  padding: 11px 10px;
+  border: 1px solid transparent; /* reserve space so the active border doesn't nudge the icon */
   border-radius: 8px;
   font-weight: 500;
   display: flex;
   align-items: center;
-  justify-content: center; /* centred icon while collapsed */
-  gap: 0;
+  justify-content: flex-start;
+  gap: 0.85rem;
   transition:
     background 0.2s ease,
-    color 0.2s ease,
-    padding 0.2s ease;
-}
-
-.sidebar:hover a {
-  justify-content: flex-start;
-  padding: 11px 14px;
-  gap: 0.85rem;
+    color 0.2s ease;
 }
 
 .nav-icon {
@@ -91,7 +85,7 @@
 
 .sidebar a.active {
   background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.2);
   color: #ffffff;
 }
 
