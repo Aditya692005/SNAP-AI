@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import Sidebar from "../../components/Sidebar";
+import AppShell from "../../components/AppShell";
 import ToastStack from "../../components/Toast";
 import ShareDialog from "./ShareDialog";
 import { documentService } from "../../services/authService";
@@ -191,11 +191,10 @@ function Documents() {
   }
 
   return (
-    <div className="documents-layout">
-      <Sidebar />
+    <AppShell>
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
 
-      <main className="documents-content">
+      <div className="documents-content">
         <div className="documents-header">
           <h1>Documents</h1>
 
@@ -301,7 +300,7 @@ function Documents() {
             })}
           </div>
         </div>
-      </main>
+      </div>
 
       {shareDoc && (
         <ShareDialog
@@ -310,7 +309,7 @@ function Documents() {
           onClose={() => setShareDoc(null)}
         />
       )}
-    </div>
+    </AppShell>
   );
 }
 

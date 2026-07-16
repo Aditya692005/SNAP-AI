@@ -19,15 +19,17 @@ html[data-theme="light"] select optgroup {
   color: #0f172a;
 }
 
-/* Page shells */
-html[data-theme="light"] .dashboard,
-html[data-theme="light"] .ai-layout,
-html[data-theme="light"] .admin,
-html[data-theme="light"] .settings,
-html[data-theme="light"] .documents-layout {
+/* Page shell (every signed-in page now shares AppShell's .app-page) */
+html[data-theme="light"] .app-page {
   background: #eef1f7;
   color: #0f172a;
 }
+html[data-theme="light"] .app-topbar {
+  background: #ffffff;
+  border-bottom-color: #e2e8f0;
+}
+html[data-theme="light"] .topbar-company { color: #334155; }
+html[data-theme="light"] .topbar-brand { color: #0f172a; }
 
 /* Sidebar */
 html[data-theme="light"] .sidebar {

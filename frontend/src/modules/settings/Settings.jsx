@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import Sidebar from "../../components/Sidebar";
+import AppShell from "../../components/AppShell";
 import { authService, organizationService } from "../../services/authService";
 import { getThemePreference, setThemePreference } from "../../services/theme";
 import { passwordProblems } from "../../utils/password";
@@ -124,9 +124,8 @@ function Settings() {
   const deptName = user.department_name || (user.department_id ? "…" : "Unassigned");
 
   return (
-    <div className="settings">
-      <Sidebar />
-      <main className="settings-content">
+    <AppShell>
+      <div className="settings-content">
         <div className="settings-header">
           <div>
             <span className="settings-eyebrow">SNAP AI · Account</span>
@@ -320,8 +319,8 @@ function Settings() {
             </div>
           </div>
         )}
-      </main>
-    </div>
+      </div>
+    </AppShell>
   );
 }
 

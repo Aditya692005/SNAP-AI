@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import Sidebar from "../../components/Sidebar";
+import AppShell from "../../components/AppShell";
 import ToastStack from "../../components/Toast";
 import ChartBlock from "./ChartBlock";
 import { authService } from "../../services/authService";
@@ -747,16 +747,15 @@ function AIAssistant() {
 
   // ── render ─────────────────────────────────────────────────────────────────
   return (
-    <div className="ai-layout">
-      <Sidebar />
+    <AppShell className="ai-page">
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
 
-      <main className="ai-content">
+      <div className="ai-content">
         {/* Header */}
         <div className="ai-header">
           <div className="ai-header-title">
             <div>
-              <h1>SNAP AI Assistant</h1>
+              <h1>AI Assistant</h1>
               <p>
                 {docList.length > 0
                   ? `${docList.length} document${docList.length > 1 ? "s" : ""} uploaded`
@@ -1041,7 +1040,7 @@ function AIAssistant() {
             </button>
           </div>
         </div>
-      </main>
+      </div>
 
       {/* Documents drawer — newest uploaded first; click a doc to select it */}
       <div
@@ -1206,7 +1205,7 @@ function AIAssistant() {
           </div>
         </>
       )}
-    </div>
+    </AppShell>
   );
 }
 

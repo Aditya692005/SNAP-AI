@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import Sidebar from "../../components/Sidebar";
+import AppShell from "../../components/AppShell";
 import ChartBlock from "../ai/ChartBlock";
-import { organizationService, authService } from "../../services/authService";
+import { authService } from "../../services/authService";
 import "./Dashboard.css";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
@@ -165,7 +165,6 @@ function Dashboard() {
   const [activeId, setActiveId] = useState(null);
   const [widgets, setWidgets] = useState([]);
   const [documents, setDocuments] = useState([]);
-  const [org, setOrg] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshingId, setRefreshingId] = useState(null);
   const [sourcesOpen, setSourcesOpen] = useState(false);
@@ -218,7 +217,6 @@ function Dashboard() {
     loadDepartmentBoards();
     if (canViewOrg) loadOrgBoard();
     refreshDocuments();
-    organizationService.get().then(setOrg).catch(() => {});
   }, []);
 
   // Fetch this dashboard's widgets whenever the active board changes, and
@@ -833,13 +831,9 @@ function Dashboard() {
   const showOrgScope = canViewOrg && !!orgBoard;
 
   return (
-    <div className="dashboard">
-      {/* Full-width top bar. It sits ABOVE the sidebar so it spans the whole
-          window and never shrinks when the sidebar expands. */}
-      <div className="dashboard-topbar">
-        <span className="topbar-company">{org?.name || "Company"}</span>
-        <span className="topbar-brand">SNAP AI</span>
-        <div className="topbar-actions">
+    <AppShell
+      actions={
+        <>
           <button className="ghost-btn" onClick={refresh} disabled={loading}>
             ⟳ Refresh
           </button>
@@ -849,13 +843,9 @@ function Dashboard() {
               {includedCount}/{documents.length}
             </span>
           </button>
-        </div>
-      </div>
-
-      <div className="dashboard-shell">
-        <Sidebar />
-
-        <main className="dashboard-content">
+        </>
+      }
+    >
 
         {/* Create + scope switch. Clicking a scope reveals that scope's list of
             dashboard names in the row below. */}
@@ -1444,8 +1434,6 @@ function Dashboard() {
             </div>
           </aside>
         </div>
-      </main>
-      </div>
 
       {/* Data sources drawer */}
       <div
@@ -1565,7 +1553,7 @@ function Dashboard() {
           </button>
         </div>
       )}
-    </div>
+    </AppShell>
   );
 }
 

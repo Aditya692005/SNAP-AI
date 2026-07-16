@@ -1,20 +1,8 @@
-/* Mirrors the Admin console shell (page bg + sidebar + header/tabs + panel cards)
-   so Settings and Admin read as the same surface. Light-mode overrides for every
-   class below live in src/theme.css — add them there or the page stays dark. */
-
-.settings {
-  min-height: 100vh;
-  display: flex;
-  background:
-    radial-gradient(1100px 600px at 80% -10%, rgba(139, 92, 246, 0.12), transparent 60%),
-    #04070f;
-  color: white;
-  font-family: "IBM Plex Sans", sans-serif;
-}
+/* Settings — matches the Login / Signup design language: charcoal background
+   (from AppShell), Playfair Display page heading, Manrope body, flat
+   sharp-cornered monochrome panels. Light-mode overrides live in src/theme.css. */
 
 .settings-content {
-  flex: 1;
-  padding: 2.25rem 3rem 4rem;
   min-width: 0;
   max-width: 900px;
 }
@@ -26,8 +14,6 @@
   gap: 1.5rem;
   flex-wrap: wrap;
   margin-bottom: 1.75rem;
-  /* Leave room for the fixed profile avatar in the top-right corner. */
-  padding-right: 3.25rem;
 }
 
 .settings-eyebrow {
@@ -36,22 +22,20 @@
   font-weight: 600;
   letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: #a78bfa;
+  color: #9a9da8;
   margin-bottom: 0.5rem;
 }
 
 .settings-header h1 {
-  font-size: 2.2rem;
+  font-family: "Playfair Display", Georgia, serif;
+  font-size: 2.1rem;
+  font-weight: 500;
   margin: 0 0 0.5rem;
-  background: linear-gradient(120deg, #f8fafc, #c4b5fd 60%, #67e8f9);
-  background-clip: text;
-  -webkit-background-clip: text;
-  color: transparent;
-  -webkit-text-fill-color: transparent;
+  color: #ffffff;
 }
 
 .settings-header p {
-  color: #94a3b8;
+  color: #9a9da8;
   margin: 0;
   font-size: 0.95rem;
 }
@@ -59,9 +43,8 @@
 /* ── Tabs ── */
 .settings-tabs {
   display: inline-flex;
-  background: rgba(0, 0, 0, 0.35);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid #2f2f2f;
   padding: 4px;
   gap: 3px;
   height: fit-content;
@@ -70,19 +53,18 @@
 .settings-tabs button {
   border: none;
   background: transparent;
-  color: #94a3b8;
+  color: #9a9da8;
   font-family: inherit;
   font-size: 0.85rem;
   font-weight: 600;
   padding: 8px 18px;
-  border-radius: 8px;
   cursor: pointer;
   transition: all 0.15s ease;
 }
 
 .settings-tabs button.active {
-  background: linear-gradient(135deg, #8b5cf6, #6366f1);
-  color: white;
+  background: linear-gradient(135deg, #ffffff, #d6d6d6);
+  color: #0b0b0d;
 }
 
 /* ── Toasts (error stays until dismissed; notice auto-fades) ── */
@@ -91,7 +73,6 @@
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  border-radius: 12px;
   padding: 0.8rem 1rem;
   margin-bottom: 1rem;
   font-size: 0.9rem;
@@ -99,13 +80,13 @@
 }
 
 .settings-error {
-  background: rgba(248, 113, 113, 0.12);
+  background: rgba(248, 113, 113, 0.1);
   border: 1px solid rgba(248, 113, 113, 0.4);
   color: #fca5a5;
 }
 
 .settings-notice {
-  background: rgba(34, 197, 94, 0.12);
+  background: rgba(34, 197, 94, 0.1);
   border: 1px solid rgba(34, 197, 94, 0.4);
   color: #86efac;
   animation: settingsToastIn 0.2s ease, settingsToastFade 4s ease forwards;
@@ -135,26 +116,26 @@
 
 /* ── Panel ── */
 .settings-panel {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.01));
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid #2f2f2f;
   padding: 1.6rem 1.75rem;
 }
 
 .settings-panel-title {
   font-size: 1.05rem;
+  font-weight: 600;
   margin: 0 0 0.35rem;
-  color: #e2e8f0;
+  color: #e8e8e8;
 }
 
 .settings-sep {
   height: 1px;
-  background: rgba(255, 255, 255, 0.08);
+  background: #2a2b31;
   margin: 1.6rem 0;
 }
 
 .settings-hint {
-  color: #64748b;
+  color: #8a8d98;
   font-size: 0.83rem;
   margin: 0.6rem 0 0;
 }
@@ -177,18 +158,18 @@
   font-weight: 700;
   font-size: 1.5rem;
   letter-spacing: 0.02em;
-  color: #fff;
-  background: linear-gradient(135deg, #8b5cf6, #6366f1);
+  color: #0b0b0d;
+  background: linear-gradient(135deg, #ffffff, #d6d6d6);
 }
 
 .settings-identity-text h2 {
   margin: 0 0 0.2rem;
   font-size: 1.35rem;
-  color: #f1f5f9;
+  color: #f0f0f0;
 }
 
 .settings-identity-text span {
-  color: #94a3b8;
+  color: #9a9da8;
   font-size: 0.9rem;
 }
 
@@ -198,7 +179,7 @@
   display: block;
   font-size: 0.8rem;
   font-weight: 600;
-  color: #cbd5e1;
+  color: #cfd2da;
   margin-bottom: 0.4rem;
 }
 
@@ -212,9 +193,8 @@
 .settings-form input {
   padding: 0.65rem 0.85rem;
   background: rgba(255, 255, 255, 0.03);
-  border: 1px solid #334155;
-  border-radius: 10px;
-  color: #fff;
+  border: 1px solid #3a3b42;
+  color: #f5f5f5;
   font-family: inherit;
   font-size: 0.92rem;
   outline: none;
@@ -231,7 +211,7 @@
 
 .settings-field input:focus,
 .settings-form input:focus {
-  border-color: #8b5cf6;
+  border-color: #ffffff;
 }
 
 .settings-form {
@@ -249,10 +229,9 @@
   align-self: flex-start;
   margin-top: 1rem;
   padding: 0.65rem 1.2rem;
-  background: #ec4899;
-  color: #fff;
+  background: linear-gradient(135deg, #ffffff, #d6d6d6);
+  color: #0b0b0d;
   border: none;
-  border-radius: 10px;
   font-family: inherit;
   font-weight: 600;
   font-size: 0.9rem;
@@ -289,13 +268,13 @@
   justify-content: space-between;
   gap: 1rem;
   padding: 0.7rem 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid #24252b;
 }
 
 .settings-row:last-child { border-bottom: none; }
 
 .settings-key {
-  color: #94a3b8;
+  color: #9a9da8;
   font-size: 0.85rem;
 }
 
@@ -303,22 +282,22 @@
   display: inline-flex;
   align-items: center;
   gap: 0.5rem;
-  color: #e2e8f0;
+  color: #e4e4e7;
   font-size: 0.9rem;
   text-align: right;
 }
 
+/* Status badges — semantic colours kept */
 .settings-badge {
   font-size: 0.68rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   padding: 2px 9px;
-  border-radius: 999px;
 }
 
-.settings-badge.on { background: rgba(52, 211, 153, 0.15); color: #34d399; }
-.settings-badge.pending { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
+.settings-badge.on { background: rgba(52, 211, 153, 0.12); color: #34d399; }
+.settings-badge.pending { background: rgba(245, 158, 11, 0.12); color: #f59e0b; }
 
 /* ── Theme picker ── */
 .settings-themes {
@@ -335,19 +314,18 @@
   gap: 0.3rem;
   padding: 1rem 1.1rem;
   background: rgba(255, 255, 255, 0.03);
-  border: 1px solid #334155;
-  border-radius: 14px;
+  border: 1px solid #3a3b42;
   cursor: pointer;
   font-family: inherit;
   text-align: left;
   transition: border-color 0.15s ease, background 0.15s ease;
 }
 
-.settings-theme-card:hover { border-color: #64748b; }
+.settings-theme-card:hover { border-color: #6b6d78; }
 
 .settings-theme-card.active {
-  border-color: #8b5cf6;
-  background: rgba(139, 92, 246, 0.12);
+  border-color: #ffffff;
+  background: rgba(255, 255, 255, 0.07);
 }
 
 .settings-theme-icon { font-size: 1.4rem; }
@@ -355,15 +333,10 @@
 .settings-theme-label {
   font-weight: 600;
   font-size: 0.95rem;
-  color: #f1f5f9;
+  color: #f0f0f0;
 }
 
 .settings-theme-hint {
   font-size: 0.78rem;
-  color: #64748b;
-}
-
-@media (max-width: 720px) {
-  .settings-content { padding: 1.5rem 1.25rem 3rem; }
-  .settings-header { padding-right: 0; }
+  color: #8a8d98;
 }

@@ -1,0 +1,104 @@
+/* AppShell — the chrome shared by every signed-in page. Matches the
+   Login / Signup design language: charcoal gradient background, Playfair
+   Display brand, Manrope everywhere else, flat monochrome surfaces. */
+
+.app-page {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column; /* top bar on top, sidebar + content below */
+  background:
+    radial-gradient(1000px 640px at 50% -12%, rgba(126, 146, 196, 0.16), transparent 62%),
+    radial-gradient(800px 500px at 88% 110%, rgba(84, 96, 130, 0.1), transparent 60%),
+    linear-gradient(180deg, #1a1b21 0%, #15161b 55%, #121317 100%);
+  color: #f5f5f5;
+  font-family: "Manrope", -apple-system, "Segoe UI", sans-serif;
+}
+
+/* Sidebar + main content sit side by side BELOW the full-width top bar. */
+.app-shell {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* The sidebar forces min-height:100vh globally; below the top bar that would
+   overflow, so let it just fill this row instead. */
+.app-shell .sidebar {
+  min-height: 0;
+}
+
+.app-content {
+  flex: 1;
+  padding: 1.6rem 2.5rem 4rem;
+  position: relative;
+  min-width: 0;
+}
+
+/* ── Full-width top bar: Company Name · SNAP AI · actions ── */
+.app-topbar {
+  flex-shrink: 0; /* fixed-height bar — never squeezed */
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.9rem 2.5rem;
+  padding-right: 4rem; /* room for the fixed profile avatar */
+  border-bottom: 1px solid #2a2b31;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.topbar-company {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: #d4d4d4;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.topbar-brand {
+  flex: 1;
+  text-align: center;
+  font-family: "Playfair Display", Georgia, serif;
+  font-size: 1.35rem;
+  font-weight: 500;
+  letter-spacing: 0.35em;
+  text-indent: 0.35em; /* offset the trailing letter-spacing so it reads centered */
+  color: #ffffff;
+  white-space: nowrap;
+}
+
+.topbar-actions {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.6rem;
+}
+
+@media (max-width: 1000px) {
+  .app-content {
+    padding: 1.3rem 1.5rem 3rem;
+  }
+}
+
+@media (max-width: 900px) {
+  .topbar-brand {
+    font-size: 1.15rem;
+    letter-spacing: 0.25em;
+    text-indent: 0.25em;
+  }
+}
+
+@media (max-width: 560px) {
+  .app-topbar {
+    flex-wrap: wrap;
+  }
+  .topbar-actions {
+    flex-basis: 100%;
+    justify-content: flex-start;
+  }
+}
