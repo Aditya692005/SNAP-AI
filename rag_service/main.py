@@ -717,6 +717,18 @@ def rank_documents_by_relevance(question: str, organization_id, document_ids, ma
     return ids or list(document_ids or [])
 
 
+# Filler words that must NOT make an off-topic table look relevant to a chart
+# request (chart/graph verbs, articles, the metric-request scaffolding).
+_VIZ_STOP = {
+    "give", "show", "me", "a", "an", "the", "of", "for", "where", "are", "is",
+    "visible", "want", "need", "please", "chart", "graph", "bar", "line", "plot",
+    "pie", "doughnut", "scatter", "histogram", "diagram", "table", "visualize",
+    "visualise", "visualization", "visualisation", "compare", "comparison", "and",
+    "with", "by", "per", "each", "all", "from", "to", "in", "on", "over", "time",
+    "trend", "make", "create", "draw", "them", "their", "that", "this", "data",
+}
+
+
 def build_viz_context_supabase(instruction: str, organization_id, document_ids, focus_document_id) -> tuple[str, bool, list]:
     """Chart context from Supabase: prefer stored tables (accurate numbers),
     else fall back to text chunks. Scoped to the focused doc, or the accessible
@@ -725,37 +737,95 @@ def build_viz_context_supabase(instruction: str, organization_id, document_ids, 
     ids that actually contributed data (for sources)."""
     if focus_document_id:
         ids = [focus_document_id]
+        ranked_set = {focus_document_id}
     else:
         ranked = rank_documents_by_relevance(instruction, organization_id, document_ids)
         # Charts often compare data SPLIT across several files (e.g. 2024-25 in one
-        # upload, 2026-27 in another). Narrowing to the top-ranked docs drops the
-        # rest and loses whole periods, so include EVERY accessible doc — ranked
-        # ones first so the most relevant survive if we hit the context cap.
+        # upload, 2026-27 in another), so include EVERY accessible doc — ranked
+        # ones first. But a doc that neither ranked NOR matches the query by column
+        # is only included when its COLUMNS match the request (see _table_relevant):
+        # otherwise a "marks" chart pulls in the department Revenue tables, and the
+        # model fixates on those clean CSVs and reports the marks "not present".
         rest = [d for d in (document_ids or []) if d not in ranked]
         ids = ranked + rest
-    parts = []
-    used = set()
+        ranked_set = set(ranked)
+
+    # Query tokens (minus filler) used to judge whether an unranked table is on-topic.
+    q_tokens = {
+        _singular(t) for t in _word_tokens(instruction)
+        if len(t) >= 2 and t not in _VIZ_STOP
+    }
+
+    def _table_relevant(table) -> bool:
+        rows = (table.get("table_data") or {}).get("rows") or []
+        if not rows:
+            return False
+        ctoks: set = set()
+        for c in rows[0].keys():
+            ctoks |= {_singular(x) for x in _word_tokens(c)}
+        return bool(ctoks & q_tokens)
+
     tables_by_doc: dict = {}
     for t in store.tables_for_documents(ids):
         tables_by_doc.setdefault(t.get("document_id"), []).append(t)
-    for did in ids:  # relevance order, doc by doc
-        for t in tables_by_doc.get(did, []):
-            rows = (t.get("table_data") or {}).get("rows") or []
-            if not rows:
+
+    # Docs WITHOUT a stored table (PDFs / plain text) still need their chunk text
+    # included. Otherwise a chart request spanning a MIX of CSV tables and text
+    # docs silently drops the text docs — the bug where "bar graph of ESE/MSE
+    # marks" ignored the marks PDF because the department CSVs happened to have
+    # tables, so the tabular branch returned before the text fallback ran.
+    #
+    # Use the query-RELEVANT chunks (semantic/hybrid retrieval), not the document
+    # from the top: the data being charted is often a small table buried deep in a
+    # long doc (the marks scheme sits ~2/3 into a 127-chunk syllabus, after pages
+    # of front matter), which a top-of-doc dump would truncate away.
+    text_only = [d for d in ids if d not in tables_by_doc]
+    chunks_by_doc: dict = {}
+    if text_only:
+        hits = retrieve_chunks(instruction, organization_id or "", text_only, k=20)
+        for h in hits:
+            chunks_by_doc.setdefault(h["document_id"], []).append(h.get("chunk_text") or "")
+        # If retrieval surfaced NOTHING at all, fall back to raw chunks so a lone
+        # text doc still charts. (When some text doc matched, unmatched ones are
+        # off-topic and intentionally left out.)
+        if not chunks_by_doc:
+            for c in store.chunks_for_documents(text_only):
+                chunks_by_doc.setdefault(c["document_id"], []).append(c.get("chunk_text") or "")
+
+    parts = []
+    used = []
+    has_table = False
+    for did in ids:  # relevance order, doc by doc — tables OR chunk text per doc
+        if did in tables_by_doc:
+            # Skip an unranked doc's table unless its columns match the request,
+            # so off-topic tables don't crowd out / mislead the model.
+            if did not in ranked_set and not any(_table_relevant(t) for t in tables_by_doc[did]):
                 continue
-            used.add(did)
-            name = t.get("table_name") or t.get("sheet_name") or "table"
-            cols = list(rows[0].keys())
-            lines = [",".join(map(str, cols))]
-            for r in rows[:500]:
-                lines.append(",".join("" if r.get(c) is None else str(r.get(c)) for c in cols))
-            parts.append(f"TABLE: {name}\n" + "\n".join(lines))
-    if parts:
-        return ("TABULAR DATA:\n" + "\n\n".join(parts))[:MAX_VIZ_CHARS], True, list(used)
-    chunks = store.chunks_for_documents(ids)
-    used = list({c["document_id"] for c in chunks})
-    text = "DOCUMENT TEXT:\n" + "\n\n".join(c["chunk_text"] for c in chunks)
-    return text[:MAX_VIZ_CHARS], False, used
+            for t in tables_by_doc[did]:
+                rows = (t.get("table_data") or {}).get("rows") or []
+                if not rows:
+                    continue
+                has_table = True
+                if did not in used:
+                    used.append(did)
+                name = t.get("table_name") or t.get("sheet_name") or "table"
+                cols = list(rows[0].keys())
+                lines = [",".join(map(str, cols))]
+                for r in rows[:500]:
+                    lines.append(",".join("" if r.get(c) is None else str(r.get(c)) for c in cols))
+                parts.append(f"TABLE: {name}\n" + "\n".join(lines))
+        elif did in chunks_by_doc:
+            body = "\n\n".join(t for t in chunks_by_doc[did] if t.strip())
+            if not body.strip():
+                continue
+            if did not in used:
+                used.append(did)
+            parts.append(f"DOCUMENT TEXT:\n{body}")
+
+    if not parts:
+        return "", False, []
+    prefix = "TABULAR DATA:\n" if has_table else "DOCUMENT TEXT:\n"
+    return (prefix + "\n\n".join(parts))[:MAX_VIZ_CHARS], has_table, used
 
 
 async def _visualize_from_dataset(dataset: str, is_tabular: bool, instruction: str, source_label) -> dict:
