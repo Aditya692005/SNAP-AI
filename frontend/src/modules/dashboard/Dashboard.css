@@ -842,3 +842,22 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* ── Drag & drop ──────────────────────────────────────────────────────────────
+   Widgets (KPI cards + chart panels) are draggable to reorder; dropping one on
+   another personal board's tab moves it there (after a confirm). */
+.kpi-card-wrap[draggable="true"],
+.chart-panel[draggable="true"] {
+  cursor: grab;
+}
+
+.kpi-card-wrap[draggable="true"]:active,
+.chart-panel[draggable="true"]:active {
+  cursor: grabbing;
+}
+
+/* While a widget is in flight, other boards' tabs light up as drop targets. */
+.dash-tab.drop-target {
+  outline: 1px dashed #8b8ef5;
+  outline-offset: 2px;
+}

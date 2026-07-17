@@ -5,6 +5,7 @@ import AppShell from "../../components/AppShell";
 import ToastStack from "../../components/Toast";
 import ChartBlock from "./ChartBlock";
 import { authService } from "../../services/authService";
+import { previewKind, parseCsv } from "../../utils/filePreview";
 import "./AIAssistant.css";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
@@ -68,12 +69,21 @@ function AIAssistant() {
   // to them — a normal conversation doesn't change subject mid-thread. Manual
   // drawer picks (selectedDocIds) always take precedence over this.
   const [conversationDocIds, setConversationDocIds] = useState([]);
+  // The scope banner announces itself for 30s (with a countdown line) then
+  // gets out of the way — the scope itself stays active, and any scope change
+  // brings the banner back for another 30s.
+  const [bannerVisible, setBannerVisible] = useState(false);
   // Persisted chat threads (Phase 3).
   const [conversationId, setConversationId] = useState(null);
   const [conversations, setConversations] = useState([]);
   const [showHistory, setShowHistory] = useState(false);
+  const [historyQuery, setHistoryQuery] = useState(""); // filter for the history drawer
   // Transient popup notifications (auto-dismiss after a few seconds).
   const [toasts, setToasts] = useState([]);
+  // Sources side panel: { citations: [...], sources: [...] } for one answer.
+  const [sourcesPanel, setSourcesPanel] = useState(null);
+  // Citation preview modal: { name, loading, url?, kind?, text?, rows?, error? }
+  const [citeViewer, setCiteViewer] = useState(null);
   // "Pin to dashboard" picker: { spec, aiMessageId, dashboards } while choosing.
   const [pinPicker, setPinPicker] = useState(null);
   const [pinningTo, setPinningTo] = useState(null); // dashboard id being pinned to
@@ -103,6 +113,25 @@ function AIAssistant() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Show the scope banner for 15s whenever the active scope changes, then hide
+  // it (the scope stays in force — the banner is just the announcement).
+  const activeScopeKey = (selectedDocIds.length > 0 ? selectedDocIds : conversationDocIds).join(",");
+  useEffect(() => {
+    if (!activeScopeKey) {
+      setBannerVisible(false);
+      return;
+    }
+    setBannerVisible(true);
+    const t = setTimeout(() => setBannerVisible(false), 15000);
+    return () => clearTimeout(t);
+  }, [activeScopeKey]);
+
+  // History drawer filter — match on the thread title.
+  const historyQ = historyQuery.trim().toLowerCase();
+  const shownConversations = historyQ
+    ? conversations.filter((c) => (c.title || "Untitled").toLowerCase().includes(historyQ))
+    : conversations;
 
   // Documents the user can access (uploaded/processed), from Supabase.
   async function fetchDocs() {
@@ -737,17 +766,60 @@ function AIAssistant() {
   }
 
   // ── download a cited source document ────────────────────────────────────────
+  // Fetch a source's bytes. arrayBuffer + Blob (not response.blob()) — Chrome's
+  // blob registry flakily rejects larger cross-origin responses (see
+  // documentService.downloadBlob for the full story).
+  async function fetchSourceBlob(filename) {
+    const res = await fetch(
+      `${API_BASE}/api/rag/download/${encodeURIComponent(filename)}`,
+      { headers: authHeaders() }
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || "Download failed");
+    }
+    const buf = await res.arrayBuffer();
+    return new Blob([buf], {
+      type: res.headers.get("content-type") || "application/octet-stream",
+    });
+  }
+
+  // Preview a cited source in a modal — same pdf/text/csv rendering as the
+  // Documents page (shared classes from Documents.css; helpers from utils).
+  async function openCitePreview(filename) {
+    setCiteViewer({ name: filename, loading: true });
+    try {
+      const blob = await fetchSourceBlob(filename);
+      const kind = previewKind(filename);
+      const typed = kind === "pdf" ? new Blob([blob], { type: "application/pdf" }) : blob;
+      const url = URL.createObjectURL(typed);
+      const next = { name: filename, loading: false, url, kind };
+      if (kind === "text") next.text = await blob.text();
+      if (kind === "csv") next.rows = parseCsv(await blob.text());
+      setCiteViewer((v) => {
+        if (!v || v.name !== filename) {
+          URL.revokeObjectURL(url); // closed (or switched) while loading
+          return v;
+        }
+        return next;
+      });
+    } catch (err) {
+      setCiteViewer((v) =>
+        v && v.name === filename ? { name: filename, loading: false, error: err.message } : v
+      );
+    }
+  }
+
+  function closeCitePreview() {
+    setCiteViewer((v) => {
+      if (v?.url) URL.revokeObjectURL(v.url);
+      return null;
+    });
+  }
+
   async function downloadSource(filename) {
     try {
-      const res = await fetch(
-        `${API_BASE}/api/rag/download/${encodeURIComponent(filename)}`,
-        { headers: authHeaders() }
-      );
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.message || "Download failed");
-      }
-      const blob = await res.blob();
+      const blob = await fetchSourceBlob(filename);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -865,9 +937,10 @@ function AIAssistant() {
         </div>
 
         {/* Scope banner — confirms which docs answers will use. Manual drawer
-            picks win; otherwise the thread's established conversation scope. */}
-        {(selectedDocIds.length > 0 || conversationDocIds.length > 0) && (
-          <div className="focus-banner">
+            picks win; otherwise the thread's established conversation scope.
+            Auto-hides after 15s (countdown line below); ✕ dismisses early. */}
+        {bannerVisible && (selectedDocIds.length > 0 || conversationDocIds.length > 0) && (
+          <div className="focus-banner" key={activeScopeKey}>
             <span>
               🎯 {selectedDocIds.length > 0 ? "Answering from" : "Conversation about"}{" "}
               <strong>
@@ -901,8 +974,18 @@ function AIAssistant() {
               }}
               title="Clear scope (search all documents)"
             >
-              ✕ Clear
+              Clear
             </button>
+            <button
+              type="button"
+              className="focus-clear"
+              onClick={() => setBannerVisible(false)}
+              title="Dismiss (the scope stays active)"
+              aria-label="Dismiss"
+            >
+              ✕
+            </button>
+            <div className="focus-banner-timer" aria-hidden="true" />
           </div>
         )}
 
@@ -1022,47 +1105,26 @@ function AIAssistant() {
                   </div>
                 </div>
               )}
-              {msg.citations?.length > 0 ? (
+              {(msg.citations?.length > 0 || msg.sources?.length > 0) && (
                 <div className="bubble-sources">
-                  Cited from:{" "}
-                  {dedupeCitations(msg.citations).map((c, i) => {
-                    const name = c.file_name || "source";
-                    const pct = c.similarity != null ? Math.round(c.similarity * 100) : null;
-                    const span =
-                      c.char_start != null && c.char_end != null
-                        ? ` · chars ${c.char_start}–${c.char_end}`
-                        : "";
-                    return (
-                      <button
-                        key={`${name}-${c.page ?? ""}-${i}`}
-                        type="button"
-                        className="source-chip"
-                        onClick={() => c.file_name && downloadSource(c.file_name)}
-                        title={`${pct != null ? `Relevance ${pct}%` : ""}${span} — click to open the source`}
-                      >
-                        📄 {name}
-                        {c.page != null ? ` · p.${c.page}` : ""}
-                      </button>
-                    );
-                  })}
+                  <button
+                    type="button"
+                    className="source-chip sources-open"
+                    onClick={() =>
+                      setSourcesPanel({
+                        citations: dedupeCitations(msg.citations || []),
+                        sources: msg.sources || [],
+                      })
+                    }
+                    title="Show the sources this answer was grounded on"
+                  >
+                    Sources (
+                    {msg.citations?.length > 0
+                      ? dedupeCitations(msg.citations).length
+                      : msg.sources.length}
+                    )
+                  </button>
                 </div>
-              ) : (
-                msg.sources?.length > 0 && (
-                  <div className="bubble-sources">
-                    Sources:{" "}
-                    {msg.sources.map((s) => (
-                      <button
-                        key={s}
-                        type="button"
-                        className="source-chip"
-                        onClick={() => downloadSource(s)}
-                        title={`Download ${s}`}
-                      >
-                        ⬇ {s}
-                      </button>
-                    ))}
-                  </div>
-                )
               )}
             </div>
           ))}
@@ -1188,11 +1250,24 @@ function AIAssistant() {
           </button>
         </div>
 
+        {conversations.length > 0 && (
+          <input
+            type="search"
+            className="drawer-search"
+            placeholder="Search conversations…"
+            value={historyQuery}
+            onChange={(e) => setHistoryQuery(e.target.value)}
+            aria-label="Search conversations"
+          />
+        )}
+
         {conversations.length === 0 ? (
           <div className="docs-empty">No conversations yet — say hi!</div>
+        ) : shownConversations.length === 0 ? (
+          <div className="docs-empty">No conversations match "{historyQuery}".</div>
         ) : (
           <div className="docs-drawer-list">
-            {conversations.map((c) => (
+            {shownConversations.map((c) => (
               <div key={c.id} className="docs-drawer-row">
                 <button
                   type="button"
@@ -1221,6 +1296,159 @@ function AIAssistant() {
           </div>
         )}
       </aside>
+
+      {/* Sources panel — the citations behind one answer, previewable and
+          downloadable like the Documents page. */}
+      <aside className={`docs-drawer ${sourcesPanel ? "open" : ""}`} aria-hidden={!sourcesPanel}>
+        <div className="docs-drawer-header">
+          <div>
+            <h2>Sources</h2>
+            <span className="docs-drawer-hint">
+              What this answer was grounded on — click a source to preview it.
+            </span>
+          </div>
+          <button
+            className="docs-drawer-close"
+            onClick={() => setSourcesPanel(null)}
+            title="Close"
+            aria-label="Close sources"
+          >
+            ✕
+          </button>
+        </div>
+        {sourcesPanel && (
+          <div className="docs-drawer-list">
+            {sourcesPanel.citations.length > 0
+              ? sourcesPanel.citations.map((c, i) => {
+                  const name = c.file_name || "source";
+                  const pct = c.similarity != null ? Math.round(c.similarity * 100) : null;
+                  return (
+                    <div key={`${name}-${c.page ?? ""}-${i}`} className="docs-drawer-row">
+                      <button
+                        type="button"
+                        className="docs-drawer-item"
+                        onClick={() => c.file_name && openCitePreview(c.file_name)}
+                        title={`Preview ${name}`}
+                      >
+                        <span className="docs-item-name">📄 {name}</span>
+                        <span className="convs-item-date">
+                          {c.page != null ? `p.${c.page}` : ""}
+                          {pct != null ? `${c.page != null ? " · " : ""}${pct}% match` : ""}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        className="docs-item-remove"
+                        onClick={() => c.file_name && downloadSource(c.file_name)}
+                        title={`Download ${name}`}
+                      >
+                        ⬇
+                      </button>
+                    </div>
+                  );
+                })
+              : sourcesPanel.sources.map((s) => (
+                  <div key={s} className="docs-drawer-row">
+                    <button
+                      type="button"
+                      className="docs-drawer-item"
+                      onClick={() => openCitePreview(s)}
+                      title={`Preview ${s}`}
+                    >
+                      <span className="docs-item-name">📄 {s}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="docs-item-remove"
+                      onClick={() => downloadSource(s)}
+                      title={`Download ${s}`}
+                    >
+                      ⬇
+                    </button>
+                  </div>
+                ))}
+          </div>
+        )}
+      </aside>
+
+      {/* Citation preview — pdf/text/csv modal, same classes as the Documents
+          page viewer (Documents.css is in the global bundle). */}
+      {citeViewer && (
+        <>
+          <div className="viewer-overlay" onClick={closeCitePreview} />
+          <div className="viewer-modal" role="dialog" aria-label={`Preview of ${citeViewer.name}`}>
+            <div className="viewer-header">
+              <span className="viewer-title" title={citeViewer.name}>
+                {citeViewer.name}
+              </span>
+              <div className="viewer-actions">
+                <button
+                  type="button"
+                  className="viewer-btn"
+                  onClick={() => downloadSource(citeViewer.name)}
+                  title="Download"
+                  aria-label="Download"
+                >
+                  ⬇
+                </button>
+                <button
+                  type="button"
+                  className="viewer-btn"
+                  onClick={closeCitePreview}
+                  title="Close"
+                  aria-label="Close preview"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+            <div className="viewer-body">
+              {citeViewer.loading ? (
+                <p className="viewer-msg">Loading…</p>
+              ) : citeViewer.error ? (
+                <p className="viewer-msg viewer-error">❌ {citeViewer.error}</p>
+              ) : citeViewer.kind === "pdf" ? (
+                <iframe className="viewer-frame" src={citeViewer.url} title={citeViewer.name} />
+              ) : citeViewer.kind === "text" ? (
+                <pre className="viewer-pre">{citeViewer.text}</pre>
+              ) : citeViewer.kind === "csv" && citeViewer.rows?.length > 0 ? (
+                <div className="viewer-table-wrap">
+                  <table className="viewer-table">
+                    <thead>
+                      <tr>
+                        {citeViewer.rows[0].map((h, i) => (
+                          <th key={i}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {citeViewer.rows.slice(1).map((r, i) => (
+                        <tr key={i}>
+                          {r.map((c, j) => (
+                            <td key={j}>{c}</td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="viewer-fallback">
+                  <span className="viewer-fallback-icon">📄</span>
+                  <p>No in-browser preview for this file type.</p>
+                  <button
+                    type="button"
+                    className="viewer-download-btn"
+                    onClick={() => downloadSource(citeViewer.name)}
+                  >
+                    ⬇ Download {citeViewer.name}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </>
+      )}
 
       {/* Pin-to-dashboard picker — shown when the user has more than one dashboard */}
       {pinPicker && (

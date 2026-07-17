@@ -38,6 +38,9 @@ function ShareDialog({ doc, targets, onClose }) {
 
   const [tier, setTier] = useState(allowedTiers[0]?.key || null);
   const [targetId, setTargetId] = useState("");
+  // Type-ahead filter for the person list — orgs can have too many people to
+  // scan a bare dropdown.
+  const [personQuery, setPersonQuery] = useState("");
   const [expiryMode, setExpiryMode] = useState("permanent"); // "permanent" | "until"
   const [expiryDate, setExpiryDate] = useState("");
   const [accessList, setAccessList] = useState([]);
@@ -139,19 +142,54 @@ function ShareDialog({ doc, targets, onClose }) {
               ))}
             </div>
 
-            {tier === "USER" && (
-              <select value={targetId} onChange={(e) => setTargetId(e.target.value)}>
-                <option value="">Select a person…</option>
-                {(targets.users || [])
+            {tier === "USER" &&
+              (() => {
+                const q = personQuery.trim().toLowerCase();
+                const people = (targets.users || [])
                   // The uploader owns the doc — sharing it to them is a no-op.
                   .filter((u) => u.id !== doc.uploaded_by_user_id)
-                  .map((u) => (
-                    <option key={u.id} value={u.id}>
-                      {u.name} ({u.email})
-                    </option>
-                  ))}
-              </select>
-            )}
+                  .filter(
+                    (u) =>
+                      !q ||
+                      (u.name || "").toLowerCase().includes(q) ||
+                      (u.email || "").toLowerCase().includes(q)
+                  );
+                return (
+                  <>
+                    <input
+                      type="search"
+                      className="share-person-search"
+                      placeholder="Search people by name or email…"
+                      value={personQuery}
+                      onChange={(e) => setPersonQuery(e.target.value)}
+                      aria-label="Search people"
+                    />
+                    <div className="share-people-list">
+                      {people.length === 0 ? (
+                        <p className="share-people-empty">
+                          {q
+                            ? `No one in your organization matches "${personQuery.trim()}".`
+                            : "No one to share with yet."}
+                        </p>
+                      ) : (
+                        people.map((u) => (
+                          <button
+                            key={u.id}
+                            type="button"
+                            className={`share-person ${targetId === u.id ? "active" : ""}`}
+                            onClick={() => setTargetId(u.id)}
+                            aria-pressed={targetId === u.id}
+                          >
+                            <span className="share-person-name">{u.name}</span>
+                            <span className="share-person-email">{u.email}</span>
+                            {targetId === u.id && <span className="share-person-tick">✓</span>}
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  </>
+                );
+              })()}
 
             {tier === "DEPARTMENT" && (
               <select value={targetId} onChange={(e) => setTargetId(e.target.value)}>

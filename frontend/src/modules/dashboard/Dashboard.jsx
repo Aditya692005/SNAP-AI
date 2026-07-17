@@ -67,7 +67,9 @@ function formatPeriod(period) {
 // {period, value} points. By default the card shows the LATEST period (the
 // KPI), but when more than one period exists the user can pick any quarter/year
 // from a dropdown to see that period's value and its change vs the one before.
-function MetricCard({ widget, metrics, onArchive }) {
+// `dragProps` (optional) makes the card draggable — the board wires reorder /
+// move-to-another-dashboard through it.
+function MetricCard({ widget, metrics, onArchive, dragProps }) {
   const key = widget.config?.metric_key;
   const label = widget.config?.label || widget.title || key;
   const kpi = (metrics?.kpis || []).find((k) => k.metric === key);
@@ -95,7 +97,7 @@ function MetricCard({ widget, metrics, onArchive }) {
   }
 
   return (
-    <div className="kpi-card-wrap">
+    <div className="kpi-card-wrap" {...(dragProps || {})}>
       {onArchive && (
         <button
           type="button"
@@ -534,6 +536,123 @@ function Dashboard() {
     }
   }
 
+  // ── drag & drop: reorder widgets, move to another dashboard ──────────────────
+  // One drag at a time: { scope: "personal"|"dept"|"org", id }. The scope tag
+  // stops a personal widget from being dropped on a department grid (and vice
+  // versa) — cross-SCOPE moves aren't a thing, only cross-BOARD within personal.
+  const [dragWidget, setDragWidget] = useState(null);
+
+  // Spread onto a widget's root element to make it a drag source AND a drop
+  // target for reordering within its own board.
+  function widgetDragProps(dragScope, id, canDrag = true) {
+    if (!canDrag) return {};
+    return {
+      draggable: true,
+      onDragStart: (e) => {
+        e.dataTransfer.effectAllowed = "move";
+        setDragWidget({ scope: dragScope, id });
+      },
+      onDragEnd: () => setDragWidget(null),
+      onDragOver: (e) => {
+        if (dragWidget && dragWidget.scope === dragScope && dragWidget.id !== id) {
+          e.preventDefault(); // allow the drop
+        }
+      },
+      onDrop: (e) => {
+        e.preventDefault();
+        if (dragWidget && dragWidget.scope === dragScope && dragWidget.id !== id) {
+          reorderWidget(dragScope, dragWidget.id, id);
+        }
+        setDragWidget(null);
+      },
+    };
+  }
+
+  function reorderList(list, fromId, toId) {
+    const from = list.findIndex((w) => w.id === fromId);
+    const to = list.findIndex((w) => w.id === toId);
+    if (from === -1 || to === -1) return null;
+    const next = [...list];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    return next;
+  }
+
+  // Persist the dropped order as position_y = list index (widgets are listed
+  // ordered by (position_y, position_x)). Optimistic: the local list moves
+  // immediately; failures just leave the old order to win on next load.
+  async function reorderWidget(dragScope, fromId, toId) {
+    if (dragScope === "personal") {
+      const next = reorderList(widgets, fromId, toId);
+      if (!next) return;
+      const before = new Map(widgets.map((w) => [w.id, w]));
+      setWidgets(next.map((w, i) => ({ ...w, position_y: i, position_x: 0 })));
+      await Promise.all(
+        next.map((w, i) => {
+          const old = before.get(w.id);
+          if (old && old.position_y === i && old.position_x === 0) return null;
+          return fetch(`${API_BASE}/api/dashboard/widgets/${w.id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json", ...authHeaders() },
+            body: JSON.stringify({ position_y: i, position_x: 0 }),
+          }).catch(() => {});
+        })
+      );
+      return;
+    }
+
+    // Shared boards are version-guarded per widget; patch sequentially, then
+    // re-pull the board so local versions resync (a 409 loser self-heals here).
+    const isDept = dragScope === "dept";
+    const list = isDept ? deptWidgets : orgWidgets;
+    const next = reorderList(list, fromId, toId);
+    if (!next) return;
+    (isDept ? setDeptWidgets : setOrgWidgets)(
+      next.map((w, i) => ({ ...w, position_y: i, position_x: 0 }))
+    );
+    const base = isDept
+      ? `${API_BASE}/api/dashboard/department/widgets`
+      : `${API_BASE}/api/dashboard/organization/widgets`;
+    for (let i = 0; i < next.length; i++) {
+      const w = next[i];
+      if (w.position_y === i && w.position_x === 0) continue;
+      await fetch(`${base}/${w.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ expected_version: w.version, position_y: i, position_x: 0 }),
+      }).catch(() => {});
+    }
+    if (isDept) {
+      if (activeDeptId) refreshDeptWidgets(activeDeptId);
+    } else {
+      refreshOrgWidgets();
+    }
+  }
+
+  // Drop a personal widget onto another personal board's tab to move it there —
+  // after an explicit confirm, so a stray drop never silently relocates a chart.
+  async function moveWidgetToBoard(widgetId, board) {
+    const w = widgets.find((x) => x.id === widgetId);
+    if (!w || board.id === activeId) return;
+    const label =
+      w.title || w.config?.label || w.config?.spec?.title || "this widget";
+    if (!window.confirm(`Move "${label}" to "${board.name}"?`)) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/dashboard/widgets/${widgetId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ dashboard_id: board.id }),
+      });
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(e.message || "Could not move the widget");
+      }
+      setWidgets((prev) => prev.filter((x) => x.id !== widgetId));
+    } catch (err) {
+      window.alert(err.message);
+    }
+  }
+
   // ── Department dashboards ────────────────────────────────────────────────────
   async function loadDepartmentBoards() {
     try {
@@ -929,8 +1048,21 @@ function Dashboard() {
           {dashboards.map((d) => (
             <button
               key={d.id}
-              className={`dash-tab ${d.id === activeId ? "active" : ""}`}
+              className={`dash-tab ${d.id === activeId ? "active" : ""} ${
+                dragWidget?.scope === "personal" && d.id !== activeId ? "drop-target" : ""
+              }`}
               onClick={() => setActiveId(d.id)}
+              // Drop a widget on another board's tab to move it there (confirmed).
+              onDragOver={(e) => {
+                if (dragWidget?.scope === "personal" && d.id !== activeId) e.preventDefault();
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                if (dragWidget?.scope === "personal" && d.id !== activeId) {
+                  moveWidgetToBoard(dragWidget.id, d);
+                }
+                setDragWidget(null);
+              }}
             >
               <span className="dash-tab-name">{d.name}</span>
               {d.is_default && <span className="dash-tab-badge">default</span>}
@@ -1056,7 +1188,13 @@ function Dashboard() {
             {widgets
               .filter((w) => w.widget_type === "metric")
               .map((w) => (
-                <MetricCard key={w.id} widget={w} metrics={metrics} onArchive={archiveWidget} />
+                <MetricCard
+                  key={w.id}
+                  widget={w}
+                  metrics={metrics}
+                  onArchive={archiveWidget}
+                  dragProps={widgetDragProps("personal", w.id)}
+                />
               ))}
           </div>
         )}
@@ -1071,7 +1209,11 @@ function Dashboard() {
                 const stale = !!w.config?.stale;
                 if (!spec) return null;
                 return (
-                  <div className={`chart-panel ${stale ? "stale" : ""}`} key={w.id}>
+                  <div
+                    className={`chart-panel ${stale ? "stale" : ""}`}
+                    key={w.id}
+                    {...widgetDragProps("personal", w.id)}
+                  >
                     {stale && (
                       <div className="widget-stale-bar">
                         <span>
@@ -1235,6 +1377,7 @@ function Dashboard() {
                       widget={w}
                       metrics={deptMetrics}
                       onArchive={deptCanEdit ? () => removeDeptWidget(w) : undefined}
+                      dragProps={widgetDragProps("dept", w.id, deptCanEdit)}
                     />
                   ))}
               </div>
@@ -1249,7 +1392,11 @@ function Dashboard() {
                     const stale = !!w.config?.stale;
                     if (!spec) return null;
                     return (
-                      <div className={`chart-panel ${stale ? "stale" : ""}`} key={w.id}>
+                      <div
+                        className={`chart-panel ${stale ? "stale" : ""}`}
+                        key={w.id}
+                        {...widgetDragProps("dept", w.id, deptCanEdit)}
+                      >
                         {stale && (
                           <div className="widget-stale-bar">
                             <span>
@@ -1410,6 +1557,7 @@ function Dashboard() {
                       widget={w}
                       metrics={orgMetrics}
                       onArchive={orgCanEdit ? () => removeOrgWidget(w) : undefined}
+                      dragProps={widgetDragProps("org", w.id, orgCanEdit)}
                     />
                   ))}
               </div>
@@ -1424,7 +1572,11 @@ function Dashboard() {
                     const stale = !!w.config?.stale;
                     if (!spec) return null;
                     return (
-                      <div className={`chart-panel ${stale ? "stale" : ""}`} key={w.id}>
+                      <div
+                        className={`chart-panel ${stale ? "stale" : ""}`}
+                        key={w.id}
+                        {...widgetDragProps("org", w.id, orgCanEdit)}
+                      >
                         {stale && (
                           <div className="widget-stale-bar">
                             <span>

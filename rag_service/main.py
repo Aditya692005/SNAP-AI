@@ -575,6 +575,26 @@ def is_meta_question(question: str) -> bool:
     return any(k in q for k in META_KEYWORDS)
 
 
+# Smalltalk — greetings, thanks, sign-offs and other pleasantries that don't
+# need the documents at all. Matched against the WHOLE (normalized) message, not
+# a substring, so "hi, what were Q4 sales?" still goes through retrieval while a
+# bare "hi" doesn't produce an answer decorated with irrelevant citations.
+_SMALLTALK_RE = re.compile(
+    r"^(?:hi|hii+|hello|hey|heya|yo|hola|good\s+(?:morning|afternoon|evening|day)|"
+    r"thanks?|thank\s+you(?:\s+(?:so|very)\s+much)?|thx|ty|"
+    r"ok(?:ay)?|cool|nice|great|awesome|perfect|got\s+it|understood|sounds\s+good|"
+    r"bye|goodbye|good\s+night|see\s+(?:you|ya)(?:\s+later)?|take\s+care|"
+    r"how\s+are\s+you(?:\s+doing)?|what'?s\s+up|sup|"
+    r"help|can\s+you\s+help(?:\s+me)?)"
+    r"[\s!.?,]*$",
+    re.IGNORECASE,
+)
+
+
+def is_smalltalk(question: str) -> bool:
+    return bool(_SMALLTALK_RE.match(question.strip()))
+
+
 # Phrases signalling the user wants a chart built from data the AI ALREADY
 # presented (a table/answer whose sources were already cited), rather than a
 # fresh look at the documents — e.g. "make a bar graph of the above table". A
@@ -2091,9 +2111,10 @@ async def chat(req: ChatRequest):
         n_docs = len(req.document_ids or [])
 
         # Meta/conversational questions ("what was my last question?", "what time
-        # is it?") are answered from the chat itself, not the documents — so give a
-        # normal answer with NO sources cited.
-        if is_meta_question(req.message):
+        # is it?") and smalltalk ("hi", "thanks") are answered from the chat
+        # itself, not the documents — a normal answer with NO sources cited, so
+        # a plain "hello" never comes back decorated with citations.
+        if is_meta_question(req.message) or is_smalltalk(req.message):
             answer = await run_plain_chain(req.message, req.session_id, req.history)
             return ChatResponse(answer=answer, sources=[], doc_count=0)
 

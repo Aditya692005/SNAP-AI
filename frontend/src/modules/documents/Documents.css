@@ -143,6 +143,36 @@
   color: #4ade80;
 }
 
+/* Processed docs show just a tick — compact, no "Ready" text */
+.status.ready-tick {
+  min-width: 0;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+/* Search field in the section header (Documents + Reports pages) */
+.doc-search {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid #2c2d34;
+  border-radius: 8px;
+  color: #f0f0f0;
+  padding: 8px 12px;
+  font-size: 0.9rem;
+  font-family: inherit;
+  min-width: 220px;
+}
+
+.doc-search::placeholder {
+  color: #6f7280;
+}
+
+.doc-search:focus {
+  outline: none;
+  border-color: #4b4d57;
+}
+
 /* Primary action — white gradient with dark text, like the auth CTAs */
 .upload-button,
 .replace-btn {
@@ -316,6 +346,7 @@
 }
 
 .share-form select,
+.share-person-search,
 .share-expiry input[type="date"] {
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid #3a3b42;
@@ -644,4 +675,66 @@
   .share-dialog {
     padding: 1.25rem;
   }
+}
+
+/* ── Share dialog: people search results ── */
+.share-people-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid #3a3b42;
+}
+
+.share-person {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid #24252b;
+  padding: 10px 12px;
+  color: #f0f0f0;
+  font-family: inherit;
+  font-size: 0.92rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.share-person:last-child {
+  border-bottom: none;
+}
+
+.share-person:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.share-person.active {
+  background: rgba(139, 142, 245, 0.12);
+}
+
+.share-person-name {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.share-person-email {
+  color: #9a9da8;
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.share-person-tick {
+  margin-left: auto;
+  color: #4ade80;
+  font-weight: 700;
+}
+
+.share-people-empty {
+  color: #9a9da8;
+  font-size: 0.9rem;
+  padding: 12px;
+  margin: 0;
 }

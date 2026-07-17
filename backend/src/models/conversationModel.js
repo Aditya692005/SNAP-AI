@@ -157,6 +157,36 @@ async function addMessage(conversationId, senderType, content, metadata = null) 
   return data;
 }
 
+// AI-generated reports across all of this user's threads: every AI message
+// whose metadata carries a generated document ({title, filename}). Powers the
+// Reports page — the files themselves live in Storage under generated/ and are
+// served by GET /api/rag/download/:filename.
+async function listGeneratedReports(userId, organizationId) {
+  const { data, error } = await supabase
+    .from("ai_messages")
+    .select(
+      "id, metadata, created_at, ai_conversations!inner(id, title, user_id, organization_id)"
+    )
+    .eq("ai_conversations.user_id", userId)
+    .eq("ai_conversations.organization_id", organizationId)
+    .not("metadata->document", "is", null)
+    .order("created_at", { ascending: false });
+  if (error) {
+    if (error.code === MISSING_COLUMN) return []; // metadata migration not run
+    throw error;
+  }
+  return (data || [])
+    .filter((m) => m.metadata?.document?.filename)
+    .map((m) => ({
+      id: m.id,
+      title: m.metadata.document.title || m.metadata.document.filename,
+      filename: m.metadata.document.filename,
+      conversation_id: m.ai_conversations.id,
+      conversation_title: m.ai_conversations.title,
+      created_at: m.created_at,
+    }));
+}
+
 // Provenance: which chunks (and how similar) grounded an AI answer.
 // retrieved = [{chunk_id, document_id, similarity}] from the RAG service.
 async function recordRetrievedChunks(messageId, retrieved) {
@@ -180,6 +210,7 @@ module.exports = {
   deleteConversation,
   listMessages,
   findMessageById,
+  listGeneratedReports,
   addMessage,
   deleteMessage,
   recordRetrievedChunks,

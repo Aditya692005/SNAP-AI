@@ -3,67 +3,18 @@ import AppShell from "../../components/AppShell";
 import ToastStack from "../../components/Toast";
 import ShareDialog from "./ShareDialog";
 import { documentService } from "../../services/authService";
+import { previewKind, parseCsv } from "../../utils/filePreview";
 import "./Documents.css";
 
 // Human-readable status + badge style for a document's processing state.
+// A processed document just gets a compact green tick — "Ready" as a word
+// added noise to every row once most documents are done.
 function statusLabel(status) {
   const s = (status || "").toUpperCase();
-  if (s === "PROCESSED") return { text: "Ready", className: "uploaded" };
+  if (s === "PROCESSED") return { text: "✓", className: "uploaded ready-tick", title: "Ready" };
   if (s === "PROCESSING") return { text: "Processing", className: "pending" };
   if (s === "FAILED") return { text: "Failed", className: "pending" };
   return { text: status || "Unknown", className: "pending" };
-}
-
-// How the preview modal renders a file, by extension. PDFs use the browser's
-// built-in viewer; txt/csv render as text/table; office formats have no native
-// in-browser renderer, so they get a download-only fallback.
-function previewKind(fileName) {
-  const ext = String(fileName).slice(fileName.lastIndexOf(".") + 1).toLowerCase();
-  if (ext === "pdf") return "pdf";
-  if (ext === "txt") return "text";
-  if (ext === "csv") return "csv";
-  return "none";
-}
-
-// Minimal RFC-4180-ish CSV parser (quoted fields, embedded commas/newlines).
-// Enough for previewing; the authoritative parsing happens server-side.
-function parseCsv(text, maxRows = 500) {
-  const rows = [];
-  let row = [];
-  let field = "";
-  let inQuotes = false;
-  for (let i = 0; i < text.length && rows.length < maxRows; i++) {
-    const c = text[i];
-    if (inQuotes) {
-      if (c === '"') {
-        if (text[i + 1] === '"') {
-          field += '"';
-          i++;
-        } else {
-          inQuotes = false;
-        }
-      } else {
-        field += c;
-      }
-    } else if (c === '"') {
-      inQuotes = true;
-    } else if (c === ",") {
-      row.push(field);
-      field = "";
-    } else if (c === "\n") {
-      row.push(field);
-      field = "";
-      if (row.some((v) => v !== "")) rows.push(row);
-      row = [];
-    } else if (c !== "\r") {
-      field += c;
-    }
-  }
-  if ((field !== "" || row.length > 0) && rows.length < maxRows) {
-    row.push(field);
-    if (row.some((v) => v !== "")) rows.push(row);
-  }
-  return rows;
 }
 
 function Documents() {
@@ -78,6 +29,8 @@ function Documents() {
   const [deletingId, setDeletingId] = useState(null);
   // Preview modal: { doc, loading, url?, kind?, text?, rows?, error? }
   const [viewer, setViewer] = useState(null);
+  // Filter the list by name/title as you type.
+  const [query, setQuery] = useState("");
   // Transient popup notifications (auto-dismiss after a few seconds).
   const [toasts, setToasts] = useState([]);
 
@@ -290,6 +243,15 @@ function Documents() {
     }
   }
 
+  const trimmedQuery = query.trim().toLowerCase();
+  const shownDocs = trimmedQuery
+    ? docs.filter(
+        (d) =>
+          d.file_name.toLowerCase().includes(trimmedQuery) ||
+          (d.title || "").toLowerCase().includes(trimmedQuery)
+      )
+    : docs;
+
   return (
     <AppShell>
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
@@ -306,10 +268,18 @@ function Documents() {
             <h2>Your Documents</h2>
 
             <div className="section-header-actions">
+              <input
+                type="search"
+                className="doc-search"
+                placeholder="Search documents…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                aria-label="Search documents"
+              />
               <span>
                 {loading
                   ? "Loading…"
-                  : `${docs.length} document${docs.length === 1 ? "" : "s"}`}
+                  : `${shownDocs.length} document${shownDocs.length === 1 ? "" : "s"}`}
               </span>
               <button
                 type="button"
@@ -355,7 +325,15 @@ function Documents() {
               </div>
             )}
 
-            {docs.map((d) => {
+            {!loading && !error && docs.length > 0 && shownDocs.length === 0 && (
+              <div className="document-row">
+                <div className="document-info">
+                  <p>No documents match "{query}".</p>
+                </div>
+              </div>
+            )}
+
+            {shownDocs.map((d) => {
               const badge = statusLabel(d.status);
               return (
                 <div key={d.id} className="document-row">
@@ -375,7 +353,7 @@ function Documents() {
                   </button>
 
                   <div className="document-actions">
-                    <span className={`status ${badge.className}`}>
+                    <span className={`status ${badge.className}`} title={badge.title}>
                       {badge.text}
                     </span>
                     {canManage(d) && (

@@ -735,7 +735,25 @@ router.get("/department", requireAuth, async (req, res, next) => {
       await getOrCreateDefaultDepartmentDashboard(user.department_id, orgId, user.id);
     }
 
-    const boards = await listDefaultDashboardsByDepartmentIds([...visible]);
+    let boards = await listDefaultDashboardsByDepartmentIds([...visible]);
+
+    // Admins see every department — including ones whose board was never
+    // created because no manager or employee has visited it yet. Materialize
+    // the missing defaults so every department has a board the admin can open
+    // and add metrics/charts to.
+    if (isAdmin(user)) {
+      const have = new Set(boards.map((b) => b.department_id));
+      const missing = [...visible].filter((id) => !have.has(id));
+      if (missing.length > 0) {
+        await Promise.all(
+          missing.map((id) =>
+            getOrCreateDefaultDepartmentDashboard(id, orgId, user.id).catch(() => null)
+          )
+        );
+        boards = await listDefaultDashboardsByDepartmentIds([...visible]);
+      }
+    }
+
     const shaped = boards
       .map((b) => ({
         id: b.id,

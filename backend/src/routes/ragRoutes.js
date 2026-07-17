@@ -63,6 +63,38 @@ const upload = multer({ storage: multer.memoryStorage() });
 //   source          — legacy single-file focus by file name
 const MAX_HISTORY_MESSAGES = 20;
 
+// Thread title from the first question: strip greeting/politeness lead-ins
+// ("hey, can you please show me the total revenue" → "Total revenue"), then
+// cap at a word boundary. Deterministic — no LLM call on every new thread —
+// but reads like a summary in the history list instead of a chat transcript.
+function makeConversationTitle(message) {
+  let t = String(message || "").replace(/\s+/g, " ").trim();
+  const fillers = [
+    /^(?:hi|hii+|hello|hey|yo|ok(?:ay)?|so|well|please|kindly)[,!.\s]+/i,
+    /^(?:can|could|would|will)\s+you\s+(?:please\s+)?/i,
+    /^please\s+/i,
+    /^(?:help\s+me\s+(?:to\s+)?|i\s+(?:want|need|would\s+like)\s+(?:you\s+)?to\s+|tell\s+me\s+|show\s+me\s+|give\s+me\s+)/i,
+  ];
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const re of fillers) {
+      const next = t.replace(re, "");
+      if (next !== t) {
+        t = next;
+        changed = true;
+      }
+    }
+  }
+  t = t.replace(/[?!.\s]+$/, "");
+  if (!t) t = String(message || "").trim(); // stripped everything → keep original
+  t = t.charAt(0).toUpperCase() + t.slice(1);
+  if (t.length > 60) {
+    const cut = t.lastIndexOf(" ", 60);
+    t = `${t.slice(0, cut > 30 ? cut : 60)}…`;
+  }
+  return t;
+}
+
 // Reduce a chronological message list to well-formed user→assistant exchanges.
 // A turn whose answer never got saved (the LLM/RAG call failed, or persisting the
 // answer hiccuped) leaves the question behind as a dangling USER message. Feeding
@@ -176,7 +208,7 @@ router.post("/chat", requireAuth, requirePermission("USE_AI_ASSISTANT"), async (
       convo = await findConversation(conversation_id, req.user.id, orgId);
       if (!convo) return res.status(404).json({ message: "Conversation not found." });
     } else {
-      convo = await createConversation(orgId, req.user.id, message.slice(0, 80));
+      convo = await createConversation(orgId, req.user.id, makeConversationTitle(message));
     }
     const priorMessages = (await listMessages(convo.id))
       .filter((m) => m.sender_type === "USER" || m.sender_type === "AI")
