@@ -854,6 +854,16 @@ async def run_visualization(
     document_id: str | None = None,
 ) -> dict:
     # File parsing is blocking I/O + pandas — keep it off the event loop.
+    # Named-series requests are computed deterministically from the parsed
+    # table (exact columns and values); everything else goes to the LLM.
+    df = await asyncio.to_thread(load_dataframe, source or "", document_id, organization_id)
+    if df is not None and not df.empty:
+        spec = await asyncio.to_thread(
+            compute_series_chart, instruction, df.to_dict("records")
+        )
+        if spec is not None:
+            spec["source"] = source or "document"
+            return spec
     dataset, is_tabular = await asyncio.to_thread(
         build_source_context, source, document_id, organization_id
     )
@@ -976,6 +986,172 @@ def compute_tabular_aggregation(message, rows) -> dict | None:
     return {"func": func, "group_col": group_col, "metric_cols": metric_cols, "rows": out_rows}
 
 
+def _requested_chart_type(message, n_series, default="bar") -> str:
+    """The chart type the user asked for; `default` when unstated. Pie only
+    fits a single series."""
+    q = message.lower()
+    if "line" in q or "trend" in q:
+        return "line"
+    if "area" in q:
+        return "area"
+    if ("pie" in q or "doughnut" in q or "donut" in q) and n_series == 1:
+        return "pie"
+    if "scatter" in q:
+        return "scatter"
+    return default
+
+
+_NORM_PHRASE_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _norm_phrase(s) -> str:
+    return _NORM_PHRASE_RE.sub(" ", str(s).lower()).strip()
+
+
+def _year_range_from_message(message) -> tuple[int | None, int | None]:
+    """(min_year, max_year) filters implied by the message, e.g. 'from 2024
+    onwards' -> (2024, None), '2024 to 2026' -> (2024, 2026). (None, None) when
+    no years are named."""
+    years = [int(y) for y in re.findall(r"\b((?:19|20)\d{2})\b", message)]
+    if not years:
+        return None, None
+    if len(years) >= 2:
+        return min(years), max(years)
+    y = years[0]
+    q = message.lower()
+    if re.search(r"\b(until|till|up to|through|before)\b", q):
+        return None, y
+    # "from 2024", "2024 onwards", "since 2024", "after 2024" — or a bare year,
+    # where 'from that year' is the only sensible single-year reading.
+    return y, None
+
+
+def compute_series_chart(message, rows) -> dict | None:
+    """Deterministic chart when the user NAMES the columns to plot over time
+    ("line graph of licensing fees vs advertising revenue from 2024 onwards").
+
+    The LLM path transcribes numbers out of a CSV dump and reliably confuses
+    similar column names ("Advertising revenue" vs "Revenue Generated") — so
+    when every requested series can be resolved to a real column by exact
+    phrase match, the chart is computed in pandas instead: right columns,
+    exact values, every period. Returns a chart spec, or None to fall through
+    to the LLM (no period column, or no column named in the message)."""
+    if not rows:
+        return None
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return None
+    period_fn, period_cols = _build_period_extractor(df)
+    if period_fn is None:
+        return None
+
+    # Which columns does the message name? Exact normalized-phrase match,
+    # longest column names first, consuming each matched span so a shorter
+    # column name can never re-match inside a longer one already claimed
+    # ("Advertising revenue" consumes its span; a column named "Revenue"
+    # can't then match the word 'revenue' inside it).
+    msg = f" {_norm_phrase(message)} "
+    candidates = [c for c in df.columns if c not in period_cols]
+    matched: list = []
+    for c in sorted(candidates, key=lambda c: -len(_norm_phrase(c))):
+        cn = _norm_phrase(c)
+        if len(cn) < 3:
+            continue
+        idx = msg.find(f" {cn} ")
+        if idx < 0:
+            continue
+        matched.append(c)
+        msg = msg[: idx + 1] + " " * len(cn) + msg[idx + 1 + len(cn):]
+    # Keep the table's column order; drop non-numeric matches (e.g. "employees"
+    # naming a text column). Judge numeric-ness over the rows where the column
+    # is PRESENT — `rows` may concatenate several tables with different schemas,
+    # so a column from one small table is null everywhere else and a whole-frame
+    # ratio would wrongly reject it.
+    series_cols = []
+    for c in df.columns:
+        if c not in matched:
+            continue
+        present = df[c].dropna()
+        if not present.empty and _to_numeric(present).notna().mean() >= 0.5:
+            series_cols.append(c)
+    if not series_cols:
+        return None
+
+    periods = df.apply(period_fn, axis=1)
+    keep = periods.notna()
+    df, periods = df[keep], periods[keep]
+    if df.empty:
+        return None
+
+    y_min, y_max = _year_range_from_message(message)
+    if y_min is not None or y_max is not None:
+        def in_range(p):
+            m = re.match(r"(\d{4})", str(p))
+            if not m:
+                return False
+            y = int(m.group(1))
+            return (y_min is None or y >= y_min) and (y_max is None or y <= y_max)
+        keep = periods.map(in_range)
+        df, periods = df[keep], periods[keep]
+        if df.empty:
+            return None
+
+    work = pd.DataFrame({"__period": periods})
+    for c in series_cols:
+        work[c] = _to_numeric(df[c]).values
+    grouped = work.groupby("__period").sum(min_count=1).sort_index()
+
+    labels = [str(p).replace("-", " ") for p in grouped.index]
+    datasets = []
+    for c in series_cols:
+        datasets.append({
+            "label": str(c),
+            "data": [None if pd.isna(v) else round(float(v), 2) for v in grouped[c]],
+        })
+    return {
+        "chart_type": _requested_chart_type(message, len(series_cols), default="line"),
+        "title": ", ".join(str(c) for c in series_cols) + " over time",
+        "labels": labels,
+        "datasets": datasets,
+        "notes": (
+            f"Computed exactly from the table: {', '.join(str(c) for c in series_cols)} "
+            f"per period over {len(labels)} periods."
+        ),
+        "source": "",
+        "is_tabular": True,
+    }
+
+
+def run_series_chart_supabase(message, organization_id, document_ids, focus_document_id) -> dict | None:
+    """Deterministic named-series chart over the relevant docs' stored tables.
+    Returns ChatResponse kwargs (answer/sources/chart), or None to fall through
+    to the LLM viz path."""
+    if focus_document_id:
+        ids = [focus_document_id]
+    elif document_ids:
+        ids = list(document_ids)
+    else:
+        return None
+    all_rows, per_table = [], []
+    for t in store.tables_for_documents(ids):
+        trows = (t.get("table_data") or {}).get("rows") or []
+        if trows:
+            all_rows.extend(trows)
+            per_table.append((t.get("document_id"), trows))
+    spec = compute_series_chart(message, all_rows)
+    if spec is None:
+        return None
+    # Cite only the documents whose tables actually CONTAIN a plotted column —
+    # `ids` may span every accessible document.
+    plotted = {d["label"] for d in spec["datasets"]}
+    used = []
+    for doc_id, trows in per_table:
+        if doc_id not in used and any(col in trows[0] for col in plotted):
+            used.append(doc_id)
+    sources = store.file_names_for_documents(used)
+    return {"answer": spec["notes"], "sources": sources, "chart": spec}
+
+
 def run_aggregation_supabase(message, organization_id, document_ids, focus_document_id, want_chart) -> dict | None:
     """Deterministic groupby answer over the relevant docs' stored tables.
     Returns ChatResponse kwargs (answer/sources/chart), or None to fall through."""
@@ -1002,19 +1178,7 @@ def run_aggregation_supabase(message, organization_id, document_ids, focus_docum
     note = f"{label.title()} of {', '.join(mcols)} by {gcol}, computed exactly over {len(all_rows)} rows."
 
     if want_chart:
-        # Honor the chart type the user asked for; bar is the safe default for a
-        # per-category aggregate. Pie only fits a single series.
-        q = message.lower()
-        if "line" in q or "trend" in q:
-            chart_type = "line"
-        elif "area" in q:
-            chart_type = "area"
-        elif ("pie" in q or "doughnut" in q or "donut" in q) and len(mcols) == 1:
-            chart_type = "pie"
-        elif "scatter" in q:
-            chart_type = "scatter"
-        else:
-            chart_type = "bar"
+        chart_type = _requested_chart_type(message, len(mcols), default="bar")
         spec = {
             "chart_type": chart_type,
             "title": f"{label.title()} {', '.join(mcols)} by {gcol}",
@@ -1961,6 +2125,21 @@ async def chat(req: ChatRequest):
 
         # Chart/table from the accessible/focused documents.
         if wants_chart(req.message) or wants_table(req.message):
+            # When the user NAMES the series ("licensing fees vs advertising
+            # revenue ... from 2024"), build the chart deterministically from
+            # the stored table — the LLM path transcribes numbers from a CSV
+            # dump and reliably picks look-alike columns ("Revenue Generated"
+            # for "advertising revenue"). Falls through when no named column
+            # or period structure is found.
+            series = await asyncio.to_thread(
+                run_series_chart_supabase,
+                req.message, req.organization_id, req.document_ids, req.focus_document_id,
+            )
+            if series is not None:
+                sources = [] if references_prior_output(req.message) else series["sources"]
+                return ChatResponse(
+                    answer=series["answer"], sources=sources, doc_count=n_docs, chart=series["chart"]
+                )
             try:
                 spec, source_files = await run_visualization_supabase(
                     req.message, req.organization_id, req.document_ids, req.focus_document_id
