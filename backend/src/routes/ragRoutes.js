@@ -42,6 +42,7 @@ const { canRead, sendBuffer } = require("../services/documentDownload");
 const {
   createConversation,
   findConversation,
+  setConversationDocumentIds,
   listMessages,
   addMessage,
   deleteMessage,
@@ -253,6 +254,14 @@ router.post("/chat", requireAuth, requirePermission("USE_AI_ASSISTANT"), async (
     }
 
     answered = true; // an answer was produced; keep the question in the thread
+
+    // Anchor the thread's document scope on its first explicitly-scoped answer
+    // (user's drawer pick or the preview's auto-match). Follow-up turns reuse
+    // this scope client-side, so the conversation stays about the same docs.
+    // Only-sets-when-NULL semantics live in the model; best-effort on purpose.
+    if (selected && documentIds.length > 0) {
+      setConversationDocumentIds(convo.id, documentIds).catch(() => {});
+    }
 
     // Persist the AI answer (the question was already saved above). Best-effort:
     // a storage hiccup must not eat the answer.

@@ -63,6 +63,11 @@ function AIAssistant() {
   const [showDocs, setShowDocs] = useState(false);
   // Docs the user picked for the AI to answer from (empty = search everything).
   const [selectedDocIds, setSelectedDocIds] = useState([]);
+  // The thread's established document scope (persisted on ai_conversations).
+  // Once the first answer is grounded on specific docs, follow-ups stay scoped
+  // to them — a normal conversation doesn't change subject mid-thread. Manual
+  // drawer picks (selectedDocIds) always take precedence over this.
+  const [conversationDocIds, setConversationDocIds] = useState([]);
   // Persisted chat threads (Phase 3).
   const [conversationId, setConversationId] = useState(null);
   const [conversations, setConversations] = useState([]);
@@ -158,6 +163,7 @@ function AIAssistant() {
         );
       setMessages([GREETING, ...mapped]);
       setConversationId(id);
+      setConversationDocIds(data.conversation?.document_ids || []);
       localStorage.setItem(ACTIVE_CONVO_KEY, id);
       setShowHistory(false);
     } catch (err) {
@@ -187,6 +193,7 @@ function AIAssistant() {
 
   function newChat() {
     setConversationId(null);
+    setConversationDocIds([]);
     setMessages([GREETING]);
     setShowHistory(false);
     localStorage.removeItem(ACTIVE_CONVO_KEY);
@@ -212,6 +219,7 @@ function AIAssistant() {
       }
       setDocList((prev) => prev.filter((x) => x.id !== d.id));
       setSelectedDocIds((prev) => prev.filter((id) => id !== d.id));
+      setConversationDocIds((prev) => prev.filter((id) => id !== d.id));
       notify(`Removed "${d.file_name}" from the AI, database, and dashboard.`);
     } catch (err) {
       notify(err.message, "error");
@@ -243,6 +251,16 @@ function AIAssistant() {
     // these requests skip narrowing and use everything the user can access.
     if (wantsAggregate(text)) {
       await askAI(text, undefined);
+      return;
+    }
+
+    // Follow-up in a thread that already has an established document scope:
+    // keep talking about the same docs instead of re-guessing per message.
+    // Without this, "compare it to Q3" could silently re-match a different
+    // document mid-conversation. Aggregate requests were already sent broad
+    // above; manual drawer picks (the first guard) always win over this.
+    if (conversationId && conversationDocIds.length > 0) {
+      await askAI(text, conversationDocIds);
       return;
     }
 
@@ -332,6 +350,11 @@ function AIAssistant() {
       // Remember the open thread so navigating away and back reopens it.
       if (data.conversation_id) {
         localStorage.setItem(ACTIVE_CONVO_KEY, data.conversation_id);
+      }
+      // A scoped answer anchors the thread to its documents (the backend
+      // persists the same set on ai_conversations) — follow-ups reuse it.
+      if (documentIds?.length && conversationDocIds.length === 0) {
+        setConversationDocIds(documentIds);
       }
       setMessages((prev) => [
         ...prev,
@@ -841,23 +864,42 @@ function AIAssistant() {
           </div>
         </div>
 
-        {/* Selected-documents banner — confirms which docs answers will use */}
-        {selectedDocIds.length > 0 && (
+        {/* Scope banner — confirms which docs answers will use. Manual drawer
+            picks win; otherwise the thread's established conversation scope. */}
+        {(selectedDocIds.length > 0 || conversationDocIds.length > 0) && (
           <div className="focus-banner">
             <span>
-              🎯 Answering from{" "}
+              🎯 {selectedDocIds.length > 0 ? "Answering from" : "Conversation about"}{" "}
               <strong>
-                {docList
-                  .filter((d) => selectedDocIds.includes(d.id))
-                  .map((d) => d.file_name)
-                  .join(", ") || `${selectedDocIds.length} selected document(s)`}
+                {(() => {
+                  const ids = selectedDocIds.length > 0 ? selectedDocIds : conversationDocIds;
+                  return (
+                    docList
+                      .filter((d) => ids.includes(d.id))
+                      .map((d) => d.file_name)
+                      .join(", ") || `${ids.length} document(s)`
+                  );
+                })()}
               </strong>
             </span>
+            {selectedDocIds.length === 0 && (
+              <button
+                type="button"
+                className="focus-clear"
+                onClick={() => setShowDocs(true)}
+                title="Pick different documents for this conversation"
+              >
+                Change
+              </button>
+            )}
             <button
               type="button"
               className="focus-clear"
-              onClick={() => setSelectedDocIds([])}
-              title="Clear selection (search all documents)"
+              onClick={() => {
+                setSelectedDocIds([]);
+                setConversationDocIds([]);
+              }}
+              title="Clear scope (search all documents)"
             >
               ✕ Clear
             </button>
