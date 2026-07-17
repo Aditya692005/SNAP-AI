@@ -32,6 +32,7 @@ const {
 const {
   documentKey,
   generatedKey,
+  inferMimeType,
   putObject,
   getObject,
   removeObjects,
@@ -383,6 +384,11 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
     const orgId = req.user.organization_id;
     const filename = req.file.originalname;
     const overwrite = req.body?.overwrite === "true";
+    // Clients don't reliably send a real content type (curl and some browsers say
+    // octet-stream for everything); resolve it from the extension once and use it
+    // everywhere below — the bucket may enforce a MIME whitelist, and downloads
+    // echo this value back as the response Content-Type.
+    const mimeType = inferMimeType(filename, req.file.mimetype);
 
     // 0) Content-hash dedup: identical file BYTES already in this org under a
     //    DIFFERENT name → refuse, so the same data can't be double-counted. A
@@ -431,7 +437,7 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
     //    overwrites in place instead of stacking a second copy.
     const documentId = existing ? existing.id : crypto.randomUUID();
     const storagePath = documentKey(orgId, documentId, filename);
-    await putObject(storagePath, req.file.buffer, req.file.mimetype);
+    await putObject(storagePath, req.file.buffer, mimeType);
 
     // 3) Register (or reset) the document row.
     let doc = existing;
@@ -439,7 +445,7 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
       // Reuse the row: the RAG service clears this document_id's old chunks/tables
       // before re-indexing, so the content is replaced in place.
       await resetDocumentForReupload(existing.id, {
-        mimeType: req.file.mimetype,
+        mimeType,
         fileSize: req.file.size,
         contentHash,
         storagePath,
@@ -449,7 +455,7 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
         id: documentId,
         fileName: filename,
         storagePath,
-        mimeType: req.file.mimetype,
+        mimeType,
         fileSize: req.file.size,
         contentHash,
       });
@@ -462,7 +468,7 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
     //    (PROCESSING → PROCESSED/FAILED); poll GET /api/rag/index-status/:documentId
     //    or the documents list to see it land.
     const form = new FormData();
-    form.append("file", req.file.buffer, { filename, contentType: req.file.mimetype });
+    form.append("file", req.file.buffer, { filename, contentType: mimeType });
     form.append("document_id", doc.id);
     form.append("organization_id", orgId);
 
