@@ -182,7 +182,10 @@ function Dashboard() {
   const [deptMetricError, setDeptMetricError] = useState(null);
   const [trashOpen, setTrashOpen] = useState(false);
   const [trash, setTrash] = useState([]); // archived widgets
-  const [updatesOpen, setUpdatesOpen] = useState(true); // Updates side column
+  // Updates side column — closed by default, and the user's last choice sticks.
+  const [updatesOpen, setUpdatesOpen] = useState(
+    () => localStorage.getItem("dashboardUpdatesOpen") === "1"
+  );
   const [toast, setToast] = useState(null); // { widgets:[...], } auto-added notice
 
   // Department dashboards: shared boards scoped to a department. The server
@@ -1458,7 +1461,12 @@ function Dashboard() {
             <button
               type="button"
               className="updates-toggle"
-              onClick={() => setUpdatesOpen((v) => !v)}
+              onClick={() =>
+                setUpdatesOpen((v) => {
+                  localStorage.setItem("dashboardUpdatesOpen", v ? "0" : "1");
+                  return !v;
+                })
+              }
               aria-label={updatesOpen ? "Collapse updates" : "Expand updates"}
               title={updatesOpen ? "Collapse updates" : "Expand updates"}
             >

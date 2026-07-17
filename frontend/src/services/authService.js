@@ -494,6 +494,12 @@ export const documentService = {
   },
   // The document's original bytes as a Blob — powers the in-app preview and its
   // download button. The backend enforces access (own uploads + shared docs).
+  //
+  // Read via arrayBuffer() and wrap in a Blob ourselves: response.blob() routes
+  // through Chrome's browser-process blob registry, which flakily rejects larger
+  // cross-origin responses ("Failed to fetch" AFTER the full body has arrived —
+  // reproduced at 11 MB while streaming the same response succeeded). A Blob
+  // built from renderer memory sidesteps that path entirely.
   async downloadBlob(documentId) {
     const res = await fetch(
       `${API_BASE_URL}/api/documents/${documentId}/download`,
@@ -503,7 +509,10 @@ export const documentService = {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.message || "Could not load the document");
     }
-    return res.blob();
+    const buf = await res.arrayBuffer();
+    return new Blob([buf], {
+      type: res.headers.get("content-type") || "application/octet-stream",
+    });
   },
 };
 
