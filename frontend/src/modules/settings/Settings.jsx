@@ -7,7 +7,7 @@ import { passwordProblems } from "../../utils/password";
 import { initials, roleLabel } from "../../utils/user";
 import "./Settings.css";
 
-const TABS = ["profile", "appearance", "security"];
+const TABS = ["profile", "organization", "appearance", "security"];
 
 const THEME_OPTIONS = [
   { value: "system", icon: "🖥️", label: "System", hint: "Follow your OS setting" },
@@ -27,7 +27,10 @@ function Settings() {
   // link straight to /settings?tab=security. Sidebar highlights on pathname alone,
   // so the query string doesn't disturb it.
   const [params, setParams] = useSearchParams();
-  const tab = TABS.includes(params.get("tab")) ? params.get("tab") : "profile";
+  const rawTab = params.get("tab");
+  const isOrgAdminRaw = authService.getUser()?.role === "org_admin";
+  const allowedTabs = TABS.filter((t) => t !== "organization" || isOrgAdminRaw);
+  const tab = allowedTabs.includes(rawTab) ? rawTab : "profile";
   const setTab = (next) => setParams(next === "profile" ? {} : { tab: next }, { replace: true });
 
   const [user, setUser] = useState(authService.getUser());
@@ -42,11 +45,17 @@ function Settings() {
   // Appearance tab
   const [themePref, setThemePref] = useState(getThemePreference());
 
+  // Organization tab (org_admin only)
+  const [orgName, setOrgName] = useState("");
+  const [orgBio, setOrgBio] = useState("");
+  const [savingOrg, setSavingOrg] = useState(false);
+
   // Security tab
   const [pw, setPw] = useState({ current: "", next: "", confirm: "" });
   const [savingPw, setSavingPw] = useState(false);
 
   const pwProblems = passwordProblems(pw.next);
+  const isOrgAdmin = user?.role === "org_admin";
 
   // The cached user is a login-time snapshot: an admin may since have moved the
   // user's department or role. Re-fetch so the profile shows the truth.
@@ -59,8 +68,13 @@ function Settings() {
     });
     organizationService
       .get()
-      .then((o) => alive && setOrg(o))
-      .catch(() => {}); // org name is decoration; a failure shouldn't break the page
+      .then((o) => {
+        if (!alive) return;
+        setOrg(o);
+        setOrgName(o?.name || "");
+        setOrgBio(o?.description || "");
+      })
+      .catch(() => {});
     return () => {
       alive = false;
     };
@@ -89,6 +103,28 @@ function Settings() {
       setError(err.message);
     } finally {
       setSavingName(false);
+    }
+  }
+
+  async function saveOrg(e) {
+    e.preventDefault();
+    setError("");
+    const trimmedName = orgName.trim();
+    if (!trimmedName) return setError("Organization name cannot be empty.");
+    setSavingOrg(true);
+    try {
+      const updated = await organizationService.update({
+        name: trimmedName,
+        description: orgBio.trim() || null,
+      });
+      setOrg(updated);
+      setOrgName(updated.name || "");
+      setOrgBio(updated.description || "");
+      setNotice("Organization updated");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSavingOrg(false);
     }
   }
 
@@ -136,6 +172,14 @@ function Settings() {
             <button className={tab === "profile" ? "active" : ""} onClick={() => setTab("profile")}>
               Profile
             </button>
+            {isOrgAdmin && (
+              <button
+                className={tab === "organization" ? "active" : ""}
+                onClick={() => setTab("organization")}
+              >
+                Organization
+              </button>
+            )}
             <button className={tab === "appearance" ? "active" : ""} onClick={() => setTab("appearance")}>
               Appearance
             </button>
@@ -227,6 +271,51 @@ function Settings() {
             <p className="settings-hint">
               Your role and department are set by a company admin. Ask them if either looks wrong.
             </p>
+          </div>
+        )}
+
+        {/* ── ORGANIZATION (org_admin only) ─────────────────────── */}
+        {tab === "organization" && isOrgAdmin && (
+          <div className="settings-panel">
+            <h2 className="settings-panel-title">Organization profile</h2>
+            <p className="settings-hint">
+              This information is visible across your workspace. Only admins can change it.
+            </p>
+            <form className="settings-form" onSubmit={saveOrg}>
+              <label htmlFor="org-name">Company name</label>
+              <input
+                id="org-name"
+                type="text"
+                value={orgName}
+                maxLength={255}
+                onChange={(e) => {
+                  setOrgName(e.target.value);
+                  setError("");
+                }}
+                disabled={savingOrg}
+                placeholder="Your company name"
+              />
+
+              <label htmlFor="org-bio">Bio / description</label>
+              <textarea
+                id="org-bio"
+                value={orgBio}
+                maxLength={1000}
+                rows={4}
+                onChange={(e) => {
+                  setOrgBio(e.target.value);
+                  setError("");
+                }}
+                disabled={savingOrg}
+                placeholder="A short description of what your organization does…"
+                className="settings-textarea"
+              />
+              <p className="settings-hint">{orgBio.length}/1000 characters</p>
+
+              <button type="submit" className="settings-save" disabled={savingOrg}>
+                {savingOrg ? "Saving…" : "Save changes"}
+              </button>
+            </form>
           </div>
         )}
 

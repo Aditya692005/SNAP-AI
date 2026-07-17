@@ -114,7 +114,7 @@ function AIAssistant() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Show the scope banner for 15s whenever the active scope changes, then hide
+  // Show the scope banner for 8s whenever the active scope changes, then hide
   // it (the scope stays in force — the banner is just the announcement).
   const activeScopeKey = (selectedDocIds.length > 0 ? selectedDocIds : conversationDocIds).join(",");
   useEffect(() => {
@@ -123,7 +123,7 @@ function AIAssistant() {
       return;
     }
     setBannerVisible(true);
-    const t = setTimeout(() => setBannerVisible(false), 15000);
+    const t = setTimeout(() => setBannerVisible(false), 8000);
     return () => clearTimeout(t);
   }, [activeScopeKey]);
 
@@ -938,7 +938,7 @@ function AIAssistant() {
 
         {/* Scope banner — confirms which docs answers will use. Manual drawer
             picks win; otherwise the thread's established conversation scope.
-            Auto-hides after 15s (countdown line below); ✕ dismisses early. */}
+            Auto-hides after 8s (countdown line below); ✕ dismisses early. */}
         {bannerVisible && (selectedDocIds.length > 0 || conversationDocIds.length > 0) && (
           <div className="focus-banner" key={activeScopeKey}>
             <span>

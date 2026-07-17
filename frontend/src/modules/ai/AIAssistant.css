@@ -193,7 +193,7 @@
   color: #ffffff;
 }
 
-/* Countdown line along the banner's bottom edge — shrinks over the 15s the
+/* Countdown line along the banner's bottom edge — shrinks over the 8s the
    banner stays up, so the auto-dismiss is visible rather than surprising. */
 .focus-banner {
   position: relative;
@@ -208,7 +208,7 @@
   width: 100%;
   background: #8b8ef5;
   transform-origin: left;
-  animation: focus-banner-countdown 15s linear forwards;
+  animation: focus-banner-countdown 8s linear forwards;
 }
 
 @keyframes focus-banner-countdown {
