@@ -67,10 +67,26 @@ function canEditDepartmentBoard(user, board) {
   );
 }
 
+// ── Organization dashboard ────────────────────────────────────────────────────
+// A single org-wide board (there's one per organization). Flat scope — no subtree
+// logic. VIEW is granted to org admins + VIEW_ORGANIZATION_DASHBOARD holders
+// (managers by default); EDIT to org admins + MANAGE_ORGANIZATION_DASHBOARD
+// holders (admins by default). The board is always the caller's own organization,
+// so there's no cross-org target to check here.
+function canViewOrganizationBoard(user) {
+  return isAdmin(user) || hasPerm(user, "VIEW_ORGANIZATION_DASHBOARD");
+}
+
+function canEditOrganizationBoard(user) {
+  return isAdmin(user) || hasPerm(user, "MANAGE_ORGANIZATION_DASHBOARD");
+}
+
 module.exports = {
   isAdmin,
   hasPerm,
   viewableDepartmentIds,
   canViewDepartmentBoard,
   canEditDepartmentBoard,
+  canViewOrganizationBoard,
+  canEditOrganizationBoard,
 };

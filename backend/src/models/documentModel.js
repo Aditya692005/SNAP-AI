@@ -7,7 +7,11 @@
 const supabase = require("../../supabase/supabase");
 const { departmentSubtreeIds } = require("./departmentModel");
 
-async function createDocument(organizationId, userId, { title, fileName, storagePath, mimeType, fileSize, contentHash }) {
+// `id` is supplied by the caller, not defaulted by Postgres. The Storage key embeds the
+// document id, and the caller needs that key BEFORE the row exists (it uploads the bytes
+// first, so a failed upload never leaves a row pointing at nothing). `id` is a plain uuid
+// column with a gen_random_uuid() default, so passing crypto.randomUUID() is equivalent.
+async function createDocument(organizationId, userId, { id, title, fileName, storagePath, mimeType, fileSize, contentHash }) {
   const row = {
     organization_id: organizationId,
     uploaded_by_user_id: userId,
@@ -18,6 +22,7 @@ async function createDocument(organizationId, userId, { title, fileName, storage
     file_size: fileSize ?? null,
     status: "PROCESSING",
   };
+  if (id) row.id = id;
   if (contentHash) row.content_hash = contentHash;
 
   let { data, error } = await supabase
@@ -63,7 +68,7 @@ async function setDocumentStatus(id, status) {
 // PROCESSING with the new file's size/type, and bump `version` so re-indexed
 // chunks are tagged as a new version. The id is kept so the RAG service's
 // per-document cleanup replaces the old chunks/tables instead of duplicating.
-async function resetDocumentForReupload(id, { mimeType, fileSize, contentHash }) {
+async function resetDocumentForReupload(id, { mimeType, fileSize, contentHash, storagePath }) {
   // Bump version (read-then-write; best effort if the column isn't deployed).
   let nextVersion = null;
   try {
@@ -78,6 +83,10 @@ async function resetDocumentForReupload(id, { mimeType, fileSize, contentHash })
     mime_type: mimeType ?? null,
     file_size: fileSize ?? null,
   };
+  // The key is derived from the document id, so it doesn't change on re-upload — but
+  // writing it back lets rows created before Storage existed (storage_path was a fake
+  // `uploads/<name>`) heal themselves the next time the file is uploaded.
+  if (storagePath) update.storage_path = storagePath;
   if (contentHash) update.content_hash = contentHash;
   if (nextVersion != null) update.version = nextVersion;
 
@@ -94,7 +103,7 @@ async function resetDocumentForReupload(id, { mimeType, fileSize, contentHash })
 async function findDocumentById(id) {
   const { data, error } = await supabase
     .from("documents")
-    .select("id, organization_id, file_name, uploaded_by_user_id, title, status, created_at")
+    .select("id, organization_id, file_name, storage_path, mime_type, uploaded_by_user_id, title, status, created_at")
     .eq("id", id)
     .single();
   if (error) return null;
@@ -106,7 +115,7 @@ async function findDocumentById(id) {
 async function findByFileName(organizationId, fileName) {
   const { data, error } = await supabase
     .from("documents")
-    .select("id, file_name, uploaded_by_user_id")
+    .select("id, file_name, storage_path, mime_type, uploaded_by_user_id")
     .eq("organization_id", organizationId)
     .eq("file_name", fileName)
     .order("created_at", { ascending: false })
@@ -195,6 +204,17 @@ async function documentIdsForDepartment(departmentId) {
     .or(notExpired);
   if (error) throw error;
   return [...new Set((data || []).map((a) => a.document_id))];
+}
+
+// Every document id in an organization — scopes the org-wide dashboard's metric
+// aggregation to all of the org's documents, regardless of uploader or sharing.
+async function documentIdsForOrganization(organizationId) {
+  const { data, error } = await supabase
+    .from("documents")
+    .select("id")
+    .eq("organization_id", organizationId);
+  if (error) throw error;
+  return [...new Set((data || []).map((d) => d.id))];
 }
 
 async function accessibleDocumentIds(userId, organizationId, { subtreeDepartments = false } = {}) {
@@ -310,6 +330,19 @@ async function listUploadedFileNames(userId, organizationId) {
   return [...new Set((data || []).map((d) => d.file_name))];
 }
 
+// Storage keys of every document this user uploaded. Read BEFORE deleting the rows in
+// "Clear all documents" — once they're gone there's no way left to find their objects,
+// which would leave the bucket full of orphans.
+async function listStoragePathsForUser(userId, organizationId) {
+  const { data, error } = await supabase
+    .from("documents")
+    .select("storage_path")
+    .eq("organization_id", organizationId)
+    .eq("uploaded_by_user_id", userId);
+  if (error) throw error;
+  return (data || []).map((d) => d.storage_path).filter(Boolean);
+}
+
 async function listAccessibleDocuments(userId, organizationId, opts = {}) {
   const ids = await accessibleDocumentIds(userId, organizationId, opts);
   if (ids.length === 0) return [];
@@ -330,6 +363,7 @@ module.exports = {
   findByFileName,
   findByContentHash,
   documentIdsForDepartment,
+  documentIdsForOrganization,
   deleteDocument,
   deleteAllForUser,
   grantAccess,
@@ -339,4 +373,5 @@ module.exports = {
   listDocumentAccess,
   revokeAccess,
   listUploadedFileNames,
+  listStoragePathsForUser,
 };

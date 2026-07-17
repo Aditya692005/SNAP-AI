@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 import threading
 import time
 from collections import OrderedDict, deque
@@ -24,7 +25,7 @@ from fpdf import FPDF
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -36,6 +37,7 @@ from langchain_google_genai.chat_models import ChatGoogleGenerativeAIError
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+import storage as docstore
 import supabase_store as store
 from handlers import parse_file
 
@@ -49,41 +51,10 @@ if not GOOGLE_API_KEY:
 # code changes (each Gemini model has its own free-tier daily request limit).
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
-# ── Paths ──────────────────────────────────────────────────────────────────────
-UPLOAD_DIR = Path("./uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
-
-# Uploads are namespaced per organization (uploads/<org_id>/<filename>) so two
-# tenants uploading the same filename can never overwrite — or read — each
-# other's files. Files from before the namespacing live flat in uploads/;
-# resolve_source_path falls back to that legacy layout.
-_SAFE_SEGMENT_RE = re.compile(r"[^a-zA-Z0-9_-]")
-
-
-def org_dir(organization_id: str | None) -> Path:
-    safe = _SAFE_SEGMENT_RE.sub("", str(organization_id or ""))
-    if not safe:
-        return UPLOAD_DIR
-    d = UPLOAD_DIR / safe
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def resolve_source_path(source: str | None, organization_id: str | None) -> Path | None:
-    """Locate an uploaded/generated file: the org's directory first, then the
-    legacy flat layout. Never escapes UPLOAD_DIR; never looks in OTHER orgs'
-    directories. None if the file doesn't exist."""
-    safe_name = Path(source or "").name
-    if not safe_name:
-        return None
-    bases = [org_dir(organization_id)] if organization_id else []
-    bases.append(UPLOAD_DIR)
-    root = UPLOAD_DIR.resolve()
-    for base in bases:
-        p = (base / safe_name).resolve()
-        if root in p.parents and p.is_file():
-            return p
-    return None
+# ── Original files ─────────────────────────────────────────────────────────────
+# There is no uploads/ directory any more. Original document bytes live in Supabase
+# Storage; storage.py fetches them into a disposable local cache on demand. Anywhere
+# this file used to build `UPLOAD_DIR / source` it now calls docstore.resolve_source().
 
 # ── LangChain components ───────────────────────────────────────────────────────
 embeddings = HuggingFaceEmbeddings(
@@ -412,6 +383,10 @@ def _run_index_job(document_id: str, organization_id: str, path: Path, filename:
         store.set_document_status(document_id, "FAILED", error=exc)
         with _jobs_lock:
             job.update(status="failed", finished_at=time.time(), error=str(exc)[:500])
+    finally:
+        # The spool dir was created just for this job; the durable copy of the
+        # file lives in Supabase Storage.
+        shutil.rmtree(path.parent, ignore_errors=True)
 
 
 def _save_upload(fileobj, dest: Path) -> None:
@@ -425,10 +400,14 @@ async def index_endpoint(
     document_id: str = Form(...),
     organization_id: str = Form(...),
 ):
-    """Phase 2 ingestion. The backend creates the documents row (with org + user)
-    then posts the file here with its document_id. The file is saved and indexing
-    is queued; poll /index-status/{document_id} (or documents.status) for the
-    outcome."""
+    """Phase 2 ingestion. The backend creates the documents row (with org + user), puts
+    the original bytes in Supabase Storage, then posts them here with the document_id.
+    The bytes are spooled to a scratch file and indexing is queued; poll
+    /index-status/{document_id} (or documents.status) for the outcome.
+
+    The spool file is deleted once the job finishes — the durable copy is already in
+    the bucket, so keeping one here would just be a second, quietly diverging
+    original."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided.")
     safe_name = Path(file.filename).name
@@ -439,13 +418,18 @@ async def index_endpoint(
             detail=f"Unsupported type '{suffix}'. Allowed: {sorted(ALLOWED_EXTENSIONS)}",
         )
 
-    dest = org_dir(organization_id) / safe_name
+    # Spool to a scratch dir that OUTLIVES this request (the background job needs
+    # it); _run_index_job removes the whole dir when it finishes. Keep the real
+    # file name — some parsers dispatch on the extension.
+    spool = Path(tempfile.mkdtemp(prefix="rag-index-"))
+    dest = spool / safe_name
     await asyncio.to_thread(_save_upload, file.file, dest)
 
     with _jobs_lock:
         existing = _index_jobs.get(document_id)
         if existing and existing["status"] in ("queued", "processing"):
             # Same document already being indexed — don't stack a second job.
+            shutil.rmtree(spool, ignore_errors=True)
             return {**_job_public(existing), "status": "processing"}
         _index_jobs[document_id] = {
             "document_id": document_id,
@@ -610,14 +594,16 @@ def references_prior_output(question: str) -> bool:
 MAX_VIZ_CHARS = 60_000
 
 
-def load_dataframe(source: str, organization_id: str | None = None) -> "pd.DataFrame | None":
-    """Re-read the original uploaded file as a DataFrame (CSV / Excel only).
+def load_dataframe(
+    source: str, document_id: str | None = None, organization_id: str | None = None
+) -> "pd.DataFrame | None":
+    """Re-read the ORIGINAL uploaded file as a DataFrame (CSV / Excel only).
 
-    Charts need accurate numeric data, so for tabular files we parse the source
-    on disk rather than relying on the chunked/embedded text. Returns None for
-    non-tabular files or if parsing fails.
+    Charts need accurate numeric data, so for tabular files we re-parse the original
+    rather than relying on the chunked/embedded text. Returns None for non-tabular files
+    or if parsing fails.
     """
-    path = resolve_source_path(source, organization_id)
+    path = docstore.resolve_source(source, document_id, organization_id)
     if path is None:
         return None
     suffix = path.suffix.lower()
@@ -631,25 +617,28 @@ def load_dataframe(source: str, organization_id: str | None = None) -> "pd.DataF
     return None
 
 
-def build_source_context(source: str | None, organization_id: str | None = None) -> tuple[str, bool]:
-    """Disk-only context for a single uploaded file — used by dashboard metric
+def build_source_context(
+    source: str | None, document_id: str | None = None, organization_id: str | None = None
+) -> tuple[str, bool]:
+    """Context read from a single document's ORIGINAL file — used by dashboard metric
     extraction and the standalone /visualize and /generate-document endpoints.
     Tabular files -> CSV text; other types -> extracted text. No vector store."""
-    if not source:
+    if not source and not document_id:
         return "", False
-    df = load_dataframe(source, organization_id)
+    df = load_dataframe(source, document_id, organization_id)
     if df is not None:
         text = "TABULAR DATA (CSV, first rows):\n" + df.head(500).to_csv(index=False)
         return text[:MAX_VIZ_CHARS], True
-    path = resolve_source_path(source, organization_id)
-    if path is not None:
-        try:
-            parsed = parse_file(path)
-            text = "DOCUMENT TEXT:\n" + "\n\n".join(parsed.text_chunks)
-            return text[:MAX_VIZ_CHARS], False
-        except Exception:
-            return "", False
-    return "", False
+
+    path = docstore.resolve_source(source, document_id, organization_id)
+    if path is None:
+        return "", False
+    try:
+        parsed = parse_file(path)
+        text = "DOCUMENT TEXT:\n" + "\n\n".join(parsed.text_chunks)
+        return text[:MAX_VIZ_CHARS], False
+    except Exception:
+        return "", False
 
 
 VIZ_PROMPT = ChatPromptTemplate.from_messages([
@@ -846,9 +835,16 @@ async def _visualize_from_dataset(dataset: str, is_tabular: bool, instruction: s
     return spec
 
 
-async def run_visualization(source: str | None, instruction: str, organization_id: str | None = None) -> dict:
+async def run_visualization(
+    source: str | None,
+    instruction: str,
+    organization_id: str | None = None,
+    document_id: str | None = None,
+) -> dict:
     # File parsing is blocking I/O + pandas — keep it off the event loop.
-    dataset, is_tabular = await asyncio.to_thread(build_source_context, source, organization_id)
+    dataset, is_tabular = await asyncio.to_thread(
+        build_source_context, source, document_id, organization_id
+    )
     return await _visualize_from_dataset(dataset, is_tabular, instruction, source or "document")
 
 
@@ -1359,18 +1355,20 @@ EXTRACT_CHUNK_OVERLAP = 500
 MAX_EXTRACT_CHUNKS = 12
 
 
-def _full_source_text(source: str, organization_id: str | None = None) -> str:
+def _full_source_text(
+    source: str, document_id: str | None = None, organization_id: str | None = None
+) -> str:
     """Whole-document text for extraction — NOT capped at MAX_VIZ_CHARS."""
-    df = load_dataframe(source, organization_id)
+    df = load_dataframe(source, document_id, organization_id)
     if df is not None:
         return "TABULAR DATA (CSV):\n" + df.head(MAX_TABULAR_ROWS).to_csv(index=False)
-    path = resolve_source_path(source, organization_id)
-    if path is not None:
-        try:
-            return "DOCUMENT TEXT:\n" + "\n\n".join(parse_file(path).text_chunks)
-        except Exception:
-            return ""
-    return ""
+    path = docstore.resolve_source(source, document_id, organization_id)
+    if path is None:
+        return ""
+    try:
+        return "DOCUMENT TEXT:\n" + "\n\n".join(parse_file(path).text_chunks)
+    except Exception:
+        return ""
 
 
 def _split_for_extraction(text: str) -> list[str]:
@@ -1408,7 +1406,10 @@ async def _extract_chunk(text: str, system_text: str) -> list[dict]:
 
 
 async def extract_metrics(
-    source: str, custom_defs: list[dict] | None = None, organization_id: str | None = None
+    source: str,
+    custom_defs: list[dict] | None = None,
+    document_id: str | None = None,
+    organization_id: str | None = None,
 ) -> list[dict]:
     """Metric extraction from one uploaded document.
 
@@ -1417,14 +1418,14 @@ async def extract_metrics(
     by the LLM chunk-by-chunk over the WHOLE document and merged, so periods no
     longer fall past a truncation cap. `custom_defs` steer the LLM path and set
     the kind on the tabular path."""
-    df = await asyncio.to_thread(load_dataframe, source, organization_id)
+    df = await asyncio.to_thread(load_dataframe, source, document_id, organization_id)
     if df is not None:
         tabular = await asyncio.to_thread(extract_metrics_tabular, df, custom_defs)
         if tabular:
             return tabular
         # Couldn't structure the table → fall through to the LLM.
 
-    text = await asyncio.to_thread(_full_source_text, source, organization_id)
+    text = await asyncio.to_thread(_full_source_text, source, document_id, organization_id)
     if not text.strip():
         return []
     system_text = build_metrics_system(custom_defs)
@@ -1435,8 +1436,9 @@ async def extract_metrics(
 
 
 # ── Document generation helpers ──────────────────────────────────────────────
-# Generated reports (PDFs) are written into the org's uploads dir so the
-# /download endpoint can serve them and they can be re-indexed.
+# Generated reports go to Supabase Storage under `generated/<org>/`, like everything
+# else. They get their own prefix rather than a document's because they exist as a file
+# before any documents row does — one is created only if the user clicks "Add to AI".
 MAX_DOC_CONTEXT_CHARS = 80_000
 
 # Bundled Unicode font. fpdf2's core fonts (Helvetica) are Latin-1 only and choke
@@ -1533,7 +1535,7 @@ def build_doc_context_supabase(instruction: str, organization_id, document_ids, 
 
 
 async def _generate_doc_from_context(
-    context: str, instruction: str, source_label, organization_id: str | None = None
+    context: str, instruction: str, source_label, organization_id: str
 ) -> dict:
     if not context.strip():
         raise HTTPException(status_code=400, detail="No document content to work from.")
@@ -1543,19 +1545,35 @@ async def _generate_doc_from_context(
 
     title = extract_title(md_text)
     filename = f"{slugify(title)}-{datetime.now():%Y%m%d-%H%M%S}.pdf"
-    # Generated reports live in the org's uploads dir so /download and /ingest
-    # resolve them under the same tenant scoping as uploads.
-    out_path = (org_dir(organization_id) / filename).resolve()
-    try:
-        await asyncio.to_thread(markdown_to_pdf, md_text, out_path)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"PDF generation failed: {exc}")
+    # Build the PDF in a temp dir, then hand it to Storage. Nothing durable is written
+    # here — the backend serves the download straight out of the bucket. Both steps
+    # are blocking (fpdf + HTTP upload), so keep them off the event loop.
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = Path(tmp) / filename
+        try:
+            await asyncio.to_thread(markdown_to_pdf, md_text, out_path)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"PDF generation failed: {exc}")
+        try:
+            storage_path = await asyncio.to_thread(
+                docstore.put_generated, organization_id, filename, out_path
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Could not store the report: {exc}")
 
-    return {"filename": filename, "title": title, "markdown": md_text, "source": source_label}
+    return {
+        "filename": filename,
+        "storage_path": storage_path,
+        "title": title,
+        "markdown": md_text,
+        "source": source_label,
+    }
 
 
-async def run_document_generation(instruction: str, source: str | None, organization_id: str | None = None) -> dict:
-    context, _ = await asyncio.to_thread(build_source_context, source, organization_id)
+async def run_document_generation(instruction: str, source: str | None, organization_id: str) -> dict:
+    context, _ = await asyncio.to_thread(
+        build_source_context, source, None, organization_id
+    )
     return await _generate_doc_from_context(context, instruction, source, organization_id)
 
 
@@ -2037,16 +2055,20 @@ async def retrieve_preview(req: RetrievePreviewRequest):
 
 class VisualizeRequest(BaseModel):
     instruction: str
-    source: str | None = None  # which uploaded document to chart
-    organization_id: str | None = None  # tenant whose uploads dir holds `source`
+    source: str | None = None  # which uploaded document to chart, by file name
+    document_id: str | None = None  # preferred: unambiguous
+    # Required to resolve `source` safely — a file name is not unique across tenants.
+    organization_id: str | None = None
 
 
 @app.post("/visualize")
 async def visualize(req: VisualizeRequest):
-    if not req.source:
+    if not req.source and not req.document_id:
         raise HTTPException(status_code=400, detail="Select a document to chart.")
     try:
-        return await run_visualization(req.source, req.instruction, req.organization_id)
+        return await run_visualization(
+            req.source, req.instruction, req.organization_id, req.document_id
+        )
     except ChatGoogleGenerativeAIError as e:
         msg = str(e)
         if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
@@ -2062,15 +2084,18 @@ async def visualize(req: VisualizeRequest):
 
 
 class ExtractMetricsRequest(BaseModel):
-    source: str  # which uploaded document to extract dashboard metrics from
+    source: str  # which uploaded document to extract dashboard metrics from, by name
+    document_id: str | None = None  # preferred: unambiguous
+    organization_id: str | None = None  # needed only when resolving by `source`
     custom_metrics: list[dict] = []  # user-defined defs [{key,label,kind,description}]
-    organization_id: str | None = None  # tenant whose uploads dir holds `source`
 
 
 @app.post("/extract-metrics")
 async def extract_metrics_endpoint(req: ExtractMetricsRequest):
     try:
-        metrics = await extract_metrics(req.source, req.custom_metrics, req.organization_id)
+        metrics = await extract_metrics(
+            req.source, req.custom_metrics, req.document_id, req.organization_id
+        )
         return {"source": req.source, "metrics": metrics}
     except ChatGoogleGenerativeAIError as e:
         msg = str(e)
@@ -2089,7 +2114,7 @@ async def extract_metrics_endpoint(req: ExtractMetricsRequest):
 class GenerateDocRequest(BaseModel):
     instruction: str
     source: str | None = None  # which uploaded document to base the report on
-    organization_id: str | None = None  # tenant whose uploads dir holds `source`
+    organization_id: str  # whose bucket the report is written to, and whose docs are read
 
 
 @app.post("/generate-document")
@@ -2113,83 +2138,58 @@ async def generate_document(req: GenerateDocRequest):
 
 
 class IngestRequest(BaseModel):
-    filename: str  # a file already present in the uploads/generated directory
+    filename: str
     document_id: str
     organization_id: str
 
 
 @app.post("/ingest")
 def ingest_document(req: IngestRequest):
-    """Index a file already on disk (e.g. a generated report) into Supabase under
-    the given document_id, so the AI can answer questions about it. Synchronous
-    (files here are small, and the caller wants the chunk count) — but a sync
-    `def` endpoint, so FastAPI runs it on its threadpool, off the event loop.
-    Versioned re-index: old chunks are superseded only after the new ones land."""
-    safe_name = Path(req.filename).name
-    path = resolve_source_path(safe_name, req.organization_id)
+    """Index an existing document (e.g. an AI-generated report the user chose to "Add to
+    AI") into Supabase under the given document_id, so the AI can answer questions about
+    it. The backend has already created the row pointing at the bytes in Storage; we
+    resolve them by document_id. Synchronous (files here are small, and the caller wants
+    the chunk count) — but a sync `def` endpoint, so FastAPI runs it on its threadpool,
+    off the event loop. Versioned re-index: index_document supersedes the old chunks
+    only after the new ones land, so cited chunk ids stay resolvable."""
+    path = docstore.resolve_source(req.filename, document_id=req.document_id)
     if path is None:
-        raise HTTPException(status_code=404, detail=f"File '{safe_name}' not found")
+        raise HTTPException(status_code=404, detail=f"File '{req.filename}' not found")
     try:
-        result = index_document(req.document_id, req.organization_id, path, safe_name)
+        result = index_document(req.document_id, req.organization_id, path, req.filename)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-    return {"document_id": req.document_id, "filename": safe_name, **result}
+    return {"document_id": req.document_id, "filename": req.filename, **result}
+
+
+# ── Cache eviction ─────────────────────────────────────────────────────────────
+# These used to delete the only copy of a file. They no longer delete anything that
+# matters: the original lives in Supabase Storage and the documents row cascades to the
+# chunks/tables — both the backend's job. All that's left here is dropping our local
+# cached copy so we don't serve a stale one, and clearing in-memory chat history.
 
 
 @app.delete("/documents")
 def clear_documents(organization_id: str | None = None):
-    """Clear on-disk uploads/generated files + in-memory chat history. With an
-    organization_id, ONLY that org's directory is cleared. Legacy flat files
-    (pre-namespacing) are deliberately NOT touched by an org-scoped clear:
-    they can't be attributed to an org, so deleting them here would let one
-    tenant destroy another tenant's files — only the unscoped (admin) form
-    removes them. The Supabase chunks/tables are removed by the backend
-    (documents cascade)."""
+    """Drop the local file cache + in-memory chat history. The originals live in
+    Supabase Storage and the chunks/tables go with the documents row — both the
+    backend's job, so nothing durable is touched here. organization_id is
+    accepted for backward compatibility with callers but the cache is evicted
+    wholesale (it only ever holds copies)."""
     with _sessions_lock:
         session_histories.clear()
-    removed = 0
-
-    def _clear_dir(d: Path):
-        nonlocal removed
-        if not d.is_dir():
-            return
-        for path in d.iterdir():
-            if path.is_file():
-                try:
-                    path.unlink()
-                    removed += 1
-                except OSError:
-                    pass
-
-    if organization_id:
-        _clear_dir(org_dir(organization_id))
-    else:
-        _clear_dir(UPLOAD_DIR)
-        for sub in UPLOAD_DIR.iterdir():
-            if sub.is_dir():
-                _clear_dir(sub)
-    return {"status": "cleared", "files_removed": removed}
+    return {"status": "cleared", "files_removed": docstore.evict()}
 
 
 @app.delete("/documents/{filename}")
 def delete_document(filename: str, organization_id: str | None = None):
-    """Delete a single document's on-disk file (the org's dir, or the legacy
-    flat layout). Its Supabase chunks/tables are removed by the backend
-    (documents cascade)."""
+    """Drop any cached local copies of this file. The bucket object and the
+    documents row (cascading to chunks/tables) are removed by the backend."""
     safe_name = Path(filename).name
     if not safe_name:
         raise HTTPException(status_code=400, detail="Invalid filename.")
-
-    file_removed = False
-    path = resolve_source_path(safe_name, organization_id)
-    if path is not None:
-        try:
-            path.unlink()
-            file_removed = True
-        except OSError:
-            pass
-
-    return {"status": "deleted", "filename": safe_name, "file_removed": file_removed}
+    removed = docstore.evict(safe_name)
+    return {"status": "deleted", "filename": safe_name, "file_removed": removed > 0}
 
 
 @app.delete("/session/{session_id}")
@@ -2199,19 +2199,10 @@ def clear_session(session_id: str):
     return {"status": "cleared", "session_id": session_id}
 
 
-@app.get("/download/{filename}")
-def download_document(filename: str, organization_id: str | None = None):
-    # Resolved via the org's dir (then legacy flat layout); resolve_source_path
-    # rejects anything that escapes UPLOAD_DIR (path traversal).
-    safe_name = Path(filename).name
-    file_path = resolve_source_path(safe_name, organization_id)
-    if file_path is None:
-        raise HTTPException(status_code=404, detail=f"File '{safe_name}' not found")
-    return FileResponse(
-        path=str(file_path),
-        filename=safe_name,
-        media_type="application/octet-stream",
-    )
+# NOTE: there is no /download here any more. Serving a file needs to know WHO is asking —
+# this service has no auth context, which is exactly why the old endpoint would hand any
+# caller any file it held. Downloads are served by the backend, from Storage, behind an
+# access check: GET /api/documents/:id/download.
 
 
 @app.get("/metrics")

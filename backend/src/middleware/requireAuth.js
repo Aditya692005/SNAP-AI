@@ -46,14 +46,13 @@ async function requireAuth(req, res, next) {
     // moved user pinned to their old team's board.
     req.user.organization_id = req.user.organization_id ?? fresh.organization_id ?? null;
     req.user.department_id = fresh.department_id ?? null;
-
-    const roleChanged = req.user.role !== fresh.role;
     req.user.role = fresh.role ?? null;
-    // Recompute permissions only when we must (legacy tokens missing the array,
-    // or a role change) to avoid an extra query on every authenticated request.
-    if (!Array.isArray(req.user.permissions) || roleChanged) {
-      req.user.permissions = await getPermissionsForRole(fresh.role_id);
-    }
+    // Always recompute permissions from the DB rather than trusting the array
+    // embedded in the JWT at login. A token-role-name comparison used to skip
+    // this, but it missed two real cases: an admin EDITING a role's permission
+    // set, and a user moved between two roles that share a name (custom roles).
+    // Both must take effect on the next request, not the next login.
+    req.user.permissions = await getPermissionsForRole(fresh.role_id);
     return next();
   } catch (err) {
     return next(err);

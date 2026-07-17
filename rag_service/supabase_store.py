@@ -23,10 +23,19 @@ _client = None
 
 
 def sb():
+    """Shared Supabase client.
+
+    Prefers the SERVICE_ROLE key. The app's own tables run with RLS disabled, so the
+    anon key is enough for them — but Storage is not: storage.objects has RLS on and it
+    cannot be disabled on hosted Supabase, so the private `documents` bucket (where the
+    original uploaded files now live) is unreachable without service_role. Falls back to
+    the anon key so a deployment that hasn't set the new var yet still serves chat and
+    search; only the file-fetching paths break.
+    """
     global _client
     if _client is None:
         url = os.environ["SUPABASE_URL"]
-        key = os.environ["SUPABASE_KEY"]
+        key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.environ["SUPABASE_KEY"]
         # Bound every PostgREST call so a slow/unreachable Supabase can't pile
         # up requests indefinitely. Falls back to defaults on older clients.
         try:
@@ -50,6 +59,37 @@ def _vec(embedding) -> str:
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def storage_path_for(
+    document_id: str | None = None,
+    file_name: str | None = None,
+    organization_id: str | None = None,
+) -> tuple[str, str] | None:
+    """Locate a document's ORIGINAL bytes: -> (storage_path, file_name), or None.
+
+    By `document_id` when we have it — exact, and the only unambiguous way. Otherwise by
+    file name, which callers that only remember a name (a pinned chart, a cited source)
+    must fall back to; that lookup MUST be scoped by organization_id, because a file name
+    is not unique across tenants and resolving one without an org would happily hand back
+    a different company's document. Newest wins when a name repeats within an org.
+    """
+    q = sb().table("documents").select("storage_path, file_name")
+    if document_id:
+        q = q.eq("id", document_id)
+    elif file_name:
+        q = q.eq("file_name", file_name)
+        if organization_id:
+            q = q.eq("organization_id", organization_id)
+        q = q.order("created_at", desc=True)
+    else:
+        return None
+
+    res = q.limit(1).execute()
+    rows = res.data or []
+    if not rows or not rows[0].get("storage_path"):
+        return None
+    return rows[0]["storage_path"], rows[0].get("file_name") or (file_name or "")
 
 
 def insert_document_table(document_id: str, table, doc_version: int = 1) -> None:

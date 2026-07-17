@@ -1,68 +1,52 @@
-.documents-layout {
-  min-height: 100vh;
-
-  display: flex;
-
-  background: #020713;
-
-  color: white;
-
-  font-family: "IBM Plex Sans", sans-serif;
-}
+/* Documents — matches the Login / Signup design language: charcoal background
+   (from AppShell), Playfair Display page heading, Manrope body, flat
+   sharp-cornered monochrome panels. Status colours keep their meaning. */
 
 .documents-content {
-  flex: 1;
-
   width: 100%;
-
   max-width: 1400px;
-
-  padding: 2rem 3rem;
 }
 
 .documents-header {
-  margin-bottom: 2rem;
+  margin-bottom: 1.8rem;
 }
 
 .documents-header h1 {
-  font-size: 2.5rem;
-
-  margin-bottom: 0.5rem;
+  font-family: "Playfair Display", Georgia, serif;
+  font-size: 2.1rem;
+  font-weight: 500;
+  color: #ffffff;
+  margin-bottom: 0.4rem;
 }
 
 .documents-header p {
-  color: #94a3b8;
+  color: #9a9da8;
+  font-size: 0.95rem;
 }
 
 .documents-section {
-  background: rgba(255, 255, 255, 0.05);
-
-  border: 1px solid rgba(255, 255, 255, 0.08);
-
-  border-radius: 20px;
-
-  overflow: hidden;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid #2f2f2f;
 }
 
 .section-header {
   display: flex;
-
   justify-content: space-between;
-
   align-items: center;
-
-  padding: 1.5rem 2rem;
-
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 1.2rem 1.6rem;
+  border-bottom: 1px solid #2a2b31;
 }
 
 .section-header h2 {
-  font-size: 1.3rem;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: #f0f0f0;
   margin-right: 1rem;
 }
 
 .section-header span {
-  color: #94a3b8;
+  color: #9a9da8;
+  font-size: 0.9rem;
 }
 
 .section-header-actions {
@@ -74,25 +58,17 @@
 
 .documents-list {
   display: flex;
-
   flex-direction: column;
 }
 
 .document-row {
   display: flex;
-
   justify-content: space-between;
-
   align-items: center;
-
   gap: 2rem;
-
-  padding: 1.5rem 2rem;
-
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-
-  transition: background 0.3s ease;
-
+  padding: 1.2rem 1.6rem;
+  border-bottom: 1px solid #24252b;
+  transition: background 0.2s ease;
   flex-wrap: wrap;
 }
 
@@ -106,143 +82,144 @@
 
 .document-info {
   flex: 1;
-
   min-width: 0;
 }
 
-.document-info h3 {
-  margin-bottom: 0.4rem;
+/* The info block is a button now — click to preview. Reset button chrome so it
+   still reads as plain text, with a hover cue on the title. */
+.document-open {
+  background: none;
+  border: none;
+  padding: 0;
+  text-align: left;
+  font-family: inherit;
+  cursor: pointer;
+}
 
-  font-size: 1.1rem;
+.document-open:hover h3 {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.document-info h3 {
+  margin-bottom: 0.35rem;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #f0f0f0;
 }
 
 .document-info p {
-  color: #94a3b8;
-
-  font-size: 0.95rem;
+  color: #9a9da8;
+  font-size: 0.9rem;
 }
 
 .document-actions {
   display: flex;
-
   justify-content: space-between;
-
   align-items: center;
-
-  gap: 1rem;
-
+  gap: 0.8rem;
   flex-wrap: wrap;
 }
 
+/* Processing state chips — semantic colours kept */
 .status {
-  min-width: 120px;
-
+  min-width: 110px;
   text-align: center;
-
   padding: 6px 12px;
-
-  border-radius: 999px;
-
-  font-size: 0.85rem;
-
+  font-size: 0.8rem;
   font-weight: 600;
+  letter-spacing: 0.04em;
 }
 
 .pending {
-  background: rgba(239, 68, 68, 0.15);
-
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
   color: #f87171;
 }
 
 .uploaded {
-  background: rgba(34, 197, 94, 0.15);
-
+  background: rgba(34, 197, 94, 0.1);
+  border: 1px solid rgba(34, 197, 94, 0.35);
   color: #4ade80;
 }
 
+/* Primary action — white gradient with dark text, like the auth CTAs */
 .upload-button,
 .replace-btn {
   min-width: 110px;
-
   border: none;
-
-  border-radius: 10px;
-
   padding: 10px 18px;
-
-  color: white;
-
+  font-family: inherit;
   font-weight: 600;
-
+  font-size: 0.9rem;
   cursor: pointer;
-
-  transition: all 0.3s ease;
+  transition: opacity 0.18s ease, border-color 0.18s ease, background 0.18s ease;
 }
 
 .upload-button {
-  background: linear-gradient(135deg, #ec4899, #8b5cf6);
+  background: linear-gradient(135deg, #ffffff, #d6d6d6);
+  color: #0b0b0d;
 }
 
 .upload-button:hover:not(:disabled) {
-  transform: translateY(-2px);
-
-  box-shadow: 0 8px 20px rgba(236, 72, 153, 0.3);
+  opacity: 0.9;
 }
 
 .upload-button:disabled {
-  opacity: 0.6;
-
+  opacity: 0.55;
   cursor: default;
 }
 
 .replace-btn {
-  background: rgba(255, 255, 255, 0.08);
-
-  border: 1px solid #334155;
+  background: transparent;
+  border: 1px solid #3a3b42;
+  color: #e8e8e8;
 }
 
 .replace-btn:hover {
-  background: rgba(255, 255, 255, 0.12);
+  border-color: #ffffff;
+  background: rgba(255, 255, 255, 0.04);
 }
 
 /* ── Share button on a document row ──────────────────────────────────────── */
 .share-button {
-  min-width: 110px;
-  border: 1px solid #334155;
-  border-radius: 10px;
-  padding: 10px 18px;
-  background: rgba(255, 255, 255, 0.08);
-  color: white;
+  min-width: 100px;
+  border: 1px solid #3a3b42;
+  padding: 9px 16px;
+  background: transparent;
+  color: #e8e8e8;
+  font-family: inherit;
   font-weight: 600;
+  font-size: 0.88rem;
   cursor: pointer;
-  transition: all 0.3s ease;
+  transition: border-color 0.18s ease, background 0.18s ease;
 }
 
 .share-button:hover {
-  background: rgba(255, 255, 255, 0.12);
-  transform: translateY(-2px);
+  border-color: #ffffff;
+  background: rgba(255, 255, 255, 0.04);
 }
 
 /* ── Delete button on a document row ─────────────────────────────────────── */
 .delete-button {
-  min-width: 110px;
+  min-width: 100px;
   border: 1px solid rgba(239, 68, 68, 0.4);
-  border-radius: 10px;
-  padding: 10px 18px;
-  background: rgba(239, 68, 68, 0.12);
+  padding: 9px 16px;
+  background: rgba(239, 68, 68, 0.08);
   color: #f87171;
+  font-family: inherit;
   font-weight: 600;
+  font-size: 0.88rem;
   cursor: pointer;
-  transition: all 0.3s ease;
+  transition: background 0.18s ease;
 }
 
 .delete-button:hover:not(:disabled) {
-  background: rgba(239, 68, 68, 0.22);
-  transform: translateY(-2px);
+  background: rgba(239, 68, 68, 0.18);
 }
 
 .delete-button:disabled {
-  opacity: 0.6;
+  opacity: 0.55;
   cursor: default;
 }
 
@@ -250,7 +227,7 @@
 .share-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(2, 7, 19, 0.7);
+  background: rgba(8, 9, 12, 0.72);
   z-index: 40;
 }
 
@@ -262,12 +239,12 @@
   width: min(560px, calc(100vw - 2rem));
   max-height: min(80vh, 720px);
   overflow-y: auto;
-  background: #0b1222;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 20px;
+  background: #17181d;
+  border: 1px solid #33343b;
   padding: 1.5rem 2rem;
   z-index: 41;
-  color: white;
+  color: #f5f5f5;
+  font-family: "Manrope", -apple-system, "Segoe UI", sans-serif;
 }
 
 .share-dialog-header {
@@ -279,12 +256,14 @@
 }
 
 .share-dialog-header h2 {
-  font-size: 1.3rem;
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: #ffffff;
   margin-bottom: 0.3rem;
 }
 
 .share-dialog-sub {
-  color: #94a3b8;
+  color: #9a9da8;
   font-size: 0.9rem;
   overflow-wrap: anywhere;
 }
@@ -292,13 +271,13 @@
 .share-close {
   border: none;
   background: transparent;
-  color: #94a3b8;
+  color: #9a9da8;
   font-size: 1.1rem;
   cursor: pointer;
 }
 
 .share-close:hover {
-  color: white;
+  color: #ffffff;
 }
 
 .share-form {
@@ -314,38 +293,44 @@
 }
 
 .share-tier {
-  border: 1px solid #334155;
-  border-radius: 999px;
+  border: 1px solid #3a3b42;
   padding: 8px 16px;
   background: transparent;
-  color: #94a3b8;
+  color: #cfd2da;
+  font-family: inherit;
   font-weight: 600;
+  font-size: 0.88rem;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: border-color 0.18s ease, color 0.18s ease, background 0.18s ease;
+}
+
+.share-tier:hover {
+  border-color: #6b6d78;
+  color: #ffffff;
 }
 
 .share-tier.active {
-  background: linear-gradient(135deg, #ec4899, #8b5cf6);
+  background: linear-gradient(135deg, #ffffff, #d6d6d6);
   border-color: transparent;
-  color: white;
+  color: #0b0b0d;
 }
 
 .share-form select,
 .share-expiry input[type="date"] {
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid #334155;
-  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid #3a3b42;
   padding: 10px 12px;
-  color: white;
+  color: #f5f5f5;
+  font-family: inherit;
   font-size: 0.95rem;
 }
 
 .share-form select option {
-  background: #0b1222;
+  background: #17181d;
 }
 
 .share-org-note {
-  color: #94a3b8;
+  color: #9a9da8;
   font-size: 0.95rem;
 }
 
@@ -354,7 +339,7 @@
   gap: 1.5rem;
   align-items: center;
   flex-wrap: wrap;
-  color: #cbd5e1;
+  color: #cfd2da;
   font-size: 0.95rem;
 }
 
@@ -369,22 +354,21 @@
   align-self: flex-start;
   min-width: 130px;
   border: none;
-  border-radius: 10px;
   padding: 10px 22px;
-  background: linear-gradient(135deg, #ec4899, #8b5cf6);
-  color: white;
+  background: linear-gradient(135deg, #ffffff, #d6d6d6);
+  color: #0b0b0d;
+  font-family: inherit;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.3s ease;
+  transition: opacity 0.18s ease;
 }
 
 .share-submit:hover:not(:disabled) {
-  transform: translateY(-2px);
-  box-shadow: 0 8px 20px rgba(236, 72, 153, 0.3);
+  opacity: 0.9;
 }
 
 .share-submit:disabled {
-  opacity: 0.6;
+  opacity: 0.55;
   cursor: default;
 }
 
@@ -405,17 +389,18 @@
 /* ── "Shared with" list ───────────────────────────────────────────────────── */
 .share-access {
   margin-top: 1.5rem;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid #2a2b31;
   padding-top: 1rem;
 }
 
 .share-access h3 {
   font-size: 1rem;
+  font-weight: 600;
   margin-bottom: 0.75rem;
 }
 
 .share-access-empty {
-  color: #94a3b8;
+  color: #9a9da8;
   font-size: 0.92rem;
 }
 
@@ -425,7 +410,7 @@
   align-items: center;
   gap: 1rem;
   padding: 0.6rem 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid #24252b;
 }
 
 .share-access-row:last-child {
@@ -444,39 +429,215 @@
 }
 
 .share-access-expiry {
-  color: #94a3b8;
+  color: #9a9da8;
   font-size: 0.85rem;
 }
 
 .share-revoke {
   border: 1px solid rgba(239, 68, 68, 0.4);
-  border-radius: 10px;
   padding: 6px 14px;
-  background: rgba(239, 68, 68, 0.12);
+  background: rgba(239, 68, 68, 0.08);
   color: #f87171;
+  font-family: inherit;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: background 0.18s ease;
 }
 
 .share-revoke:hover {
-  background: rgba(239, 68, 68, 0.22);
+  background: rgba(239, 68, 68, 0.18);
+}
+
+/* ── Document preview modal ───────────────────────────────────────────────── */
+.viewer-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 9, 12, 0.72);
+  backdrop-filter: blur(2px);
+  z-index: 50;
+}
+
+.viewer-modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(960px, calc(100vw - 2rem));
+  height: min(85vh, 900px);
+  display: flex;
+  flex-direction: column;
+  background: #17181d;
+  border: 1px solid #33343b;
+  box-shadow: 0 24px 60px -20px rgba(0, 0, 0, 0.8);
+  z-index: 51;
+  color: #f5f5f5;
+  font-family: "Manrope", -apple-system, "Segoe UI", sans-serif;
+}
+
+.viewer-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.8rem 1.1rem;
+  border-bottom: 1px solid #2a2b31;
+}
+
+.viewer-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: #f0f0f0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewer-actions {
+  display: flex;
+  gap: 0.45rem;
+  flex-shrink: 0;
+}
+
+.viewer-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid #3a3b42;
+  color: #cfd2da;
+  font-size: 0.95rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.viewer-btn:hover:not(:disabled) {
+  border-color: #ffffff;
+  color: #ffffff;
+}
+
+.viewer-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.viewer-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.viewer-frame {
+  flex: 1;
+  width: 100%;
+  border: none;
+  background: #2a2b31; /* pdf viewer chrome edge while it loads */
+}
+
+.viewer-pre {
+  flex: 1;
+  margin: 0;
+  padding: 1.1rem 1.3rem;
+  overflow: auto;
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  color: #e4e4e7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.viewer-table-wrap {
+  flex: 1;
+  overflow: auto;
+  padding: 1rem;
+}
+
+.viewer-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.85rem;
+}
+
+.viewer-table th,
+.viewer-table td {
+  border: 1px solid #2f3037;
+  padding: 6px 10px;
+  text-align: left;
+  color: #cfd2da;
+  white-space: nowrap;
+}
+
+.viewer-table th {
+  background: rgba(255, 255, 255, 0.07);
+  color: #e8e8e8;
+  position: sticky;
+  top: -1rem; /* offsets the wrap padding so headers pin to the top edge */
+}
+
+.viewer-table tbody tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.viewer-msg {
+  margin: auto;
+  color: #9a9da8;
+  font-size: 0.95rem;
+}
+
+.viewer-msg.viewer-error {
+  color: #fca5a5;
+}
+
+.viewer-fallback {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.9rem;
+  color: #9a9da8;
+  text-align: center;
+  padding: 2rem;
+}
+
+.viewer-fallback-icon {
+  font-size: 2.4rem;
+}
+
+.viewer-download-btn {
+  border: none;
+  padding: 10px 20px;
+  background: linear-gradient(135deg, #ffffff, #d6d6d6);
+  color: #0b0b0d;
+  font-family: inherit;
+  font-weight: 600;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: opacity 0.18s ease;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewer-download-btn:hover {
+  opacity: 0.9;
 }
 
 @media (max-width: 900px) {
-  .documents-content {
-    padding: 1.5rem;
-  }
-
   .document-row {
     flex-direction: column;
-
     align-items: stretch;
   }
 
   .document-actions {
     justify-content: flex-start;
-
     width: 100%;
   }
 

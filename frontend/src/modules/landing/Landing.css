@@ -1,3 +1,8 @@
+/* Matches the Signup / Login design: charcoal gradient background, Playfair
+   Display serif display type, Manrope for supporting text, monochrome CTAs.
+   Landing-scoped class names (.landing-eyebrow, etc.) so its generic styles
+   don't collide with the shared global auth CSS. */
+
 .Landing {
   min-height: 100vh;
 
@@ -11,9 +16,20 @@
 
   overflow: hidden;
 
-  background: #020713;
+  background:
+    radial-gradient(
+      1000px 640px at 50% -12%,
+      rgba(126, 146, 196, 0.16),
+      transparent 62%
+    ),
+    radial-gradient(
+      800px 500px at 88% 110%,
+      rgba(84, 96, 130, 0.1),
+      transparent 60%
+    ),
+    linear-gradient(180deg, #1a1b21 0%, #15161b 55%, #121317 100%);
 
-  font-family: "IBM Plex Sans", sans-serif;
+  font-family: "Playfair Display", Georgia, serif;
 }
 
 .content {
@@ -26,18 +42,24 @@
   padding: 2rem;
 }
 
-.subtitle {
-  color: #c4b5fd;
+.landing-eyebrow {
+  color: #d4d4d4;
 
-  font-size: 1rem;
+  font-family:
+    "Manrope",
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
 
-  font-weight: 600;
+  font-size: 0.85rem;
 
-  letter-spacing: 2px;
+  font-weight: 200;
+
+  letter-spacing: 0.5rem;
 
   text-transform: uppercase;
 
-  margin-bottom: 1rem;
+  margin-bottom: 1.5rem;
 
   opacity: 0;
 
@@ -47,15 +69,13 @@
 .Landing h1 {
   font-size: 7rem;
 
-  font-weight: 700;
+  font-weight: 400;
 
-  letter-spacing: -4px;
+  letter-spacing: 0.15em;
 
   margin-bottom: 1.5rem;
 
-  background: linear-gradient(90deg, #c4b5fd, #8b5cf6, #6366f1);
-
-  background-size: 300% 300%;
+  background: linear-gradient(120deg, #ffffff, #cfd2da 60%, #a9adb8);
 
   background-clip: text;
   -webkit-background-clip: text;
@@ -65,9 +85,13 @@
 
   opacity: 0;
 
-  animation:
-    fadeInUp 1s ease forwards,
-    gradientMove 6s ease infinite 1s;
+  animation: fadeInUp 1s ease forwards;
+
+  font-family:
+    "Manrope",
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
 }
 
 .tagline {
@@ -75,11 +99,19 @@
 
   margin: 0 auto;
 
-  color: #94a3b8;
+  color: #a9adb8;
 
-  font-size: 1.25rem;
+  font-family:
+    "Manrope",
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+
+  font-size: 1.15rem;
 
   line-height: 1.8;
+
+  font-weight: 400;
 
   opacity: 0;
 
@@ -106,9 +138,9 @@
 
 .signup,
 .login {
-  padding: 14px 32px;
+  padding: 14px 34px;
 
-  border-radius: 14px;
+  border-radius: 0px;
 
   font-size: 1rem;
 
@@ -117,72 +149,42 @@
   cursor: pointer;
 
   transition: all 0.3s ease;
+
+  font-family:
+    "Manrope",
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
 }
 
 .signup {
   border: none;
 
-  color: white;
+  color: #050505;
 
-  background: linear-gradient(135deg, #8b5cf6, #6d28d9);
+  font-weight: 700;
+
+  background: linear-gradient(135deg, #ffffff, #d6d6d6);
 }
 
 .signup:hover {
   transform: translateY(-2px);
 
-  box-shadow:
-    0 0 30px rgba(139, 92, 246, 0.4),
-    0 0 60px rgba(139, 92, 246, 0.2);
+  box-shadow: 0 10px 28px rgba(255, 255, 255, 0.14);
 }
 
 .login {
-  background: rgba(255, 255, 255, 0.05);
+  background: transparent;
 
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid #2f2f2f;
 
-  color: white;
-
-  backdrop-filter: blur(12px);
+  color: #e8e8e8;
 }
 
 .login:hover {
   transform: translateY(-2px);
 
-  border-color: #8b5cf6;
-}
-
-.glow {
-  position: absolute;
-
-  border-radius: 50%;
-
-  filter: blur(120px);
-
-  opacity: 0.35;
-}
-
-.glow-1 {
-  width: 500px;
-
-  height: 500px;
-
-  background: #8b5cf6;
-
-  top: -100px;
-
-  right: -100px;
-}
-
-.glow-2 {
-  width: 400px;
-
-  height: 400px;
-
-  background: #4f46e5;
-
-  bottom: -100px;
-
-  left: -100px;
+  border-color: #ffffff;
 }
 
 @keyframes fadeInUp {
@@ -196,20 +198,6 @@
     opacity: 1;
 
     transform: translateY(0);
-  }
-}
-
-@keyframes gradientMove {
-  0% {
-    background-position: 0% 50%;
-  }
-
-  50% {
-    background-position: 100% 50%;
-  }
-
-  100% {
-    background-position: 0% 50%;
   }
 }
 

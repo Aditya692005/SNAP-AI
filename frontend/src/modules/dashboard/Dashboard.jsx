@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import Sidebar from "../../components/Sidebar";
+import AppShell from "../../components/AppShell";
 import ChartBlock from "../ai/ChartBlock";
-import { organizationService } from "../../services/authService";
+import { authService } from "../../services/authService";
 import "./Dashboard.css";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
@@ -28,6 +28,17 @@ function formatMetricValue(value, kind, currency) {
     }
   }
   return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+// A metric key ("total_revenue") → a human label ("Total Revenue"), mirroring the
+// backend's prettyLabel so a KPI card added to a department board reads the same
+// as the auto-added personal ones.
+function prettyMetricLabel(key) {
+  return String(key || "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -154,7 +165,6 @@ function Dashboard() {
   const [activeId, setActiveId] = useState(null);
   const [widgets, setWidgets] = useState([]);
   const [documents, setDocuments] = useState([]);
-  const [org, setOrg] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshingId, setRefreshingId] = useState(null);
   const [sourcesOpen, setSourcesOpen] = useState(false);
@@ -166,13 +176,18 @@ function Dashboard() {
   const [metricError, setMetricError] = useState(null); // shown under the input on failure
   const [metrics, setMetrics] = useState(null); // personal live KPI numbers
   const [deptMetrics, setDeptMetrics] = useState(null); // department live KPI numbers
+  const [deptAddingMetric, setDeptAddingMetric] = useState(false); // inline dept "add metric"
+  const [deptMetricChoice, setDeptMetricChoice] = useState(""); // selected metric key to add
+  const [deptMetricBusy, setDeptMetricBusy] = useState(false);
+  const [deptMetricError, setDeptMetricError] = useState(null);
   const [trashOpen, setTrashOpen] = useState(false);
   const [trash, setTrash] = useState([]); // archived widgets
+  const [updatesOpen, setUpdatesOpen] = useState(true); // Updates side column
   const [toast, setToast] = useState(null); // { widgets:[...], } auto-added notice
 
   // Department dashboards: shared boards scoped to a department. The server
   // decides which the user can see and whether they can edit (can_edit).
-  const [scope, setScope] = useState("personal"); // "personal" | "department"
+  const [scope, setScope] = useState("personal"); // "personal" | "department" | "organization"
   const [deptBoards, setDeptBoards] = useState([]);
   const [activeDeptId, setActiveDeptId] = useState(null);
   const [deptWidgets, setDeptWidgets] = useState([]);
@@ -183,12 +198,39 @@ function Dashboard() {
 
   const deptActive = deptBoards.find((b) => b.id === activeDeptId) || null;
 
+  // Organization dashboard: a single org-wide shared board (view-gated; editable
+  // by org admins / MANAGE_ORGANIZATION_DASHBOARD holders). State (not a plain
+  // read of the cached user) so a permission granted mid-session — surfaced by
+  // SessionWatcher's "snap:user-updated" — reveals the tab without a re-login.
+  const [canViewOrg, setCanViewOrg] = useState(authService.canViewOrganizationDashboard());
+  useEffect(() => {
+    const sync = () => setCanViewOrg(authService.canViewOrganizationDashboard());
+    window.addEventListener("snap:user-updated", sync);
+    return () => window.removeEventListener("snap:user-updated", sync);
+  }, []);
+  const [orgBoard, setOrgBoard] = useState(null); // { id, name, version, can_edit, updated_at }
+  const [orgWidgets, setOrgWidgets] = useState([]);
+  const [orgMetrics, setOrgMetrics] = useState(null);
+  const [orgCanEdit, setOrgCanEdit] = useState(false);
+  const [orgLoading, setOrgLoading] = useState(false);
+  const [orgRefreshingId, setOrgRefreshingId] = useState(null);
+  const [orgRenaming, setOrgRenaming] = useState(false);
+  const [orgAddingMetric, setOrgAddingMetric] = useState(false);
+  const [orgMetricChoice, setOrgMetricChoice] = useState("");
+  const [orgMetricBusy, setOrgMetricBusy] = useState(false);
+  const [orgMetricError, setOrgMetricError] = useState(null);
+
   useEffect(() => {
     loadDashboards();
     loadDepartmentBoards();
     refreshDocuments();
-    organizationService.get().then(setOrg).catch(() => {});
   }, []);
+
+  // Load (or reload) the org board whenever view access appears — at mount for
+  // admins/managers, or mid-session when the permission is granted.
+  useEffect(() => {
+    if (canViewOrg) loadOrgBoard();
+  }, [canViewOrg]);
 
   // Fetch this dashboard's widgets whenever the active board changes, and
   // remember the choice so the AI Assistant pins to the same board.
@@ -212,6 +254,19 @@ function Dashboard() {
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [scope, activeDeptId]);
+
+  // Load the org board's widgets/metrics once we know the board id.
+  useEffect(() => {
+    if (orgBoard?.id) refreshOrgWidgets();
+  }, [orgBoard?.id]);
+
+  // Re-pull the org board on focus (same reason as the department one above).
+  useEffect(() => {
+    if (scope !== "organization" || !orgBoard?.id) return;
+    const onFocus = () => refreshOrgWidgets();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [scope, orgBoard?.id]);
 
   const active = dashboards.find((d) => d.id === activeId) || null;
 
@@ -521,7 +576,7 @@ function Dashboard() {
   }
 
   async function removeDeptWidget(w) {
-    if (!window.confirm("Remove this chart from the department dashboard?")) return;
+    if (!window.confirm("Remove this from the department dashboard?")) return;
     const prev = deptWidgets;
     setDeptWidgets((list) => list.filter((x) => x.id !== w.id));
     try {
@@ -582,6 +637,171 @@ function Dashboard() {
     }
   }
 
+  // Add a KPI card to the department board. Unlike the personal "add metric"
+  // (free-text → definition + backfill), a shared board offers only metrics
+  // already present in the department's shared documents, so the card is never
+  // empty and no per-user definition/backfill is needed. Edit-gated server-side.
+  async function addDeptMetric() {
+    const key = deptMetricChoice;
+    if (!key || !activeDeptId) return;
+    const kpi = (deptMetrics?.kpis || []).find((k) => k.metric === key);
+    if (!kpi) return;
+    const label = prettyMetricLabel(key);
+    setDeptMetricBusy(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/dashboard/department/${activeDeptId}/widgets`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({
+          widget_type: "metric",
+          title: label,
+          config: { metric_key: key, kind: kpi.kind || "number", label },
+        }),
+      });
+      if (!res.ok) throw new Error();
+      setDeptAddingMetric(false);
+      setDeptMetricChoice("");
+      setDeptMetricError(null);
+      refreshDeptWidgets(activeDeptId); // re-pull widgets + board version
+    } catch {
+      setDeptMetricError("Could not add the metric. Please try again.");
+    } finally {
+      setDeptMetricBusy(false);
+    }
+  }
+
+  // ── Organization dashboard ───────────────────────────────────────────────────
+  async function loadOrgBoard() {
+    try {
+      const res = await fetch(`${API_BASE}/api/dashboard/organization`, { headers: authHeaders() });
+      if (!res.ok) return; // 403 → not a viewer; the Organization tab stays hidden
+      const data = await res.json();
+      setOrgBoard(data.dashboard || null);
+    } catch {
+      // org board unavailable — tab stays hidden
+    }
+  }
+
+  async function refreshOrgWidgets() {
+    setOrgLoading(true);
+    try {
+      const [res, mRes] = await Promise.all([
+        fetch(`${API_BASE}/api/dashboard/organization/widgets`, { headers: authHeaders() }),
+        fetch(`${API_BASE}/api/dashboard/organization/metrics`, { headers: authHeaders() }),
+      ]);
+      if (mRes.ok) setOrgMetrics(await mRes.json());
+      if (res.ok) {
+        const data = await res.json();
+        setOrgWidgets(data.widgets || []);
+        setOrgCanEdit(!!data.can_edit);
+        // Keep the board's version (for rename) in step with the server.
+        setOrgBoard((prev) => (prev ? { ...prev, version: data.version, can_edit: data.can_edit } : prev));
+      }
+    } catch {
+      // leave as-is
+    } finally {
+      setOrgLoading(false);
+    }
+  }
+
+  function handleOrgConflict() {
+    window.alert("This board was just changed by someone else — reloading the latest version.");
+    refreshOrgWidgets();
+  }
+
+  async function removeOrgWidget(w) {
+    if (!window.confirm("Remove this from the organization dashboard?")) return;
+    const prev = orgWidgets;
+    setOrgWidgets((list) => list.filter((x) => x.id !== w.id));
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/dashboard/organization/widgets/${w.id}?expected_version=${w.version}`,
+        { method: "DELETE", headers: authHeaders() }
+      );
+      if (res.status === 409) {
+        setOrgWidgets(prev);
+        handleOrgConflict();
+      } else if (!res.ok) {
+        setOrgWidgets(prev);
+      }
+    } catch {
+      setOrgWidgets(prev);
+    }
+  }
+
+  async function refreshOrgWidget(w) {
+    setOrgRefreshingId(w.id);
+    try {
+      const res = await fetch(`${API_BASE}/api/dashboard/organization/widgets/${w.id}/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ expected_version: w.version }),
+      });
+      if (res.status === 409) {
+        handleOrgConflict();
+      } else if (res.ok) {
+        const updated = await res.json();
+        setOrgWidgets((list) => list.map((x) => (x.id === w.id ? updated : x)));
+      }
+    } catch {
+      // leave stale on failure
+    } finally {
+      setOrgRefreshingId(null);
+    }
+  }
+
+  async function renameOrgBoard(name) {
+    const clean = (name || "").trim();
+    setOrgRenaming(false);
+    if (!orgBoard || !clean || clean === orgBoard.name) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/dashboard/organization`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ name: clean, expected_version: orgBoard.version }),
+      });
+      if (res.status === 409) {
+        handleOrgConflict();
+      } else if (res.ok) {
+        const updated = await res.json();
+        setOrgBoard((prev) => (prev ? { ...prev, ...updated } : prev));
+      }
+    } catch {
+      // leave name as-is
+    }
+  }
+
+  // Add a KPI card to the org board from a metric already present in the org's
+  // data (same rationale as the department "add metric"). Edit-gated server-side.
+  async function addOrgMetric() {
+    const key = orgMetricChoice;
+    if (!key || !orgBoard) return;
+    const kpi = (orgMetrics?.kpis || []).find((k) => k.metric === key);
+    if (!kpi) return;
+    const label = prettyMetricLabel(key);
+    setOrgMetricBusy(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/dashboard/organization/widgets`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({
+          widget_type: "metric",
+          title: label,
+          config: { metric_key: key, kind: kpi.kind || "number", label },
+        }),
+      });
+      if (!res.ok) throw new Error();
+      setOrgAddingMetric(false);
+      setOrgMetricChoice("");
+      setOrgMetricError(null);
+      refreshOrgWidgets();
+    } catch {
+      setOrgMetricError("Could not add the metric. Please try again.");
+    } finally {
+      setOrgMetricBusy(false);
+    }
+  }
+
   async function toggleDocument(source, included) {
     setDocuments((prev) =>
       prev.map((d) => (d.source_document === source ? { ...d, included } : d))
@@ -621,59 +841,83 @@ function Dashboard() {
 
   const includedCount = documents.filter((d) => d.included).length;
 
+  // Metrics present in the department's shared data that aren't already a card on
+  // the board — the choices offered by the department "Add metric" control.
+  const deptMetricKeysOnBoard = new Set(
+    deptWidgets.filter((w) => w.widget_type === "metric").map((w) => w.config?.metric_key)
+  );
+  const availableDeptMetrics = (deptMetrics?.kpis || []).filter(
+    (k) => k.metric && !deptMetricKeysOnBoard.has(k.metric)
+  );
+
+  // Same, for the organization board.
+  const orgMetricKeysOnBoard = new Set(
+    orgWidgets.filter((w) => w.widget_type === "metric").map((w) => w.config?.metric_key)
+  );
+  const availableOrgMetrics = (orgMetrics?.kpis || []).filter(
+    (k) => k.metric && !orgMetricKeysOnBoard.has(k.metric)
+  );
+  // The Organization scope is offered once the user can view the board and it loaded.
+  const showOrgScope = canViewOrg && !!orgBoard;
+
   return (
-    <div className="dashboard">
-      <Sidebar />
+    <AppShell
+      actions={
+        <>
+          <button className="ghost-btn" onClick={refresh} disabled={loading}>
+            ⟳ Refresh
+          </button>
+          <button className="sources-btn" onClick={() => setSourcesOpen(true)}>
+            <span className="chip-dot" /> Sources
+            <span className="sources-count">
+              {includedCount}/{documents.length}
+            </span>
+          </button>
+        </>
+      }
+    >
 
-      <main className="dashboard-content">
-        {/* Header */}
-        <div className="dashboard-header">
-          <div className="dashboard-title-wrap">
-            <span className="dashboard-eyebrow">SNAP AI · {org?.name || "Studio"}</span>
-            <h1>{org?.name ? `${org.name} — Insights Dashboard` : "Insights Dashboard"}</h1>
-            <p>
-              {org?.description ||
-                "Charts you pin from the AI Assistant live here — ask for a chart, then pin it."}
-            </p>
-            {org && (org.industry || org.country || org.subscription_plan) && (
-              <p className="dashboard-org-meta">
-                {[org.industry, org.country, org.subscription_plan]
-                  .filter(Boolean)
-                  .join(" · ")}
-              </p>
+        {/* Create + scope switch. Clicking a scope reveals that scope's list of
+            dashboard names in the row below. */}
+        <div className="dashboard-controls">
+          <button
+            className="control-btn"
+            onClick={() => {
+              setScope("personal");
+              setDraftName("");
+              setCreating(true);
+            }}
+          >
+            ＋ Create new dashboard
+          </button>
+          <div className="scope-group">
+            {showOrgScope && (
+              <button
+                className={`scope-btn ${scope === "organization" ? "active" : ""}`}
+                onClick={() => setScope("organization")}
+              >
+                Organization
+              </button>
             )}
-          </div>
-
-          <div className="dashboard-toolbar">
-            <button className="ghost-btn" onClick={refresh} disabled={loading}>
-              ⟳ Refresh
-            </button>
-            <button className="sources-btn" onClick={() => setSourcesOpen(true)}>
-              <span className="chip-dot" /> Sources
-              <span className="sources-count">
-                {includedCount}/{documents.length}
-              </span>
-            </button>
-          </div>
-        </div>
-
-        {/* Scope switch — only shown when the user can see a department board */}
-        {deptBoards.length > 0 && (
-          <div className="scope-switch">
+            {deptBoards.length > 0 && (
+              <button
+                className={`scope-btn ${scope === "department" ? "active" : ""}`}
+                onClick={() => setScope("department")}
+              >
+                Department
+              </button>
+            )}
             <button
               className={`scope-btn ${scope === "personal" ? "active" : ""}`}
               onClick={() => setScope("personal")}
             >
-              My dashboards
-            </button>
-            <button
-              className={`scope-btn ${scope === "department" ? "active" : ""}`}
-              onClick={() => setScope("department")}
-            >
-              Department
+              Personal
             </button>
           </div>
-        )}
+        </div>
+
+        <div className={`dashboard-body ${updatesOpen ? "" : "updates-collapsed"}`}>
+          <div className="dashboard-main-col">
 
         {scope === "personal" && (
           <>
@@ -690,7 +934,7 @@ function Dashboard() {
             </button>
           ))}
 
-          {creating ? (
+          {creating && (
             <input
               className="dash-tab-input"
               autoFocus
@@ -709,17 +953,6 @@ function Dashboard() {
                 setDraftName("");
               }}
             />
-          ) : (
-            <button
-              className="dash-tab new"
-              onClick={() => {
-                setDraftName("");
-                setCreating(true);
-              }}
-              title="New dashboard"
-            >
-              + New
-            </button>
           )}
         </div>
 
@@ -901,6 +1134,64 @@ function Dashboard() {
                     onBlur={() => renameDeptBoard(deptActive, draftName)}
                   />
                 )}
+                {/* Add a KPI card — only metrics found in this department's shared
+                    documents, so the card always resolves to a real number. */}
+                {deptActive.can_edit &&
+                  (deptAddingMetric ? (
+                    <span className="add-metric-inline">
+                      <select
+                        className="dash-rename-input"
+                        autoFocus
+                        value={deptMetricChoice}
+                        onChange={(e) => {
+                          setDeptMetricChoice(e.target.value);
+                          if (deptMetricError) setDeptMetricError(null);
+                        }}
+                      >
+                        <option value="">Choose a metric…</option>
+                        {availableDeptMetrics.map((k) => (
+                          <option key={k.metric} value={k.metric}>
+                            {prettyMetricLabel(k.metric)}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        className="ghost-btn small"
+                        onClick={addDeptMetric}
+                        disabled={!deptMetricChoice || deptMetricBusy}
+                      >
+                        {deptMetricBusy ? "Adding…" : "Add"}
+                      </button>
+                      <button
+                        className="ghost-btn small"
+                        onClick={() => {
+                          setDeptAddingMetric(false);
+                          setDeptMetricChoice("");
+                          setDeptMetricError(null);
+                        }}
+                      >
+                        Cancel
+                      </button>
+                      {deptMetricError && <span className="add-metric-error">{deptMetricError}</span>}
+                    </span>
+                  ) : (
+                    <button
+                      className="ghost-btn small"
+                      onClick={() => {
+                        setDeptMetricChoice("");
+                        setDeptMetricError(null);
+                        setDeptAddingMetric(true);
+                      }}
+                      disabled={availableDeptMetrics.length === 0}
+                      title={
+                        availableDeptMetrics.length === 0
+                          ? "No metrics found in this department's shared documents yet"
+                          : "Add a KPI card from this department's data"
+                      }
+                    >
+                      ＋ Add metric
+                    </button>
+                  ))}
                 {!deptActive.can_edit && (
                   <span className="dash-readonly-hint">
                     View only — managed by this department’s manager
@@ -918,11 +1209,11 @@ function Dashboard() {
 
             {!deptLoading && deptWidgets.length === 0 && (
               <div className="welcome-card">
-                <h2>No charts on this department dashboard yet</h2>
+                <h2>Nothing on this department dashboard yet</h2>
                 <p>
                   {deptCanEdit
-                    ? "Ask the AI Assistant for a chart, then pin it to this department board."
-                    : "Your department manager hasn’t pinned any charts here yet."}
+                    ? "Add a metric card from this department's data above, or ask the AI Assistant for a chart and pin it to this board."
+                    : "Your department manager hasn’t added anything here yet."}
                 </p>
                 {deptCanEdit && (
                   <Link to="/ai" className="upload-btn">Open AI Assistant</Link>
@@ -983,7 +1274,206 @@ function Dashboard() {
             )}
           </>
         )}
-      </main>
+
+        {/* Organization dashboard — one shared org-wide board, read-only unless
+            you're an admin (or hold MANAGE_ORGANIZATION_DASHBOARD). */}
+        {scope === "organization" && orgBoard && (
+          <>
+            <div className="dashboard-tabs">
+              <button className="dash-tab active" type="button">
+                <span className="dash-tab-name">{orgBoard.name}</span>
+                {!orgBoard.can_edit && <span className="dash-tab-badge">view</span>}
+              </button>
+            </div>
+
+            <div className="dashboard-board-actions">
+              {orgBoard.can_edit && !orgRenaming && (
+                <button
+                  className="ghost-btn small"
+                  onClick={() => {
+                    setDraftName(orgBoard.name);
+                    setOrgRenaming(true);
+                  }}
+                >
+                  ✎ Rename
+                </button>
+              )}
+              {orgBoard.can_edit && orgRenaming && (
+                <input
+                  className="dash-rename-input"
+                  autoFocus
+                  value={draftName}
+                  onChange={(e) => setDraftName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") renameOrgBoard(draftName);
+                    if (e.key === "Escape") setOrgRenaming(false);
+                  }}
+                  onBlur={() => renameOrgBoard(draftName)}
+                />
+              )}
+              {/* Add a KPI card — only metrics found in the organization's data. */}
+              {orgBoard.can_edit &&
+                (orgAddingMetric ? (
+                  <span className="add-metric-inline">
+                    <select
+                      className="dash-rename-input"
+                      autoFocus
+                      value={orgMetricChoice}
+                      onChange={(e) => {
+                        setOrgMetricChoice(e.target.value);
+                        if (orgMetricError) setOrgMetricError(null);
+                      }}
+                    >
+                      <option value="">Choose a metric…</option>
+                      {availableOrgMetrics.map((k) => (
+                        <option key={k.metric} value={k.metric}>
+                          {prettyMetricLabel(k.metric)}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      className="ghost-btn small"
+                      onClick={addOrgMetric}
+                      disabled={!orgMetricChoice || orgMetricBusy}
+                    >
+                      {orgMetricBusy ? "Adding…" : "Add"}
+                    </button>
+                    <button
+                      className="ghost-btn small"
+                      onClick={() => {
+                        setOrgAddingMetric(false);
+                        setOrgMetricChoice("");
+                        setOrgMetricError(null);
+                      }}
+                    >
+                      Cancel
+                    </button>
+                    {orgMetricError && <span className="add-metric-error">{orgMetricError}</span>}
+                  </span>
+                ) : (
+                  <button
+                    className="ghost-btn small"
+                    onClick={() => {
+                      setOrgMetricChoice("");
+                      setOrgMetricError(null);
+                      setOrgAddingMetric(true);
+                    }}
+                    disabled={availableOrgMetrics.length === 0}
+                    title={
+                      availableOrgMetrics.length === 0
+                        ? "No metrics found in your organization's documents yet"
+                        : "Add a KPI card from your organization's data"
+                    }
+                  >
+                    ＋ Add metric
+                  </button>
+                ))}
+              {!orgBoard.can_edit && (
+                <span className="dash-readonly-hint">
+                  View only — managed by your organization admins
+                </span>
+              )}
+              {orgBoard.updated_at && (
+                <span className="dash-updated-hint">
+                  Last updated {new Date(orgBoard.updated_at).toLocaleDateString()}
+                </span>
+              )}
+            </div>
+
+            {orgLoading && <div className="dashboard-empty">Loading dashboard…</div>}
+
+            {!orgLoading && orgWidgets.length === 0 && (
+              <div className="welcome-card">
+                <h2>Nothing on the organization dashboard yet</h2>
+                <p>
+                  {orgCanEdit
+                    ? "Add a metric card from your organization's data above, or ask the AI Assistant for a chart and pin it to this board."
+                    : "Your organization admins haven’t added anything here yet."}
+                </p>
+                {orgCanEdit && (
+                  <Link to="/ai" className="upload-btn">Open AI Assistant</Link>
+                )}
+              </div>
+            )}
+
+            {/* Organization metric KPI cards (removal is admin-only, versioned) */}
+            {!orgLoading && orgWidgets.some((w) => w.widget_type === "metric") && (
+              <div className="kpi-row">
+                {orgWidgets
+                  .filter((w) => w.widget_type === "metric")
+                  .map((w) => (
+                    <MetricCard
+                      key={w.id}
+                      widget={w}
+                      metrics={orgMetrics}
+                      onArchive={orgCanEdit ? () => removeOrgWidget(w) : undefined}
+                    />
+                  ))}
+              </div>
+            )}
+
+            {!orgLoading && orgWidgets.some((w) => w.widget_type === "ai_chart") && (
+              <div className="dashboard-charts">
+                {orgWidgets
+                  .filter((w) => w.widget_type === "ai_chart")
+                  .map((w) => {
+                    const spec = w.config?.spec;
+                    const stale = !!w.config?.stale;
+                    if (!spec) return null;
+                    return (
+                      <div className={`chart-panel ${stale ? "stale" : ""}`} key={w.id}>
+                        {stale && (
+                          <div className="widget-stale-bar">
+                            <span>
+                              ⚠ The source document changed — this chart may be out of date.
+                            </span>
+                            {orgCanEdit && (
+                              <button
+                                className="ghost-btn small"
+                                onClick={() => refreshOrgWidget(w)}
+                                disabled={orgRefreshingId === w.id}
+                              >
+                                {orgRefreshingId === w.id ? "Refreshing…" : "↻ Refresh"}
+                              </button>
+                            )}
+                          </div>
+                        )}
+                        <ChartBlock
+                          spec={spec}
+                          onRemove={orgCanEdit ? () => removeOrgWidget(w) : undefined}
+                        />
+                      </div>
+                    );
+                  })}
+              </div>
+            )}
+          </>
+        )}
+          </div>
+
+          {/* Updates: notifications about shared files and new dashboard
+              widgets/metrics/charts. Wired up in a later pass. Collapsible —
+              the edge arrow points out (‹) to expand and in (›) to collapse. */}
+          <aside className={`updates-col ${updatesOpen ? "" : "collapsed"}`}>
+            <button
+              type="button"
+              className="updates-toggle"
+              onClick={() => setUpdatesOpen((v) => !v)}
+              aria-label={updatesOpen ? "Collapse updates" : "Expand updates"}
+              title={updatesOpen ? "Collapse updates" : "Expand updates"}
+            >
+              {updatesOpen ? "›" : "‹"}
+            </button>
+            <p className="updates-title">Updates</p>
+            <div className="updates-panel">
+              <p className="updates-empty">
+                Notifications about files shared with you and new widgets,
+                metrics or charts added to your organization or department
+                dashboards will show up here.
+              </p>
+            </div>
+          </aside>
+        </div>
 
       {/* Data sources drawer */}
       <div
@@ -1110,7 +1600,7 @@ function Dashboard() {
           </button>
         </div>
       )}
-    </div>
+    </AppShell>
   );
 }
 

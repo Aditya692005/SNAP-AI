@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import Sidebar from "../../components/Sidebar";
+import AppShell from "../../components/AppShell";
 import ToastStack from "../../components/Toast";
 import ChartBlock from "./ChartBlock";
 import { authService } from "../../services/authService";
@@ -153,6 +153,7 @@ function AIAssistant() {
                 citations: m.metadata?.citations || [],
                 chart: m.metadata?.chart || undefined,
                 document: m.metadata?.document || undefined,
+                metric: m.metadata?.metric || undefined,
               }
         );
       setMessages([GREETING, ...mapped]);
@@ -264,8 +265,11 @@ function AIAssistant() {
     } catch {
       /* preview unavailable — fall through and answer normally */
     }
-    setLoading(false);
 
+    // Keep `loading` on through the hand-off to askAI. Clearing it here — between
+    // the preview and the answer — would blink the typing dots off for a frame,
+    // making it look like the assistant stopped. askAI owns `loading` from here
+    // (it's already true), so the dots stay visible straight through to the answer.
     // Nothing matched, or preview failed → answer over everything the user can see.
     if (!previewOk || docs.length === 0) {
       await askAI(text, undefined);
@@ -276,7 +280,8 @@ function AIAssistant() {
       await askAI(text, docs.map((d) => d.id));
       return;
     }
-    // Several close matches → let the user disambiguate.
+    // Several close matches → stop the spinner and let the user disambiguate.
+    setLoading(false);
     setMessages((prev) => [
       ...prev,
       {
@@ -339,6 +344,7 @@ function AIAssistant() {
           doc_count: data.doc_count,
           chart: data.chart || undefined, // present when the prompt asked for a chart
           document: data.document || undefined, // present when a report was generated
+          metric: data.metric || undefined, // present when the prompt asked to track a metric
         },
       ]);
     } catch (err) {
@@ -550,13 +556,14 @@ function AIAssistant() {
     }
   }
 
-  // ── pin a generated chart/table to a dashboard ───────────────────────────────
-  // Clicking "Pin" first asks WHICH board to pin to: the user's personal
-  // dashboards plus any DEPARTMENT board they can edit (managers/admins). With a
-  // single target there's nothing to choose, so we pin straight away.
-  async function pinChart(spec, aiMessageId) {
+  // ── pin a chart or metric to a dashboard ─────────────────────────────────────
+  // The board list is the same for both: the user's personal dashboards, any
+  // DEPARTMENT board they can edit (managers/admins), and the ORGANIZATION board
+  // if they can edit it (admins).
+  async function loadPinTargets() {
     let personal = [];
     let department = [];
+    let organization = null;
     try {
       const res = await fetch(`${API_BASE}/api/dashboard/dashboards`, {
         headers: authHeaders(),
@@ -577,7 +584,20 @@ function AIAssistant() {
         // department boards unavailable — just offer personal ones
       }
     }
-    const targets = [
+    if (authService.canManageOrganizationDashboard()) {
+      try {
+        const res = await fetch(`${API_BASE}/api/dashboard/organization`, {
+          headers: authHeaders(),
+        });
+        if (res.ok) {
+          const board = (await res.json()).dashboard;
+          if (board && board.can_edit) organization = board;
+        }
+      } catch {
+        // org board unavailable — just offer the others
+      }
+    }
+    return [
       ...personal.map((d) => ({ kind: "personal", id: d.id, name: d.name })),
       ...department.map((b) => ({
         kind: "department",
@@ -585,31 +605,83 @@ function AIAssistant() {
         name: b.department_name,
         badge: "department",
       })),
+      ...(organization
+        ? [{ kind: "organization", id: organization.id, name: organization.name, badge: "organization" }]
+        : []),
     ];
-    if (targets.length > 1) {
-      setPinPicker({ spec, aiMessageId, targets });
-      return;
-    }
-    await pinToTarget(spec, aiMessageId, targets[0] || null);
   }
 
-  // aiMessageId links the pinned widget back to the message that produced it, so
-  // the dashboard can regenerate the chart against fresh data on re-upload.
-  // target = null → the server falls back to the user's default personal board.
-  async function pinToTarget(spec, aiMessageId, target) {
+  // Clicking "Pin"/"Add to dashboard" asks WHICH board when there's more than one;
+  // with a single target there's nothing to choose, so we place it straight away.
+  async function pinChart(spec, aiMessageId) {
+    const targets = await loadPinTargets();
+    if (targets.length > 1) {
+      setPinPicker({ kind: "chart", payload: spec, title: spec.title || "This chart", aiMessageId, targets });
+      return;
+    }
+    await pinToTarget("chart", spec, aiMessageId, targets[0] || null);
+  }
+
+  async function pinMetric(metric, aiMessageId) {
+    const targets = await loadPinTargets();
+    if (targets.length > 1) {
+      setPinPicker({ kind: "metric", payload: metric, title: metric.label, aiMessageId, targets });
+      return;
+    }
+    await pinToTarget("metric", metric, aiMessageId, targets[0] || null);
+  }
+
+  // Place a chart or a metric on `target` (null → the user's default personal
+  // board). For charts, aiMessageId links the widget back to the message that
+  // produced it so the dashboard can regenerate it on re-upload.
+  async function pinToTarget(kind, payload, aiMessageId, target) {
     setPinningTo(target ? target.id : "default");
     try {
-      const isDept = target && target.kind === "department";
+      const targetKind = target ? target.kind : "personal";
+      const isDept = targetKind === "department";
+      const isOrg = targetKind === "organization";
+      const scopeLabel = isDept ? " (department)" : isOrg ? " (organization)" : "";
+      const where = target ? `"${target.name}"${scopeLabel}` : "your dashboard";
+
+      if (kind === "metric") {
+        const res = await fetch(`${API_BASE}/api/dashboard/track-metric`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders() },
+          body: JSON.stringify({
+            label: payload.label,
+            kind: payload.kind,
+            metric_key: payload.metric_key,
+            target: targetKind,
+            board_id: target ? target.id : null,
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.message || "Could not add the metric");
+        }
+        const already = res.status === 200; // 200 = already on that board
+        notify(
+          already
+            ? `"${payload.label}" is already on ${where} — no duplicate added.`
+            : `Added "${payload.label}" to ${where} — it will fill in as your documents are read.`
+        );
+        setPinPicker(null);
+        return;
+      }
+
+      const spec = payload;
       const url = isDept
         ? `${API_BASE}/api/dashboard/department/${target.id}/widgets`
-        : `${API_BASE}/api/dashboard/widgets`;
+        : isOrg
+          ? `${API_BASE}/api/dashboard/organization/widgets`
+          : `${API_BASE}/api/dashboard/widgets`;
       const body = {
         widget_type: "ai_chart",
         title: spec.title || null,
         config: { spec },
         ai_message_id: aiMessageId || null,
       };
-      if (!isDept) body.dashboard_id = target ? target.id : null; // personal board id
+      if (!isDept && !isOrg) body.dashboard_id = target ? target.id : null; // personal board id
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -621,9 +693,6 @@ function AIAssistant() {
       }
       // 200 = it was already pinned there (idempotent); 201 = newly added.
       const alreadyPinned = res.status === 200;
-      const where = target
-        ? `"${target.name}"${isDept ? " (department)" : ""}`
-        : "your dashboard";
       notify(
         alreadyPinned
           ? `That chart is already on ${where} — no duplicate added.`
@@ -694,16 +763,15 @@ function AIAssistant() {
 
   // ── render ─────────────────────────────────────────────────────────────────
   return (
-    <div className="ai-layout">
-      <Sidebar />
+    <AppShell className="ai-page">
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
 
-      <main className="ai-content">
+      <div className="ai-content">
         {/* Header */}
         <div className="ai-header">
           <div className="ai-header-title">
             <div>
-              <h1>SNAP AI Assistant</h1>
+              <h1>AI Assistant</h1>
               <p>
                 {docList.length > 0
                   ? `${docList.length} document${docList.length > 1 ? "s" : ""} uploaded`
@@ -868,6 +936,26 @@ function AIAssistant() {
                 <div className="bubble-text">{msg.text}</div>
               )}
               {msg.chart && <ChartBlock spec={msg.chart} onPin={() => pinChart(msg.chart, msg.id)} />}
+              {msg.metric && (
+                <div className="doc-card">
+                  <div className="doc-card-info">
+                    <span className="doc-card-icon">📊</span>
+                    <span className="doc-card-title">
+                      {msg.metric.label}
+                      <span className="metric-kind-tag"> · {msg.metric.kind}</span>
+                    </span>
+                  </div>
+                  <div className="doc-card-actions">
+                    <button
+                      type="button"
+                      onClick={() => pinMetric(msg.metric, msg.id)}
+                      title="Track this metric as a KPI card on a dashboard"
+                    >
+                      📊 Add to dashboard
+                    </button>
+                  </div>
+                </div>
+              )}
               {msg.document && (
                 <div className="doc-card">
                   <div className="doc-card-info">
@@ -968,7 +1056,7 @@ function AIAssistant() {
             </button>
           </div>
         </div>
-      </main>
+      </div>
 
       {/* Documents drawer — newest uploaded first; click a doc to select it */}
       <div
@@ -1100,9 +1188,12 @@ function AIAssistant() {
             onClick={() => pinningTo === null && setPinPicker(null)}
           />
           <div className="pin-modal" role="dialog" aria-label="Choose a dashboard">
-            <div className="pin-modal-title">Pin to which dashboard?</div>
+            <div className="pin-modal-title">
+              {pinPicker.kind === "metric" ? "Track this metric on which dashboard?" : "Pin to which dashboard?"}
+            </div>
             <div className="pin-modal-hint">
-              {pinPicker.spec.title || "This chart"} will appear as a widget there.
+              {pinPicker.title} will appear as a{" "}
+              {pinPicker.kind === "metric" ? "KPI card" : "widget"} there.
             </div>
             <div className="pin-modal-list">
               {pinPicker.targets.map((t) => (
@@ -1111,11 +1202,11 @@ function AIAssistant() {
                   type="button"
                   className="pin-modal-option"
                   disabled={pinningTo !== null}
-                  onClick={() => pinToTarget(pinPicker.spec, pinPicker.aiMessageId, t)}
+                  onClick={() => pinToTarget(pinPicker.kind, pinPicker.payload, pinPicker.aiMessageId, t)}
                 >
                   <span className="pin-modal-name">{t.name}</span>
                   {t.badge && <span className="pin-modal-badge">{t.badge}</span>}
-                  {pinningTo === t.id && <span className="pin-modal-busy">Pinning…</span>}
+                  {pinningTo === t.id && <span className="pin-modal-busy">Adding…</span>}
                 </button>
               ))}
             </div>
@@ -1130,7 +1221,7 @@ function AIAssistant() {
           </div>
         </>
       )}
-    </div>
+    </AppShell>
   );
 }
 

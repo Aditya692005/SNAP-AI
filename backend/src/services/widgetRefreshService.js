@@ -25,6 +25,10 @@ const {
   updateWidgetConfigUnversioned,
   touchBoard,
 } = require("../models/departmentDashboardModel");
+const {
+  listWidgetsForOrganization,
+  touchBoard: touchOrgBoard,
+} = require("../models/organizationDashboardModel");
 
 // Recover {instruction, sources} for a pinned chart from the AI message it came
 // from. instruction = the USER message immediately before that AI message.
@@ -49,7 +53,11 @@ async function recoverRequest(aiMessageId) {
 }
 
 // Ask the RAG service to rebuild a chart spec for `instruction` against `source`.
-// organizationId scopes the on-disk file lookup to that tenant's uploads dir.
+//
+// `organizationId` is what lets the RAG service find the source's ORIGINAL bytes in
+// Storage: a widget only remembers a file NAME, and a name is ambiguous across the whole
+// system — two organizations can each have a `sales.csv`. Scoping the lookup to the org
+// that owns the widget keeps a refresh from ever charting another tenant's data.
 async function regenerateSpec(instruction, source, organizationId) {
   const response = await ragFetch(
     "/visualize",
@@ -118,6 +126,47 @@ async function refreshDepartmentWidget(widget, expectedVersion, userId, organiza
   return updated;
 }
 
+// Regenerate ONE organization-board widget from fresh data, version-guarded so a
+// concurrent admin isn't clobbered. Mirrors refreshDepartmentWidget one scope up.
+async function refreshOrganizationWidget(widget, expectedVersion, userId, organizationId) {
+  const recovered = await recoverRequest(widget.ai_message_id);
+  if (!recovered) {
+    const e = new Error("This chart can't be refreshed automatically — it isn't linked to a chat request.");
+    e.status = 422;
+    throw e;
+  }
+  const source = widget.config?.stale_source || recovered.sources[0] || null;
+  const spec = await regenerateSpec(recovered.instruction, source, organizationId);
+
+  const config = { ...(widget.config || {}), spec };
+  delete config.stale;
+  delete config.stale_source;
+  const updated = await updateWidgetVersioned(widget.id, expectedVersion, { config });
+  touchOrgBoard(widget.organization_dashboard_id, userId); // audit only, best-effort
+  return updated;
+}
+
+// After a same-named file is re-uploaded, flag every ORGANIZATION-board widget
+// charted from that file as stale so any admin can refresh it. Best-effort; never
+// throws. Un-versioned (system op): see updateWidgetConfigUnversioned.
+async function markOrganizationWidgetsStaleForSource(organizationId, source) {
+  try {
+    const widgets = await listWidgetsForOrganization(organizationId);
+    let flagged = 0;
+    for (const w of widgets) {
+      if (w.widget_type !== "ai_chart" || !w.ai_message_id) continue;
+      const recovered = await recoverRequest(w.ai_message_id);
+      if (!recovered || !recovered.sources.includes(source)) continue;
+      const config = { ...(w.config || {}), stale: true, stale_source: source };
+      await updateWidgetConfigUnversioned(w.id, config);
+      flagged += 1;
+    }
+    return flagged;
+  } catch {
+    return 0;
+  }
+}
+
 // After a same-named file is re-uploaded, flag every DEPARTMENT-board widget in
 // the org charted from that file as stale, so any editor of the board can
 // refresh it — not just the pinner. Best-effort; never throws. Returns the
@@ -166,4 +215,6 @@ module.exports = {
   markWidgetsStaleForSource,
   refreshDepartmentWidget,
   markDepartmentWidgetsStaleForSource,
+  refreshOrganizationWidget,
+  markOrganizationWidgetsStaleForSource,
 };

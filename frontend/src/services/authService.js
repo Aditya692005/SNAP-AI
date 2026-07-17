@@ -1,4 +1,5 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
 
 function authHeaders() {
   return {
@@ -12,7 +13,7 @@ export const authService = {
   // doesn't, this signup creates the org and the form collects its details.
   async checkOrgStatus(email) {
     const response = await fetch(
-      `${API_BASE_URL}/api/auth/org-status?email=${encodeURIComponent(email)}`
+      `${API_BASE_URL}/api/auth/org-status?email=${encodeURIComponent(email)}`,
     );
     if (!response.ok) return { valid: false };
     return response.json();
@@ -44,6 +45,14 @@ export const authService = {
     // Don't set token yet - user needs to verify email first
     localStorage.setItem("pendingEmail", email);
     return data;
+  },
+
+  async checkEmailExists(email) {
+    const response = await fetch(
+      `${API_BASE_URL}/api/auth/email-exists?email=${encodeURIComponent(email)}`,
+    );
+    if (!response.ok) throw new Error("Could not check email");
+    return (await response.json()).exists || false;
   },
 
   async getDepartments() {
@@ -113,7 +122,7 @@ export const authService = {
   // Invitations (admin-added users)
   async getInviteInfo(token) {
     const res = await fetch(
-      `${API_BASE_URL}/api/auth/invite-info?token=${encodeURIComponent(token)}`
+      `${API_BASE_URL}/api/auth/invite-info?token=${encodeURIComponent(token)}`,
     );
     if (!res.ok) return { valid: false };
     return res.json();
@@ -137,7 +146,8 @@ export const authService = {
       body: JSON.stringify({ currentPassword, newPassword }),
     });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.message || "Could not change password");
+    if (!response.ok)
+      throw new Error(data.message || "Could not change password");
     return data;
   },
 
@@ -164,7 +174,9 @@ export const authService = {
   // failure). Includes `department_name` resolved server-side.
   async refreshUser() {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/auth/me`, { headers: authHeaders() });
+      const res = await fetch(`${API_BASE_URL}/api/auth/me`, {
+        headers: authHeaders(),
+      });
       if (!res.ok) return this.getUser();
       const data = await res.json();
       if (data?.user) localStorage.setItem("user", JSON.stringify(data.user));
@@ -172,6 +184,24 @@ export const authService = {
     } catch {
       return this.getUser();
     }
+  },
+
+  // Self-service profile update (name only — see PATCH /api/auth/me). Writes the
+  // fresh user straight into the cache and announces it, because there is no
+  // global store: UserMenu keeps its own copy of the user and would otherwise show
+  // the old name/initials until it happened to remount. A `storage` event is no
+  // help here — the browser only fires that in OTHER tabs.
+  async updateProfile(fields) {
+    const { user } = await handle(
+      await fetch(`${API_BASE_URL}/api/auth/me`, {
+        method: "PATCH",
+        headers: authHeaders(),
+        body: JSON.stringify(fields),
+      })
+    );
+    localStorage.setItem("user", JSON.stringify(user));
+    window.dispatchEvent(new Event("snap:user-updated"));
+    return user;
   },
 
   isAuthenticated() {
@@ -196,7 +226,30 @@ export const authService = {
   // This only gates UI affordances — the server is the source of truth.
   canManageDepartmentDashboards() {
     if (this.isAdmin()) return true;
-    return this.getPermissions().includes("MANAGE_DEPARTMENT_DASHBOARD") && !!this.getDepartmentId();
+    return (
+      this.getPermissions().includes("MANAGE_DEPARTMENT_DASHBOARD") &&
+      !!this.getDepartmentId()
+    );
+  },
+
+  // Organization dashboard: a single org-wide board. VIEW is admins + managers by
+  // default; EDIT (pin/rename/remove) is admins by default. UI gating only — the
+  // server is the source of truth.
+  canViewOrganizationDashboard() {
+    if (this.isAdmin()) return true;
+    return this.getPermissions().includes("VIEW_ORGANIZATION_DASHBOARD");
+  },
+
+  canManageOrganizationDashboard() {
+    if (this.isAdmin()) return true;
+    return this.getPermissions().includes("MANAGE_ORGANIZATION_DASHBOARD");
+  },
+
+  // AI assistant (chat + history). UI gating only — /api/rag/chat and
+  // /api/conversations enforce the same permission server-side.
+  canUseAIAssistant() {
+    if (this.isAdmin()) return true;
+    return this.getPermissions().includes("USE_AI_ASSISTANT");
   },
 };
 
@@ -216,7 +269,15 @@ async function handle(res) {
 // Company-admin (org_admin) operations.
 export const adminService = {
   async listUsers() {
-    return (await handle(await fetch(`${API_BASE_URL}/api/admin/users`, { headers: authHeaders() }))).users || [];
+    return (
+      (
+        await handle(
+          await fetch(`${API_BASE_URL}/api/admin/users`, {
+            headers: authHeaders(),
+          }),
+        )
+      ).users || []
+    );
   },
   async updateUser(id, fields) {
     return handle(
@@ -224,12 +285,15 @@ export const adminService = {
         method: "PATCH",
         headers: authHeaders(),
         body: JSON.stringify(fields),
-      })
+      }),
     );
   },
   async deactivateUser(id) {
     return handle(
-      await fetch(`${API_BASE_URL}/api/admin/users/${id}`, { method: "DELETE", headers: authHeaders() })
+      await fetch(`${API_BASE_URL}/api/admin/users/${id}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      }),
     );
   },
   async reactivateUser(id) {
@@ -238,7 +302,7 @@ export const adminService = {
         method: "PATCH",
         headers: authHeaders(),
         body: JSON.stringify({ status: "ACTIVE" }),
-      })
+      }),
     );
   },
   async deleteUser(id) {
@@ -246,11 +310,19 @@ export const adminService = {
       await fetch(`${API_BASE_URL}/api/admin/users/${id}?permanent=1`, {
         method: "DELETE",
         headers: authHeaders(),
-      })
+      }),
     );
   },
   async listDepartments() {
-    return (await handle(await fetch(`${API_BASE_URL}/api/admin/departments`, { headers: authHeaders() }))).departments || [];
+    return (
+      (
+        await handle(
+          await fetch(`${API_BASE_URL}/api/admin/departments`, {
+            headers: authHeaders(),
+          }),
+        )
+      ).departments || []
+    );
   },
   async createDepartment(name, description) {
     return handle(
@@ -258,7 +330,7 @@ export const adminService = {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify({ name, description }),
-      })
+      }),
     );
   },
   async updateDepartment(id, fields) {
@@ -267,7 +339,7 @@ export const adminService = {
         method: "PATCH",
         headers: authHeaders(),
         body: JSON.stringify(fields),
-      })
+      }),
     );
   },
   async deleteDepartment(id, opts = {}) {
@@ -280,13 +352,16 @@ export const adminService = {
       await fetch(`${API_BASE_URL}/api/admin/departments/${id}${qs}`, {
         method: "DELETE",
         headers: authHeaders(),
-      })
+      }),
     );
   },
 
   async deleteRole(id) {
     return handle(
-      await fetch(`${API_BASE_URL}/api/admin/roles/${id}`, { method: "DELETE", headers: authHeaders() })
+      await fetch(`${API_BASE_URL}/api/admin/roles/${id}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      }),
     );
   },
 
@@ -298,18 +373,32 @@ export const adminService = {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify(payload),
-      })
+      }),
     );
   },
 
   // Roles & permissions
   async listRoles() {
-    return (await handle(await fetch(`${API_BASE_URL}/api/admin/roles`, { headers: authHeaders() }))).roles || [];
+    return (
+      (
+        await handle(
+          await fetch(`${API_BASE_URL}/api/admin/roles`, {
+            headers: authHeaders(),
+          }),
+        )
+      ).roles || []
+    );
   },
   async listPermissions() {
     return (
-      await handle(await fetch(`${API_BASE_URL}/api/admin/permissions`, { headers: authHeaders() }))
-    ).permissions || [];
+      (
+        await handle(
+          await fetch(`${API_BASE_URL}/api/admin/permissions`, {
+            headers: authHeaders(),
+          }),
+        )
+      ).permissions || []
+    );
   },
   async createRole(payload) {
     // { name, description?, permissions: [action, ...] }
@@ -318,7 +407,7 @@ export const adminService = {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify(payload),
-      })
+      }),
     );
   },
 };
@@ -328,14 +417,21 @@ export const adminService = {
 export const documentService = {
   async list() {
     return (
-      (await handle(await fetch(`${API_BASE_URL}/api/documents`, { headers: authHeaders() })))
-        .documents || []
+      (
+        await handle(
+          await fetch(`${API_BASE_URL}/api/documents`, {
+            headers: authHeaders(),
+          }),
+        )
+      ).documents || []
     );
   },
   // { user_id, can: {user, department, organization}, users: [...], departments: [...] }
   async shareTargets() {
     return handle(
-      await fetch(`${API_BASE_URL}/api/documents/share-targets`, { headers: authHeaders() })
+      await fetch(`${API_BASE_URL}/api/documents/share-targets`, {
+        headers: authHeaders(),
+      }),
     );
   },
   // payload: { access_type, user_id?|department_id?, expires_at? }
@@ -345,7 +441,7 @@ export const documentService = {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify(payload),
-      })
+      }),
     );
   },
   async listAccess(documentId) {
@@ -354,17 +450,20 @@ export const documentService = {
         await handle(
           await fetch(`${API_BASE_URL}/api/documents/${documentId}/access`, {
             headers: authHeaders(),
-          })
+          }),
         )
       ).access || []
     );
   },
   async revokeAccess(documentId, accessId) {
     return handle(
-      await fetch(`${API_BASE_URL}/api/documents/${documentId}/access/${accessId}`, {
-        method: "DELETE",
-        headers: authHeaders(),
-      })
+      await fetch(
+        `${API_BASE_URL}/api/documents/${documentId}/access/${accessId}`,
+        {
+          method: "DELETE",
+          headers: authHeaders(),
+        },
+      ),
     );
   },
   // Upload ONE file into the RAG pipeline (indexes it + creates the documents
@@ -380,7 +479,7 @@ export const documentService = {
         method: "POST",
         headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
         body: form,
-      })
+      }),
     );
   },
   // Remove a document everywhere (DB row, RAG vectors/file, dashboard metrics).
@@ -390,8 +489,21 @@ export const documentService = {
       await fetch(`${API_BASE_URL}/api/documents/${documentId}`, {
         method: "DELETE",
         headers: authHeaders(),
-      })
+      }),
     );
+  },
+  // The document's original bytes as a Blob — powers the in-app preview and its
+  // download button. The backend enforces access (own uploads + shared docs).
+  async downloadBlob(documentId) {
+    const res = await fetch(
+      `${API_BASE_URL}/api/documents/${documentId}/download`,
+      { headers: authHeaders() },
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || "Could not load the document");
+    }
+    return res.blob();
   },
 };
 
@@ -399,7 +511,11 @@ export const documentService = {
 export const organizationService = {
   async get() {
     return (
-      await handle(await fetch(`${API_BASE_URL}/api/organization`, { headers: authHeaders() }))
+      await handle(
+        await fetch(`${API_BASE_URL}/api/organization`, {
+          headers: authHeaders(),
+        }),
+      )
     ).organization;
   },
   async update(fields) {
@@ -409,7 +525,7 @@ export const organizationService = {
           method: "PATCH",
           headers: authHeaders(),
           body: JSON.stringify(fields),
-        })
+        }),
       )
     ).organization;
   },

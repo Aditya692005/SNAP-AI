@@ -161,8 +161,11 @@ async function extractAndStore(userId, source, opts = {}) {
       /* metric_definitions table not available */
     }
 
-    // organization_id scopes the on-disk file lookup to this tenant's uploads
-    // dir. Chunked whole-document LLM extraction can be slow → generous timeout.
+    // document_id, not just the file name: the RAG service fetches the original bytes
+    // from Storage by resolving the id to a storage_path. Resolving by name alone was
+    // ambiguous across organizations — two orgs with a `report.pdf` would extract each
+    // other's numbers. organization_id covers the name-only fallback. Chunked
+    // whole-document LLM extraction can be slow → generous timeout.
     const response = await ragFetch(
       "/extract-metrics",
       {
@@ -170,6 +173,7 @@ async function extractAndStore(userId, source, opts = {}) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           source,
+          document_id: documentId,
           custom_metrics: customMetrics,
           organization_id: organizationId,
         }),
