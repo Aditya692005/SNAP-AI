@@ -330,6 +330,18 @@ async function listUploadedFileNames(userId, organizationId) {
   return [...new Set((data || []).map((d) => d.file_name))];
 }
 
+// Same set, but with ids — for callers that go on to extract metrics, where the
+// document_id must land on the metric rows or they won't roll up on shared boards.
+async function listUploadedDocuments(userId, organizationId) {
+  const { data, error } = await supabase
+    .from("documents")
+    .select("id, file_name")
+    .eq("organization_id", organizationId)
+    .eq("uploaded_by_user_id", userId);
+  if (error) throw error;
+  return data || [];
+}
+
 // Storage keys of every document this user uploaded. Read BEFORE deleting the rows in
 // "Clear all documents" — once they're gone there's no way left to find their objects,
 // which would leave the bucket full of orphans.
@@ -373,5 +385,6 @@ module.exports = {
   listDocumentAccess,
   revokeAccess,
   listUploadedFileNames,
+  listUploadedDocuments,
   listStoragePathsForUser,
 };

@@ -67,7 +67,12 @@ const _QUALIFIER = new Set([
 // extracted key is a shorter form of the definition ("interest" -> "interest
 // income"), an exact token match, or a MORE specific form whose only extra words
 // are generic qualifiers ("royalty income" -> "royalties"). Always requires a
-// shared distinctive (>=4 char) token so nothing merges on tiny/generic words.
+// shared distinctive token so nothing merges on tiny/generic words: >=4 chars,
+// or any length with a digit — chemical/measurement codes like "no2", "co2",
+// "pm25" are short but unmistakably specific.
+function _distinctive(t) {
+  return t.length >= 4 || /\d/.test(t);
+}
 function _matchDefinition(metricKey, defs) {
   const ex = _tokens(metricKey);
   if (!ex.length) return null;
@@ -86,7 +91,7 @@ function _matchDefinition(metricKey, defs) {
       }
       if (!ok) continue;
       const shared = dt.filter((t) => ex.includes(t));
-      if (!shared.some((t) => t.length >= 4)) continue;
+      if (!shared.some(_distinctive)) continue;
       const exact = exSubDef && defSubEx;
       // Prefer exact, then the most specific (most shared tokens) definition.
       const score = (exact ? 1000 : 0) + shared.length * 10 + Math.min(dt.length, ex.length);

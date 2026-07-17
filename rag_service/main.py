@@ -418,6 +418,11 @@ async def index_endpoint(
             detail=f"Unsupported type '{suffix}'. Allowed: {sorted(ALLOWED_EXTENSIONS)}",
         )
 
+    # A re-upload replaces the bucket object under the SAME storage key, so any
+    # locally cached copy of this file is now stale — evict it, or /visualize,
+    # /extract-metrics and chart refresh keep reading the old bytes forever.
+    await asyncio.to_thread(docstore.evict, safe_name)
+
     # Spool to a scratch dir that OUTLIVES this request (the background job needs
     # it); _run_index_job removes the whole dir when it finishes. Keep the real
     # file name — some parsers dispatch on the extension.
@@ -667,6 +672,13 @@ VIZ_PROMPT = ChatPromptTemplate.from_messages([
      "in that range that appears in ANY table, sorted chronologically — never stop "
      "at the periods from just one table.\n"
      "- Aggregate/group when the request implies it (e.g. totals by category).\n"
+     "- When the request names SPECIFIC series (e.g. 'advertising revenue vs "
+     "channel sales'), map each requested series to the dataset column whose "
+     "name matches it MOST CLOSELY, and use that column's values only. NEVER "
+     "substitute a different column for a requested series: if no column "
+     "plausibly matches a requested name, OMIT that series and say so in "
+     "notes — a chart with a missing series is correct, one with swapped-in "
+     "wrong data is not.\n"
      "- labels and each dataset's data array must be the SAME length.\n"
      "- pie/doughnut must have exactly one dataset.\n"
      "- Numbers must be plain (no commas, currency symbols, or units).\n"
@@ -990,8 +1002,21 @@ def run_aggregation_supabase(message, organization_id, document_ids, focus_docum
     note = f"{label.title()} of {', '.join(mcols)} by {gcol}, computed exactly over {len(all_rows)} rows."
 
     if want_chart:
+        # Honor the chart type the user asked for; bar is the safe default for a
+        # per-category aggregate. Pie only fits a single series.
+        q = message.lower()
+        if "line" in q or "trend" in q:
+            chart_type = "line"
+        elif "area" in q:
+            chart_type = "area"
+        elif ("pie" in q or "doughnut" in q or "donut" in q) and len(mcols) == 1:
+            chart_type = "pie"
+        elif "scatter" in q:
+            chart_type = "scatter"
+        else:
+            chart_type = "bar"
         spec = {
-            "chart_type": "bar",
+            "chart_type": chart_type,
             "title": f"{label.title()} {', '.join(mcols)} by {gcol}",
             "labels": [r[gcol] for r in out_rows],
             "datasets": [{"label": mc, "data": [r[mc] for r in out_rows]} for mc in mcols],
@@ -2152,6 +2177,9 @@ def ingest_document(req: IngestRequest):
     the chunk count) — but a sync `def` endpoint, so FastAPI runs it on its threadpool,
     off the event loop. Versioned re-index: index_document supersedes the old chunks
     only after the new ones land, so cited chunk ids stay resolvable."""
+    # Evict any cached copy first: a regenerated report reuses its storage key,
+    # so a cache hit here would index the previous version's bytes.
+    docstore.evict(Path(req.filename).name)
     path = docstore.resolve_source(req.filename, document_id=req.document_id)
     if path is None:
         raise HTTPException(status_code=404, detail=f"File '{req.filename}' not found")

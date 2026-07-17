@@ -45,6 +45,7 @@ const {
   findByFileName: findDocByName,
   deleteDocument: deleteDocumentRow,
   listUploadedFileNames,
+  listUploadedDocuments,
   documentIdsForDepartment,
   documentIdsForOrganization,
 } = require("../models/documentModel");
@@ -557,12 +558,15 @@ router.post("/metric-definitions", requireAuth, async (req, res, next) => {
 
     // Backfill: re-extract the user's existing docs so a just-defined metric
     // pulls values from files uploaded earlier. Background + best effort.
-    listUploadedFileNames(req.user.id, req.user.organization_id)
-      .then((sources) =>
-        sources.reduce(
-          (chain, s) =>
+    listUploadedDocuments(req.user.id, req.user.organization_id)
+      .then((docs) =>
+        docs.reduce(
+          (chain, d) =>
             chain.then(() =>
-              extractAndStore(req.user.id, s, { organizationId: req.user.organization_id }).catch(() => {})
+              extractAndStore(req.user.id, d.file_name, {
+                documentId: d.id,
+                organizationId: req.user.organization_id,
+              }).catch(() => {})
             ),
           Promise.resolve()
         )
@@ -613,12 +617,15 @@ router.post("/track-metric", requireAuth, async (req, res, next) => {
       label: String(label).trim(),
       kind: kind || "number",
     });
-    listUploadedFileNames(req.user.id, req.user.organization_id)
-      .then((sources) =>
-        sources.reduce(
-          (chain, s) =>
+    listUploadedDocuments(req.user.id, req.user.organization_id)
+      .then((docs) =>
+        docs.reduce(
+          (chain, d) =>
             chain.then(() =>
-              extractAndStore(req.user.id, s, { organizationId: req.user.organization_id }).catch(() => {})
+              extractAndStore(req.user.id, d.file_name, {
+                documentId: d.id,
+                organizationId: req.user.organization_id,
+              }).catch(() => {})
             ),
           Promise.resolve()
         )
