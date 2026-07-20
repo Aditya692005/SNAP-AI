@@ -226,9 +226,9 @@ function Dashboard() {
   const [orgMetricError, setOrgMetricError] = useState(null);
 
   useEffect(() => {
-    loadDashboards();
-    loadDepartmentBoards();
-    refreshDocuments();
+    // Independent loads — fire them in parallel instead of as a waterfall so the
+    // dashboard paints as soon as the slowest one (not their sum) resolves.
+    Promise.all([loadDashboards(), loadDepartmentBoards(), refreshDocuments()]);
   }, []);
 
   // Load (or reload) the org board whenever view access appears — at mount for

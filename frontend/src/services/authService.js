@@ -516,6 +516,37 @@ export const documentService = {
   },
 };
 
+// In-app "Updates" feed (the sidebar notifications panel). All endpoints are
+// scoped to the logged-in user server-side.
+export const updatesService = {
+  // { updates: [...], unread: N }
+  async list() {
+    return handle(
+      await fetch(`${API_BASE_URL}/api/updates`, { headers: authHeaders() }),
+    );
+  },
+  // Mark specific ids read, or ALL when ids is omitted. Returns { unread }.
+  async markRead(ids) {
+    return handle(
+      await fetch(`${API_BASE_URL}/api/updates/mark-read`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(ids ? { ids } : {}),
+      }),
+    );
+  },
+  // Record that an AI answer arrived while the user wasn't watching the chat.
+  async aiResponse(preview, conversationId) {
+    return handle(
+      await fetch(`${API_BASE_URL}/api/updates/ai-response`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ preview, conversation_id: conversationId || null }),
+      }),
+    );
+  },
+};
+
 // Organization details (read for everyone; edit requires MANAGE_ORGANIZATION).
 export const organizationService = {
   async get() {

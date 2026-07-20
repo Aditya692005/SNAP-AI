@@ -91,6 +91,9 @@ function AIAssistant() {
   const bottomRef = useRef(null);
   const fileRef = useRef(null);
   const toastIdRef = useRef(0);
+  // Pending background-index poll timers, so we can cancel them on a new upload
+  // or on unmount instead of leaking fetches after the user navigates away.
+  const pollTimersRef = useRef([]);
 
   function notify(text, type = "success") {
     const id = ++toastIdRef.current;
@@ -108,6 +111,8 @@ function AIAssistant() {
     // Restore the conversation the user last had open (survives navigation).
     const saved = localStorage.getItem(ACTIVE_CONVO_KEY);
     if (saved) loadConversation(saved, { silent: true });
+    // Cancel any pending background-index poll timers on unmount.
+    return () => pollTimersRef.current.forEach(clearTimeout);
   }, []);
 
   useEffect(() => {
@@ -566,12 +571,14 @@ function AIAssistant() {
     }
 
     fetchDocs();
-    // Background indexing: refresh again so "processing" flips to ready
-    // without a manual reload once the RAG service finishes.
+    // Background indexing: refresh again so "processing" flips to ready without a
+    // manual reload. Cancel any prior batch first, and track the timers so the
+    // unmount effect can clear them (no fetches fire after navigating away).
+    pollTimersRef.current.forEach(clearTimeout);
     if (succeeded.some((s) => s.processing)) {
-      setTimeout(fetchDocs, 5000);
-      setTimeout(fetchDocs, 15000);
-      setTimeout(fetchDocs, 45000);
+      pollTimersRef.current = [5000, 15000, 45000].map((ms) => setTimeout(fetchDocs, ms));
+    } else {
+      pollTimersRef.current = [];
     }
     setUploading(false);
     setUploadProgress(null);
@@ -992,7 +999,7 @@ function AIAssistant() {
         {/* Messages */}
         <div className="chat-messages">
           {messages.map((msg, i) => (
-            <div key={i} className={`chat-bubble ${msg.role} ${msg.error ? "error" : ""}`}>
+            <div key={msg.id ?? `m-${i}`} className={`chat-bubble ${msg.role} ${msg.error ? "error" : ""}`}>
               {msg.picker ? (
                 <div className="doc-picker">
                   <div className="doc-picker-title">

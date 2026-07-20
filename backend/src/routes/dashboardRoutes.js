@@ -87,6 +87,7 @@ const {
   refreshDepartmentWidget,
   refreshOrganizationWidget,
 } = require("../services/widgetRefreshService");
+const { notifyMetricAdded } = require("../services/updateNotifier");
 
 const router = express.Router();
 
@@ -649,6 +650,12 @@ router.post("/track-metric", requireAuth, async (req, res, next) => {
         ai_message_id: null,
       });
       touchOrgBoard(board.id, req.user.id);
+      notifyMetricAdded({
+        organizationId: req.user.organization_id,
+        actorId: req.user.id,
+        scope: "organization",
+        label: def.label,
+      }).catch(() => {});
       return res.status(201).json(widget);
     }
     if (target === "department") {
@@ -667,6 +674,13 @@ router.post("/track-metric", requireAuth, async (req, res, next) => {
         ai_message_id: null,
       });
       touchBoard(board.id, req.user.id);
+      notifyMetricAdded({
+        organizationId: req.user.organization_id,
+        actorId: req.user.id,
+        scope: "department",
+        departmentId: board.department_id,
+        label: def.label,
+      }).catch(() => {});
       return res.status(201).json(widget);
     }
 
@@ -841,6 +855,15 @@ router.post("/department/:id/widgets", requireAuth, async (req, res, next) => {
       ai_message_id: ai_message_id ?? null,
     });
     touchBoard(board.id, req.user.id);
+    if (widget_type === "metric") {
+      notifyMetricAdded({
+        organizationId: req.user.organization_id,
+        actorId: req.user.id,
+        scope: "department",
+        departmentId: board.department_id,
+        label: title || config.metric_key,
+      }).catch(() => {});
+    }
     return res.status(201).json(widget);
   } catch (err) {
     return next(err);
@@ -1052,6 +1075,14 @@ router.post("/organization/widgets", requireAuth, async (req, res, next) => {
       ai_message_id: ai_message_id ?? null,
     });
     touchOrgBoard(board.id, req.user.id);
+    if (widget_type === "metric") {
+      notifyMetricAdded({
+        organizationId: req.user.organization_id,
+        actorId: req.user.id,
+        scope: "organization",
+        label: title || config.metric_key,
+      }).catch(() => {});
+    }
     return res.status(201).json(widget);
   } catch (err) {
     return next(err);

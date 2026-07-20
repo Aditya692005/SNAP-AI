@@ -227,61 +227,65 @@ async function accessibleDocumentIds(userId, organizationId, { subtreeDepartment
   const deptId = u?.department_id ?? null;
   const notExpired = `expires_at.is.null,expires_at.gt.${new Date().toISOString()}`;
 
-  const ids = new Set();
-
-  const { data: owned } = await supabase
-    .from("documents")
-    .select("id")
-    .eq("organization_id", organizationId)
-    .eq("uploaded_by_user_id", userId);
-  (owned || []).forEach((d) => ids.add(d.id));
-
-  const { data: byUser } = await supabase
-    .from("document_access")
-    .select("document_id")
-    .eq("access_type", "USER")
-    .eq("user_id", userId)
-    .or(notExpired);
-  (byUser || []).forEach((a) => ids.add(a.document_id));
-
-  if (deptId) {
-    let deptIds = [deptId];
-    if (subtreeDepartments) {
-      try {
-        const subtree = await departmentSubtreeIds(organizationId, deptId);
-        if (subtree.length > 0) deptIds = subtree;
-      } catch {
-        /* fall back to the exact department */
-      }
+  // The department grant targets the user's department (or its subtree for
+  // dept-sharers). Resolve the subtree first since the query below depends on it.
+  let deptIds = deptId ? [deptId] : [];
+  if (deptId && subtreeDepartments) {
+    try {
+      const subtree = await departmentSubtreeIds(organizationId, deptId);
+      if (subtree.length > 0) deptIds = subtree;
+    } catch {
+      /* fall back to the exact department */
     }
-    const { data: byDept } = await supabase
-      .from("document_access")
-      .select("document_id")
-      .eq("access_type", "DEPARTMENT")
-      .in("department_id", deptIds)
-      .or(notExpired);
-    (byDept || []).forEach((a) => ids.add(a.document_id));
   }
 
-  if (roleId) {
-    const { data: byRole } = await supabase
+  // The five source queries are independent — run them concurrently instead of
+  // sequentially (this runs on the critical path of every /chat and preview
+  // request). Each returns rows we union into the accessible-id set.
+  const [owned, byUser, byDept, byRole, byOrg] = await Promise.all([
+    supabase
+      .from("documents")
+      .select("id")
+      .eq("organization_id", organizationId)
+      .eq("uploaded_by_user_id", userId),
+    supabase
       .from("document_access")
       .select("document_id")
-      .eq("access_type", "ROLE")
-      .eq("role_id", roleId)
-      .or(notExpired);
-    (byRole || []).forEach((a) => ids.add(a.document_id));
-  }
+      .eq("access_type", "USER")
+      .eq("user_id", userId)
+      .or(notExpired),
+    deptIds.length
+      ? supabase
+          .from("document_access")
+          .select("document_id")
+          .eq("access_type", "DEPARTMENT")
+          .in("department_id", deptIds)
+          .or(notExpired)
+      : Promise.resolve({ data: [] }),
+    roleId
+      ? supabase
+          .from("document_access")
+          .select("document_id")
+          .eq("access_type", "ROLE")
+          .eq("role_id", roleId)
+          .or(notExpired)
+      : Promise.resolve({ data: [] }),
+    // Org-wide shares: scoped to this org through the documents join (the grant
+    // row itself has no organization column).
+    supabase
+      .from("document_access")
+      .select("document_id, documents!inner(organization_id)")
+      .eq("access_type", "ORGANIZATION")
+      .eq("documents.organization_id", organizationId)
+      .or(notExpired),
+  ]);
 
-  // Org-wide shares: scoped to this org through the documents join (the grant
-  // row itself has no organization column).
-  const { data: byOrg } = await supabase
-    .from("document_access")
-    .select("document_id, documents!inner(organization_id)")
-    .eq("access_type", "ORGANIZATION")
-    .eq("documents.organization_id", organizationId)
-    .or(notExpired);
-  (byOrg || []).forEach((a) => ids.add(a.document_id));
+  const ids = new Set();
+  (owned.data || []).forEach((d) => ids.add(d.id));
+  (byUser.data || []).forEach((a) => ids.add(a.document_id));
+  (byDept.data || []).forEach((a) => ids.add(a.document_id));
+  (byRole.data || []).forEach((a) => ids.add(a.document_id));
+  (byOrg.data || []).forEach((a) => ids.add(a.document_id));
 
   return [...ids];
 }

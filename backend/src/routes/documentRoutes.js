@@ -41,6 +41,30 @@ const { findAssignableRole } = require("../models/roleModel");
 const { logAdminAction } = require("../models/auditModel");
 const { getObject, removeObject } = require("../services/storageService");
 const { canRead, sendBuffer } = require("../services/documentDownload");
+const { recipientsForShareTarget } = require("../models/updateModel");
+const { notifyDocumentShared, notifyDocumentRetracted } = require("../services/updateNotifier");
+
+// Union of ACTIVE user ids reached by a document's current access grants — used
+// to notify everyone who loses access when a share is revoked or the whole
+// document is deleted. `accessRows` come from listDocumentAccess (embedded
+// user/department/role objects).
+async function recipientsForAccessRows(organizationId, accessRows, { excludeUserId } = {}) {
+  const ids = new Set();
+  for (const a of accessRows || []) {
+    const reached = await recipientsForShareTarget(
+      organizationId,
+      {
+        accessType: a.access_type,
+        userId: a.user?.id,
+        departmentId: a.department?.id,
+        roleId: a.role?.id,
+      },
+      { excludeUserId }
+    ).catch(() => []);
+    reached.forEach((id) => ids.add(id));
+  }
+  return [...ids];
+}
 
 const router = express.Router();
 router.use(requireAuth);
@@ -209,6 +233,18 @@ router.post("/:id/share", async (req, res, next) => {
       targetId: doc.id,
       meta: { access_type, role_id, department_id, user_id, expires_at: expiresAt },
     });
+
+    // Notify whoever this share reaches (fire-and-forget; never blocks the share).
+    notifyDocumentShared({
+      organizationId: orgId,
+      actorId: req.user.id,
+      doc,
+      accessType: access_type,
+      userId: user_id,
+      departmentId: department_id,
+      roleId: role_id,
+    }).catch(() => {});
+
     return res.status(201).json({ access });
   } catch (err) {
     return next(err);
@@ -246,6 +282,21 @@ router.delete("/:id/access/:accessId", async (req, res, next) => {
     if (!canManageDocument(req, doc)) {
       throw new AppError("You can only manage sharing for documents you uploaded.", 403);
     }
+
+    // Resolve who this grant reached BEFORE deleting it, so we can tell them they
+    // lost access. Best-effort — a lookup failure must not block the revoke.
+    let losing = [];
+    try {
+      const grant = (await listDocumentAccess(doc.id)).find((a) => a.id === req.params.accessId);
+      if (grant) {
+        losing = await recipientsForAccessRows(req.user.organization_id, [grant], {
+          excludeUserId: req.user.id,
+        });
+      }
+    } catch {
+      /* best-effort */
+    }
+
     const removed = await revokeAccess(req.params.accessId, doc.id);
     if (!removed) throw new AppError("Share not found.", 404);
 
@@ -254,6 +305,14 @@ router.delete("/:id/access/:accessId", async (req, res, next) => {
       targetId: doc.id,
       meta: { access_id: req.params.accessId },
     });
+
+    notifyDocumentRetracted({
+      organizationId: req.user.organization_id,
+      actorId: req.user.id,
+      doc,
+      recipients: losing,
+    }).catch(() => {});
+
     return res.json({ revoked: true });
   } catch (err) {
     return next(err);
@@ -295,6 +354,18 @@ router.delete("/:id", async (req, res, next) => {
       throw new AppError("You can only remove documents you uploaded.", 403);
     }
 
+    // Everyone who currently has access (plus the uploader, if an admin is doing
+    // the removing) should be told the document is gone. Resolve BEFORE deleting
+    // the access rows — afterwards there's nothing left to resolve from.
+    let losing = [];
+    try {
+      const access = await listDocumentAccess(doc.id);
+      losing = await recipientsForAccessRows(orgId, access, { excludeUserId: req.user.id });
+      if (doc.uploaded_by_user_id !== req.user.id) losing.push(doc.uploaded_by_user_id);
+    } catch {
+      /* best-effort */
+    }
+
     // 1) Dashboard metrics/status for the uploader (updates their dashboard).
     try {
       await deleteDocumentMetrics(doc.uploaded_by_user_id, doc.file_name);
@@ -331,6 +402,15 @@ router.delete("/:id", async (req, res, next) => {
       targetId: doc.id,
       meta: { file_name: doc.file_name },
     });
+
+    notifyDocumentRetracted({
+      organizationId: orgId,
+      actorId: req.user.id,
+      doc,
+      recipients: losing,
+      removed: true,
+    }).catch(() => {});
+
     return res.json({ deleted: true });
   } catch (err) {
     return next(err);

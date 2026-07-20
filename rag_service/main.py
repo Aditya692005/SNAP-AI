@@ -1876,6 +1876,45 @@ def _result_cache_set(key: str, result: list) -> None:
 _retrieval_latencies: deque = deque(maxlen=500)
 _latency_lock = threading.Lock()
 
+# Per-stage chat latency samples (ms) for /metrics, so we can see where a chat
+# turn spends its time: condense / retrieve / tables / generate. A condense
+# sample of ~0 means the follow-up was self-contained and the LLM call was
+# skipped (P3 optimisation).
+_stage_latencies: dict[str, deque] = {
+    "condense": deque(maxlen=500),
+    "retrieve": deque(maxlen=500),
+    "tables": deque(maxlen=500),
+    "generate": deque(maxlen=500),
+}
+
+
+def _record_stage(stage: str, ms: float) -> None:
+    with _latency_lock:
+        _stage_latencies[stage].append(ms)
+
+
+# Words that signal a question leans on the prior turn (pronouns, deixis,
+# ellipsis). Only these — or a very short question — need the condense LLM call
+# to be rewritten into a standalone query; a self-contained question is used
+# as-is, saving one Gemini round-trip per follow-up.
+_FOLLOWUP_MARKERS = (
+    "it", "its", "it's", "that", "this", "they", "them", "those", "these",
+    "he", "she", "him", "her", "his", "their", "theirs", "one", "ones",
+    "above", "previous", "previously", "earlier", "aforementioned", "former",
+    "latter", "same", "then", "there", "such", "another", "again",
+)
+_FOLLOWUP_RE = re.compile(r"\b(" + "|".join(re.escape(m) for m in _FOLLOWUP_MARKERS) + r")\b", re.I)
+
+
+def _needs_condense(question: str) -> bool:
+    """True when the question references the prior conversation (so it must be
+    rewritten to a standalone query before retrieval). Self-contained questions
+    return False and skip the condense LLM call."""
+    q = (question or "").strip()
+    if len(q.split()) <= 5:  # terse → likely elliptical ("and Q3?", "why?")
+        return True
+    return bool(_FOLLOWUP_RE.search(q))
+
 
 def _norm_query(q: str) -> str:
     return " ".join((q or "").split())
@@ -1940,12 +1979,11 @@ def rerank_hits(question: str, hits: list[dict], k: int) -> list[dict]:
         pass  # keep fused order
     return hits[:k]
 
-def render_document_tables(document_id) -> str:
-    """A document's stored tabular data (document_tables) rendered as CSV text, so
-    the LLM can answer over the ACTUAL rows rather than just the embedded summary
-    chunk. Returns '' for documents that have no tables (e.g. plain text)."""
+def _render_table_rows(tables: list[dict]) -> str:
+    """Render already-fetched document_tables rows as CSV text blocks, so the LLM
+    can answer over the ACTUAL rows rather than just the embedded summary chunk."""
     blocks = []
-    for t in store.tables_for_documents([document_id]):
+    for t in tables:
         rows = (t.get("table_data") or {}).get("rows") or []
         if not rows:
             continue
@@ -1956,6 +1994,23 @@ def render_document_tables(document_id) -> str:
             lines.append(",".join("" if r.get(c) is None else str(r.get(c)) for c in cols))
         blocks.append(f"FULL TABLE DATA ({name}):\n" + "\n".join(lines))
     return "\n\n".join(blocks)
+
+
+def render_document_tables_batch(document_ids: list) -> list[str]:
+    """Rendered CSV blocks for several documents' tables in ONE Supabase read
+    (was N+1: one RPC per document), returned in document_ids order with empties
+    dropped."""
+    if not document_ids:
+        return []
+    by_doc: dict = {}
+    for t in store.tables_for_documents(document_ids):
+        by_doc.setdefault(t.get("document_id"), []).append(t)
+    out = []
+    for did in document_ids:
+        block = _render_table_rows(by_doc.get(did, []))
+        if block:
+            out.append(block)
+    return out
 
 
 async def run_rag_chain(
@@ -1975,21 +2030,28 @@ async def run_rag_chain(
     else:
         chat_history = get_history(session_id)
 
-    # Step 1 — condense follow-up into standalone question if there's history
-    if chat_history:
+    # Step 1 — condense a follow-up into a standalone question, but ONLY when it
+    # references the prior turn (pronouns/deixis/very short). Self-contained
+    # questions skip this extra Gemini round-trip — the RAG prompt still receives
+    # chat_history below, so no context is lost.
+    _t = time.perf_counter()
+    if chat_history and _needs_condense(question):
         condense_chain = CONDENSE_PROMPT | llm | StrOutputParser()
         standalone = await condense_chain.ainvoke({"chat_history": chat_history, "question": question})
     else:
         standalone = question
+    _record_stage("condense", (time.perf_counter() - _t) * 1000.0)
 
     # Step 2 — Supabase pgvector retrieval, scoped by org + the docs the user may
     # see. A focus_document_id narrows the search to a single document. Run on a
     # worker thread: embedding + reranking are CPU-bound and would otherwise
     # freeze the event loop for every other request.
     ids = [focus_document_id] if focus_document_id else document_ids
+    _t = time.perf_counter()
     hits = await asyncio.to_thread(
         retrieve_chunks, standalone, organization_id or "", ids, 8 if focus_document_id else 5
     )
+    _record_stage("retrieve", (time.perf_counter() - _t) * 1000.0)
 
     # Include the ACTUAL tabular data (document_tables) for the relevant documents
     # so questions over "the whole document" use real rows, not just the embedded
@@ -2008,9 +2070,9 @@ async def run_rag_chain(
             if len(table_doc_ids) >= MAX_TABLE_DOCS:
                 break
 
-    context_parts = await asyncio.to_thread(
-        lambda: [t for t in (render_document_tables(did) for did in table_doc_ids) if t]
-    )
+    _t = time.perf_counter()
+    context_parts = await asyncio.to_thread(render_document_tables_batch, table_doc_ids)
+    _record_stage("tables", (time.perf_counter() - _t) * 1000.0)
     chunk_text = "\n\n".join(h["chunk_text"] for h in hits)
     if chunk_text:
         context_parts.append(chunk_text)
@@ -2039,11 +2101,13 @@ async def run_rag_chain(
         context = context[:MAX_CONTEXT_CHARS]
 
     rag_chain = RAG_PROMPT | llm | StrOutputParser()
+    _t = time.perf_counter()
     answer = await rag_chain.ainvoke({
         "context": context,
         "chat_history": chat_history,
         "question": question,
     })
+    _record_stage("generate", (time.perf_counter() - _t) * 1000.0)
 
     # Step 4 — update in-memory history only when not using caller-supplied history.
     if history is None:
@@ -2438,16 +2502,23 @@ def service_metrics():
     """Operational counters for monitoring: cache effectiveness, retrieval
     latency (cache misses = real embed+search+rerank round-trips), indexing
     job states, and which optional components are active."""
+    def _summarize(samples: list) -> dict:
+        s = sorted(samples)
+        out: dict = {"samples": len(s)}
+        if s:
+            out.update(
+                avg_ms=round(sum(s) / len(s), 1),
+                p50_ms=round(s[len(s) // 2], 1),
+                p95_ms=round(s[min(len(s) - 1, int(len(s) * 0.95))], 1),
+                max_ms=round(s[-1], 1),
+            )
+        return out
+
     with _latency_lock:
-        lat = sorted(_retrieval_latencies)
-    latency: dict = {"samples": len(lat)}
-    if lat:
-        latency.update(
-            avg_ms=round(sum(lat) / len(lat), 1),
-            p50_ms=round(lat[len(lat) // 2], 1),
-            p95_ms=round(lat[min(len(lat) - 1, int(len(lat) * 0.95))], 1),
-            max_ms=round(lat[-1], 1),
-        )
+        lat = list(_retrieval_latencies)
+        stages = {name: list(dq) for name, dq in _stage_latencies.items()}
+    latency = _summarize(lat)
+    stage_latency = {name: _summarize(samples) for name, samples in stages.items()}
     with _jobs_lock:
         jobs: dict[str, int] = {}
         for j in _index_jobs.values():
@@ -2459,6 +2530,7 @@ def service_metrics():
         "result_cache": {**_cache_stats, "backend": "redis" if _redis is not None else "memory"},
         "embed_cache": {"hits": embed_info.hits, "misses": embed_info.misses, "size": embed_info.currsize},
         "retrieval_latency": latency,
+        "chat_stage_latency": stage_latency,
         "index_jobs": jobs,
         "sessions": n_sessions,
         "reranker": reranker is not None,
