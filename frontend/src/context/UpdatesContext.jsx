@@ -1,14 +1,15 @@
 import { createContext, useContext, useCallback, useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { authService, updatesService } from "../services/authService";
-import UpdatesPanel from "../components/UpdatesPanel";
 import UpdatesPopups from "../components/UpdatesPopups";
 
 // Global store for the in-app "Updates" feed: the notifications list, the unread
-// count (drives the sidebar badge), the open/closed drawer, and the transient
-// popups that appear for ~10s when a new update lands. Poll-based — the backend
-// has no websocket — but cheap: a small list every POLL_MS, plus an immediate
-// refresh on navigation, tab focus, and after the chat posts an AI-reply update.
+// count (drives the sidebar badge), and the transient popups that appear for
+// ~10s when a new update lands. The full list lives on its own page (/updates);
+// this provider just keeps the data warm and surfaces new arrivals as popups.
+// Poll-based — the backend has no websocket — but cheap: a small list every
+// POLL_MS, plus an immediate refresh on navigation, tab focus, and after the
+// chat posts an AI-reply update.
 
 const POLL_MS = 25000;
 const POPUP_MS = 10000; // requirement: the popup shows for 10 seconds
@@ -24,7 +25,6 @@ export function useUpdates() {
 export function UpdatesProvider({ children }) {
   const [updates, setUpdates] = useState([]);
   const [unread, setUnread] = useState(0);
-  const [open, setOpen] = useState(false);
   const [popups, setPopups] = useState([]);
 
   const location = useLocation();
@@ -108,27 +108,51 @@ export function UpdatesProvider({ children }) {
     }
   }, [refresh]);
 
-  const openPanel = useCallback(() => setOpen(true), []);
-  const closePanel = useCallback(() => setOpen(false), []);
+  const removeUpdate = useCallback(async (id) => {
+    // Optimistic remove; drop the badge if it was unread. Keep it out of the
+    // popup stack too. Re-syncs from the server on failure.
+    let wasUnread = false;
+    setUpdates((prev) => {
+      const target = prev.find((u) => u.id === id);
+      wasUnread = target ? !target.read_at : false;
+      return prev.filter((u) => u.id !== id);
+    });
+    setPopups((prev) => prev.filter((p) => p.id !== id));
+    if (wasUnread) setUnread((n) => Math.max(0, n - 1));
+    try {
+      const { unread: n } = await updatesService.remove(id);
+      if (typeof n === "number") setUnread(n);
+    } catch {
+      refresh();
+    }
+  }, [refresh]);
+
+  const clearAll = useCallback(async () => {
+    setUpdates([]);
+    setPopups([]);
+    setUnread(0);
+    try {
+      await updatesService.clearAll();
+    } catch {
+      refresh();
+    }
+  }, [refresh]);
 
   const value = {
     updates,
     unread,
-    open,
     popups,
-    openPanel,
-    closePanel,
-    setOpen,
     refresh,
     markAllRead,
     markOneRead,
+    removeUpdate,
+    clearAll,
     dismissPopup,
   };
 
   return (
     <UpdatesContext.Provider value={value}>
       {children}
-      <UpdatesPanel />
       <UpdatesPopups />
     </UpdatesContext.Provider>
   );

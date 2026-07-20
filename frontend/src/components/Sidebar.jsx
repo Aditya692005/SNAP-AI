@@ -4,10 +4,12 @@ import { MdDashboard } from "react-icons/md";
 import { VscEditSparkle } from "react-icons/vsc";
 import { HiOutlineDocumentReport } from "react-icons/hi";
 import { GrUserAdmin } from "react-icons/gr";
-import { IoSettingsSharp } from "react-icons/io5";
+import { IoSettingsSharp, IoNotificationsOutline } from "react-icons/io5";
 import { Link, useLocation } from "react-router-dom";
 import { authService } from "../services/authService";
+import { useUpdates } from "../context/UpdatesContext";
 import "./Sidebar.css";
+import "./Updates.css";
 
 // A slim icon rail that expands to reveal labels on hover — no click toggle.
 // Labels are always in the DOM (hidden by CSS when the rail is collapsed) so the
@@ -23,6 +25,7 @@ function Sidebar() {
   }, []);
 
   const isAdmin = authService.isAdmin();
+  const { unread } = useUpdates();
 
   const items = [
     { to: "/dashboard", label: "Dashboard", icon: <MdDashboard /> },
@@ -49,6 +52,22 @@ function Sidebar() {
             <span className="nav-label">{it.label}</span>
           </Link>
         ))}
+
+        {/* Updates: links to the full notifications page. The red bubble shows
+            the unread count and is visible even while the rail is collapsed. */}
+        <Link
+          to="/updates"
+          className={`updates-link ${location.pathname === "/updates" ? "active" : ""}`}
+          title="Updates"
+        >
+          <span className="nav-icon">
+            <IoNotificationsOutline />
+            {unread > 0 && (
+              <span className="updates-badge">{unread > 99 ? "99+" : unread}</span>
+            )}
+          </span>
+          <span className="nav-label">Updates</span>
+        </Link>
       </nav>
 
       <div className="sidebar-footer">

@@ -86,6 +86,23 @@ async function markAllRead(userId) {
   if (error) throw error;
 }
 
+// Permanently remove one of the user's updates. The user_id filter makes it
+// impossible to delete someone else's row with a crafted id.
+async function deleteUpdate(userId, id) {
+  const { error } = await supabase
+    .from("user_updates")
+    .delete()
+    .eq("user_id", userId)
+    .eq("id", id);
+  if (error) throw error;
+}
+
+// Remove every update the user has (the "Clear all" action).
+async function deleteAllForUser(userId) {
+  const { error } = await supabase.from("user_updates").delete().eq("user_id", userId);
+  if (error) throw error;
+}
+
 // ── Recipient resolution ──────────────────────────────────────────────────────
 // Turn a sharing target into the set of ACTIVE user ids to notify, always scoped
 // to the org and excluding the actor (you don't get notified about your own
@@ -146,6 +163,8 @@ module.exports = {
   countUnread,
   markRead,
   markAllRead,
+  deleteUpdate,
+  deleteAllForUser,
   recipientsForShareTarget,
   recipientsForDepartment,
   recipientsForOrganization,

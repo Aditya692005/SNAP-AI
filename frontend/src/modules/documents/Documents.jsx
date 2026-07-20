@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import AppShell from "../../components/AppShell";
 import ToastStack from "../../components/Toast";
 import ShareDialog from "./ShareDialog";
@@ -36,6 +37,9 @@ function Documents() {
 
   const fileRef = useRef(null);
   const toastIdRef = useRef(0);
+  // Deep-link: an Updates-panel "View / download" lands here as ?preview=<docId>.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const handledPreviewRef = useRef(null);
 
   function notify(text, type = "success") {
     const id = ++toastIdRef.current;
@@ -77,6 +81,23 @@ function Documents() {
       cancelled = true;
     };
   }, []);
+
+  // Open the requested document's preview once the list has loaded, then strip
+  // the query param so a refresh/back doesn't reopen it. A doc that isn't in the
+  // list (no access) is simply ignored.
+  useEffect(() => {
+    const id = searchParams.get("preview");
+    if (!id || loading) return;
+    if (handledPreviewRef.current === id) return;
+    const d = docs.find((x) => x.id === id);
+    if (!d) return;
+    handledPreviewRef.current = id;
+    openViewer(d);
+    const next = new URLSearchParams(searchParams);
+    next.delete("preview");
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, docs, loading]);
 
   // Share/Delete show on documents this user uploaded, or on every document
   // for org_admins. The backend re-enforces all of this server-side.

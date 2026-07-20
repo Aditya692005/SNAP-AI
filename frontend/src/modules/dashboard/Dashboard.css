@@ -60,95 +60,13 @@
   color: #0b0b0d;
 }
 
-/* ── Body: main column + Updates column ─────────────────── */
+/* ── Body: main column ──────────────────────────────────── */
 .dashboard-body {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
-  gap: 1.6rem;
-  align-items: start;
+  display: block;
 }
 
 .dashboard-main-col {
   min-width: 0;
-}
-
-.updates-col {
-  display: flex;
-  flex-direction: column;
-  gap: 0.9rem;
-  position: sticky;
-  top: 1.2rem;
-  min-height: 460px; /* keeps the edge toggle vertically centred even when collapsed */
-}
-
-/* Collapsed: the grid squeezes this column to a slim rail (see
-   .dashboard-body.updates-collapsed) and only the toggle stays visible. */
-.dashboard-body.updates-collapsed {
-  grid-template-columns: minmax(0, 1fr) 26px;
-}
-
-.updates-col.collapsed .updates-title,
-.updates-col.collapsed .updates-panel {
-  display: none;
-}
-
-/* Edge toggle — straddles the column's left border, vertically centred.
-   ‹ (pointing out toward the charts) = expand, › (pointing in) = collapse. */
-.updates-toggle {
-  position: absolute;
-  left: -13px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 26px;
-  height: 26px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 0 3px; /* optically centre the glyph */
-  background: #17181d;
-  border: 1px solid #3a3b42;
-  color: #cfd2da;
-  font-size: 1.05rem;
-  line-height: 1;
-  cursor: pointer;
-  z-index: 5;
-  transition: border-color 0.18s ease, color 0.18s ease;
-}
-
-.updates-toggle:hover {
-  border-color: #ffffff;
-  color: #ffffff;
-}
-
-/* In the slim rail there is no left edge to straddle — centre it instead. */
-.updates-col.collapsed .updates-toggle {
-  left: 50%;
-  transform: translate(-50%, -50%);
-}
-
-.updates-title {
-  align-self: flex-start;
-  margin: 0;
-  padding: 0.5rem 1.2rem;
-  border: 1px solid #3a3b42;
-  font-family: "Playfair Display", Georgia, serif;
-  font-size: 1.05rem;
-  letter-spacing: 0.02em;
-  color: #ffffff;
-}
-
-.updates-panel {
-  min-height: 460px;
-  border: 1px solid #2f2f2f;
-  background: rgba(255, 255, 255, 0.02);
-  padding: 1.2rem;
-}
-
-.updates-empty {
-  margin: 0;
-  color: #7d7d7d;
-  font-size: 0.9rem;
-  line-height: 1.7;
 }
 
 /* ── Quick-action buttons (Refresh / ghost) ─────────────── */
@@ -809,25 +727,6 @@
 }
 
 /* ── Responsive ─────────────────────────────────────────── */
-@media (max-width: 1100px) {
-  .dashboard-body,
-  .dashboard-body.updates-collapsed {
-    grid-template-columns: 1fr;
-  }
-  /* relative (not static): the edge toggle positions against this column */
-  .updates-col {
-    position: relative;
-    top: 0;
-    min-height: 0;
-  }
-  .updates-col.collapsed {
-    min-height: 44px; /* just enough rail for the centred toggle */
-  }
-  .updates-panel {
-    min-height: 240px;
-  }
-}
-
 @media (max-width: 1000px) {
   .kpi-row {
     grid-template-columns: repeat(2, 1fr);

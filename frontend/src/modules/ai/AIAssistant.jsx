@@ -4,7 +4,7 @@ import remarkGfm from "remark-gfm";
 import AppShell from "../../components/AppShell";
 import ToastStack from "../../components/Toast";
 import ChartBlock from "./ChartBlock";
-import { authService } from "../../services/authService";
+import { authService, updatesService } from "../../services/authService";
 import { previewKind, parseCsv } from "../../utils/filePreview";
 import "./AIAssistant.css";
 
@@ -404,6 +404,17 @@ function AIAssistant() {
           metric: data.metric || undefined, // present when the prompt asked to track a metric
         },
       ]);
+
+      // If the answer arrived while the user had switched away (tab hidden),
+      // drop it in the Updates feed so they notice it — then nudge the feed to
+      // refresh so the badge/popup show up promptly.
+      if (typeof document !== "undefined" && document.hidden) {
+        const preview = String(data.answer || "").replace(/\s+/g, " ").trim().slice(0, 160);
+        updatesService
+          .aiResponse(preview, data.conversation_id)
+          .then(() => window.dispatchEvent(new Event("snap:updates-refresh")))
+          .catch(() => {});
+      }
     } catch (err) {
       setMessages((prev) => [
         ...prev,

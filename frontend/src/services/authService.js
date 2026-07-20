@@ -535,6 +535,24 @@ export const updatesService = {
       }),
     );
   },
+  // Remove one update. Returns { unread }.
+  async remove(id) {
+    return handle(
+      await fetch(`${API_BASE_URL}/api/updates/${id}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      }),
+    );
+  },
+  // Clear the whole feed.
+  async clearAll() {
+    return handle(
+      await fetch(`${API_BASE_URL}/api/updates/all`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      }),
+    );
+  },
   // Record that an AI answer arrived while the user wasn't watching the chat.
   async aiResponse(preview, conversationId) {
     return handle(

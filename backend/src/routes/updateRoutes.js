@@ -20,8 +20,13 @@ const {
   countUnread,
   markRead,
   markAllRead,
+  deleteUpdate,
+  deleteAllForUser,
   createUpdatesForUsers,
 } = require("../models/updateModel");
+
+// Supabase/PostgREST codes for "the table isn't there yet" (migration not run).
+const MISSING_TABLE = new Set(["42P01", "PGRST205"]);
 
 const router = express.Router();
 router.use(requireAuth);
@@ -53,6 +58,29 @@ router.post("/mark-read", async (req, res, next) => {
     return res.json({ unread: await countUnread(req.user.id) });
   } catch (err) {
     if (err?.code === "42P01" || err?.code === "PGRST205") return res.json({ unread: 0 });
+    return next(err);
+  }
+});
+
+// DELETE /api/updates/all — clear the whole feed. Declared BEFORE /:id so "all"
+// isn't captured as an id.
+router.delete("/all", async (req, res, next) => {
+  try {
+    await deleteAllForUser(req.user.id);
+    return res.json({ cleared: true, unread: 0 });
+  } catch (err) {
+    if (MISSING_TABLE.has(err?.code)) return res.json({ cleared: true, unread: 0 });
+    return next(err);
+  }
+});
+
+// DELETE /api/updates/:id — remove one update from the feed.
+router.delete("/:id", async (req, res, next) => {
+  try {
+    await deleteUpdate(req.user.id, req.params.id);
+    return res.json({ deleted: true, unread: await countUnread(req.user.id) });
+  } catch (err) {
+    if (MISSING_TABLE.has(err?.code)) return res.json({ deleted: true, unread: 0 });
     return next(err);
   }
 });

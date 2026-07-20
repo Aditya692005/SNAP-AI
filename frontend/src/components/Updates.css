@@ -1,0 +1,115 @@
+/* ── Updates feature: sidebar badge + transient popups ──────────────────────
+   The full feed lives on the /updates page (see modules/updates/Updates.css). */
+
+/* The Updates sidebar link needs a positioning context for the unread bubble. */
+.sidebar .updates-link .nav-icon {
+  position: relative;
+}
+
+/* The red unread bubble sits on the icon so it's visible while the rail is
+   collapsed (icons only). Hidden when there's nothing unread. */
+.updates-badge {
+  position: absolute;
+  top: -5px;
+  left: 12px;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border-radius: 9px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 0.66rem;
+  font-weight: 700;
+  line-height: 17px;
+  text-align: center;
+  box-shadow: 0 0 0 2px rgba(17, 17, 20, 0.9);
+  pointer-events: none;
+}
+
+/* ── Popups (transient toasts) ───────────────────────────────────────────── */
+.updates-popups {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 1400;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.update-popup {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 320px;
+  max-width: 88vw;
+  padding: 12px 14px;
+  border-radius: 11px;
+  background: #1e293b;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-left: 4px solid #3b82f6;
+  color: #f1f5f9;
+  box-shadow: 0 14px 34px -10px rgba(0, 0, 0, 0.55);
+  cursor: pointer;
+  animation: update-popup-in 0.2s ease-out;
+}
+.update-popup:hover {
+  border-color: rgba(148, 163, 184, 0.45);
+}
+.update-popup-icon {
+  font-size: 1.15rem;
+  line-height: 1.3;
+  flex-shrink: 0;
+}
+.update-popup-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.update-popup-title {
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+.update-popup-text {
+  font-size: 0.8rem;
+  color: #c7d0dc;
+  line-height: 1.35;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.update-popup-meta {
+  font-size: 0.7rem;
+  color: #93a0b0;
+  margin-top: 2px;
+}
+.update-popup-close {
+  background: none;
+  border: none;
+  color: inherit;
+  opacity: 0.55;
+  font-size: 0.85rem;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1.2;
+  flex-shrink: 0;
+}
+.update-popup-close:hover {
+  opacity: 1;
+}
+
+@keyframes update-popup-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Light theme ─────────────────────────────────────────────────────────── */
+html[data-theme="light"] .update-popup {
+  background: #ffffff;
+  color: #0f172a;
+  border-color: #e2e8f0;
+  box-shadow: 0 14px 34px -10px rgba(15, 23, 42, 0.25);
+}
+html[data-theme="light"] .update-popup-text { color: #475569; }
