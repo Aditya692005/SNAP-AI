@@ -577,6 +577,26 @@ async function resetPassword(req, res, next) {
 }
 
 // POST /api/auth/change-password  { currentPassword, newPassword }  (protected)
+// For a logged-in user: confirm their current password is correct WITHOUT
+// changing anything. Backs the two-step "Change password" flow — the new-password
+// fields only unlock once this succeeds.
+async function verifyPassword(req, res, next) {
+  try {
+    const { currentPassword } = req.body;
+    if (!currentPassword) throw new AppError("Enter your current password.", 400);
+
+    const user = await findAuthById(req.user.id);
+    if (!user) throw new AppError("User not found.", 404);
+
+    const ok = await bcrypt.compare(currentPassword, user.password_hash);
+    if (!ok) throw new AppError("Your current password is incorrect.", 400);
+
+    return res.json({ verified: true });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 // For a logged-in user: requires the current password and a sufficiently
 // different new one.
 async function changePassword(req, res, next) {
@@ -688,6 +708,7 @@ module.exports = {
   orgStatus,
   forgotPassword,
   resetPassword,
+  verifyPassword,
   changePassword,
   inviteInfo,
   acceptInvite,

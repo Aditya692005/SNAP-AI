@@ -139,6 +139,20 @@ export const authService = {
   },
 
   // Change password while logged in (requires current password).
+  // Confirm the current password is correct without changing anything (step 1
+  // of the two-step change-password flow).
+  async verifyPassword(currentPassword) {
+    const response = await fetch(`${API_BASE_URL}/api/auth/verify-password`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ currentPassword }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok)
+      throw new Error(data.message || "Could not verify password");
+    return data;
+  },
+
   async changePassword(currentPassword, newPassword) {
     const response = await fetch(`${API_BASE_URL}/api/auth/change-password`, {
       method: "POST",
