@@ -24,7 +24,9 @@ function Documents() {
   const [error, setError] = useState(null);
   // Share tiers + pick-lists for the current user, from /api/documents/share-targets.
   const [targets, setTargets] = useState(null);
-  const [shareDoc, setShareDoc] = useState(null); // doc whose share dialog is open
+  const [shareDocs, setShareDocs] = useState(null); // docs whose share dialog is open (array)
+  // Ids of documents ticked for a bulk share (Set of doc id).
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(null); // { done, total }
   const [deletingId, setDeletingId] = useState(null);
@@ -103,6 +105,28 @@ function Documents() {
   // for org_admins. The backend re-enforces all of this server-side.
   function canManage(d) {
     return targets && (targets.is_admin || d.uploaded_by_user_id === targets.user_id);
+  }
+
+  // Whether the current user can share at all (any tier is offered).
+  const canShare = !!(targets && targets.can && Object.values(targets.can).some(Boolean));
+
+  // Toggle one document's tick in the bulk-share selection.
+  function toggleSelected(id) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
+  function clearSelection() {
+    setSelectedIds(new Set());
+  }
+
+  // Open the share dialog for the ticked documents.
+  function shareSelected() {
+    const chosen = docs.filter((d) => selectedIds.has(d.id) && canManage(d));
+    if (chosen.length > 0) setShareDocs(chosen);
   }
 
   // "report.pdf" → "report (1).pdf" — starting suggestion for the rename prompt.
@@ -256,6 +280,12 @@ function Documents() {
     try {
       await documentService.remove(d.id);
       setDocs((prev) => prev.filter((x) => x.id !== d.id));
+      setSelectedIds((prev) => {
+        if (!prev.has(d.id)) return prev;
+        const next = new Set(prev);
+        next.delete(d.id);
+        return next;
+      });
       notify(`Deleted "${d.file_name}".`);
     } catch (err) {
       notify(err.message, "error");
@@ -263,6 +293,9 @@ function Documents() {
       setDeletingId(null);
     }
   }
+
+  // How many ticked docs the user can actually share (bulk toolbar shows for these).
+  const selectedShareable = docs.filter((d) => selectedIds.has(d.id) && canManage(d)).length;
 
   const trimmedQuery = query.trim().toLowerCase();
   const shownDocs = trimmedQuery
@@ -325,6 +358,22 @@ function Documents() {
             </div>
           </div>
 
+          {canShare && selectedShareable > 0 && (
+            <div className="bulk-share-bar">
+              <span className="bulk-share-count">
+                {selectedShareable} document{selectedShareable === 1 ? "" : "s"} selected
+              </span>
+              <div className="bulk-share-actions">
+                <button type="button" className="share-button" onClick={shareSelected}>
+                  ⤴ Share selected
+                </button>
+                <button type="button" className="bulk-share-clear" onClick={clearSelection}>
+                  Clear
+                </button>
+              </div>
+            </div>
+          )}
+
           <div className="documents-list">
             {error && (
               <div className="document-row">
@@ -357,7 +406,25 @@ function Documents() {
             {shownDocs.map((d) => {
               const badge = statusLabel(d.status);
               return (
-                <div key={d.id} className="document-row">
+                <div
+                  key={d.id}
+                  className={`document-row${selectedIds.has(d.id) ? " selected" : ""}`}
+                >
+                  {canShare && canManage(d) && (
+                    <label
+                      className="document-select-slot"
+                      title="Select for sharing"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <input
+                        type="checkbox"
+                        className="document-select"
+                        checked={selectedIds.has(d.id)}
+                        onChange={() => toggleSelected(d.id)}
+                        aria-label={`Select "${d.file_name}" for sharing`}
+                      />
+                    </label>
+                  )}
                   <button
                     type="button"
                     className="document-info document-open"
@@ -381,7 +448,7 @@ function Documents() {
                       <button
                         type="button"
                         className="share-button"
-                        onClick={() => setShareDoc(d)}
+                        onClick={() => setShareDocs([d])}
                         title="Share this document (read-only)"
                       >
                         ⤴ Share
@@ -406,11 +473,21 @@ function Documents() {
         </div>
       </div>
 
-      {shareDoc && (
+      {shareDocs && shareDocs.length > 0 && (
         <ShareDialog
-          doc={shareDoc}
+          docs={shareDocs}
           targets={targets}
-          onClose={() => setShareDoc(null)}
+          onClose={() => setShareDocs(null)}
+          onShared={({ created }) => {
+            if (created) {
+              notify(
+                shareDocs.length > 1
+                  ? `Shared ${shareDocs.length} documents.`
+                  : `Shared "${shareDocs[0].title || shareDocs[0].file_name}".`
+              );
+            }
+            clearSelection();
+          }}
         />
       )}
 

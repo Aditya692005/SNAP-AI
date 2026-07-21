@@ -37,7 +37,7 @@ const {
   listDepartments,
   departmentSubtreeIds,
 } = require("../models/departmentModel");
-const { findAssignableRole } = require("../models/roleModel");
+const { findAssignableRole, listRolesForOrg } = require("../models/roleModel");
 const { logAdminAction } = require("../models/auditModel");
 const { getObject, removeObject } = require("../services/storageService");
 const { canRead, sendBuffer } = require("../services/documentDownload");
@@ -104,6 +104,8 @@ router.get("/share-targets", async (req, res, next) => {
       department:
         hasPerm(req, "SHARE_DEPARTMENT_DOCUMENTS") && (isAdmin || !!req.user.department_id),
       organization: hasPerm(req, "SHARE_ORGANIZATION_DOCUMENTS"),
+      // Role sharing ("all managers" / "all employees") is org_admin-only.
+      role: isAdmin,
     };
 
     let users = [];
@@ -126,8 +128,17 @@ router.get("/share-targets", async (req, res, next) => {
       }
     }
 
+    // Assignable roles for an admin's "share to all managers / all employees"
+    // picker. org_admin is excluded — sharing to fellow admins isn't offered.
+    let roles = [];
+    if (isAdmin) {
+      roles = (await listRolesForOrg(orgId))
+        .filter((r) => r.name !== "org_admin")
+        .map((r) => ({ id: r.id, name: r.name }));
+    }
+
     // is_admin: org_admins may also share/manage documents they didn't upload.
-    return res.json({ user_id: req.user.id, is_admin: isAdmin, can, users, departments });
+    return res.json({ user_id: req.user.id, is_admin: isAdmin, can, users, departments, roles });
   } catch (err) {
     return next(err);
   }

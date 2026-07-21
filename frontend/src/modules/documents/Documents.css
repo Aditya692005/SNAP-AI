@@ -738,3 +738,123 @@
   padding: 12px;
   margin: 0;
 }
+
+/* ── Bulk-share selection (Drive-style hover reveal) ───────────────────────── */
+/* The checkbox lives in a fixed-width gutter so nothing shifts when it fades in.
+   Hidden until the row is hovered or the doc is selected. */
+.document-select-slot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  cursor: pointer;
+}
+
+.document-row:hover .document-select-slot,
+.document-row.selected .document-select-slot,
+.document-select-slot:focus-within {
+  opacity: 1;
+}
+
+.document-select {
+  width: 18px;
+  height: 18px;
+  accent-color: #8b8ef5;
+  cursor: pointer;
+  margin: 0;
+}
+
+/* Selected rows get a soft highlight + accent rail, echoing the bulk bar. */
+.document-row.selected {
+  background: rgba(139, 142, 245, 0.1);
+  box-shadow: inset 3px 0 0 #8b8ef5;
+}
+
+.document-row.selected:hover {
+  background: rgba(139, 142, 245, 0.14);
+}
+
+.bulk-share-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 0.7rem 1.6rem;
+  margin: 0 0 0.6rem;
+  background: rgba(139, 142, 245, 0.1);
+  border: 1px solid rgba(139, 142, 245, 0.35);
+  border-radius: 8px;
+}
+
+.bulk-share-count {
+  font-weight: 600;
+  color: #f0f0f0;
+}
+
+.bulk-share-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.bulk-share-clear {
+  background: transparent;
+  border: 1px solid #3a3b42;
+  color: #c8c9d0;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-family: inherit;
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+
+.bulk-share-clear:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* ── Selected-recipient chips (share dialog) ──────────────────────────────── */
+.share-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 8px;
+  border: 1px solid #3a3b42;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.share-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: rgba(139, 142, 245, 0.18);
+  border: 1px solid rgba(139, 142, 245, 0.4);
+  color: #f0f0f0;
+  border-radius: 999px;
+  padding: 4px 6px 4px 10px;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.share-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  color: #f0f0f0;
+  font-size: 0.7rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.share-chip-remove:hover {
+  background: rgba(255, 255, 255, 0.25);
+}

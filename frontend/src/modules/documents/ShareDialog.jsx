@@ -1,14 +1,20 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { documentService } from "../../services/authService";
 
 // Labels for the share tiers the current user is allowed to use. ROLE-based
-// sharing exists in the backend (org_admin, API-only) but is deliberately not
-// offered here.
+// sharing ("all managers" / "all employees") is org_admin-only.
 const TIERS = [
-  { key: "USER", label: "Person" },
-  { key: "DEPARTMENT", label: "Department" },
+  { key: "USER", label: "People" },
+  { key: "DEPARTMENT", label: "Departments" },
+  { key: "ROLE", label: "By role" },
   { key: "ORGANIZATION", label: "Organization" },
 ];
+
+// "manager" -> "All managers", "employee" -> "All employees".
+function roleLabel(name) {
+  const n = (name || "").replace(/_/g, " ");
+  return `All ${n}${n.endsWith("s") ? "" : "s"}`;
+}
 
 function targetLabel(a) {
   if (a.access_type === "USER")
@@ -16,7 +22,7 @@ function targetLabel(a) {
   if (a.access_type === "DEPARTMENT")
     return a.department ? `${a.department.name} (department)` : "A department";
   if (a.access_type === "ORGANIZATION") return "Entire organization";
-  if (a.access_type === "ROLE") return a.role ? `Role: ${a.role.name}` : "A role";
+  if (a.access_type === "ROLE") return a.role ? roleLabel(a.role.name) : "A role";
   return a.access_type;
 }
 
@@ -26,18 +32,26 @@ function expiryLabel(a) {
   return d > new Date() ? `Until ${d.toLocaleDateString()}` : "Expired";
 }
 
-// Share a document with a person / department / the whole org (read-only),
-// permanently or until a date — and see + revoke existing shares.
-function ShareDialog({ doc, targets, onClose }) {
+// Share one or more documents with people / departments / roles / the whole org
+// (read-only). People, departments and roles can be multi-selected; each ticked
+// target shows as a removable chip above the picker. When exactly one document
+// is being shared, existing shares are listed and can be revoked.
+function ShareDialog({ docs, targets, onClose, onShared }) {
+  const docList = useMemo(() => (Array.isArray(docs) ? docs : docs ? [docs] : []), [docs]);
+  const single = docList.length === 1 ? docList[0] : null;
+
   const can = targets?.can || {};
   const allowedTiers = TIERS.filter((t) => {
     if (t.key === "USER") return can.user;
     if (t.key === "DEPARTMENT") return can.department;
+    if (t.key === "ROLE") return can.role && (targets?.roles || []).length > 0;
     return can.organization;
   });
 
   const [tier, setTier] = useState(allowedTiers[0]?.key || null);
-  const [targetId, setTargetId] = useState("");
+  // Ticked targets, kept per tier so switching tiers doesn't lose a selection.
+  // Each entry: { id, label }. ORGANIZATION needs no selection.
+  const [sel, setSel] = useState({ USER: [], DEPARTMENT: [], ROLE: [] });
   // Type-ahead filter for the person list — orgs can have too many people to
   // scan a bare dropdown.
   const [personQuery, setPersonQuery] = useState("");
@@ -52,10 +66,12 @@ function ShareDialog({ doc, targets, onClose }) {
     new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
   );
 
+  // Existing shares are only meaningful for a single document.
   useEffect(() => {
+    if (!single) return;
     let cancelled = false;
     documentService
-      .listAccess(doc.id)
+      .listAccess(single.id)
       .then((list) => {
         if (!cancelled) setAccessList(list);
       })
@@ -65,31 +81,84 @@ function ShareDialog({ doc, targets, onClose }) {
     return () => {
       cancelled = true;
     };
-  }, [doc.id]);
+  }, [single]);
+
+  // Toggle a target in/out of the current tier's selection.
+  function toggle(id, label) {
+    setSel((prev) => {
+      const cur = prev[tier] || [];
+      const exists = cur.some((x) => x.id === id);
+      return {
+        ...prev,
+        [tier]: exists ? cur.filter((x) => x.id !== id) : [...cur, { id, label }],
+      };
+    });
+  }
+
+  function isPicked(id) {
+    return (sel[tier] || []).some((x) => x.id === id);
+  }
 
   async function share() {
     setError(null);
     setNotice(null);
     if (!tier) return;
-    if (tier === "USER" && !targetId) return setError("Pick a person to share with.");
-    if (tier === "DEPARTMENT" && !targetId) return setError("Pick a department to share with.");
     if (expiryMode === "until" && !expiryDate) return setError("Pick an expiry date.");
 
-    const payload = { access_type: tier };
-    if (tier === "USER") payload.user_id = targetId;
-    if (tier === "DEPARTMENT") payload.department_id = targetId;
-    if (expiryMode === "until") payload.expires_at = expiryDate;
+    // Build the flat list of (access_type + target) pairs for the current tier.
+    let picks = [];
+    if (tier === "USER") {
+      if (sel.USER.length === 0) return setError("Pick at least one person to share with.");
+      picks = sel.USER.map((u) => ({ access_type: "USER", user_id: u.id }));
+    } else if (tier === "DEPARTMENT") {
+      if (sel.DEPARTMENT.length === 0)
+        return setError("Pick at least one department to share with.");
+      picks = sel.DEPARTMENT.map((d) => ({ access_type: "DEPARTMENT", department_id: d.id }));
+    } else if (tier === "ROLE") {
+      if (sel.ROLE.length === 0) return setError("Pick at least one role to share with.");
+      picks = sel.ROLE.map((r) => ({ access_type: "ROLE", role_id: r.id }));
+    } else if (tier === "ORGANIZATION") {
+      picks = [{ access_type: "ORGANIZATION" }];
+    }
+
+    const expires_at = expiryMode === "until" ? expiryDate : undefined;
 
     setBusy(true);
+    let created = 0;
+    let duplicate = 0;
+    let skipped = 0;
+    const failures = [];
     try {
-      const data = await documentService.share(doc.id, payload);
-      setNotice(
-        data.already_shared
-          ? "Already shared with that target — no duplicate added."
-          : "Shared (read-only)."
-      );
-      setAccessList(await documentService.listAccess(doc.id));
-      setTargetId("");
+      for (const doc of docList) {
+        for (const pick of picks) {
+          // Sharing a doc back to its own uploader is a no-op the backend rejects.
+          if (pick.access_type === "USER" && pick.user_id === doc.uploaded_by_user_id) {
+            skipped += 1;
+            continue;
+          }
+          try {
+            const data = await documentService.share(doc.id, { ...pick, expires_at });
+            if (data.already_shared) duplicate += 1;
+            else created += 1;
+          } catch (err) {
+            failures.push(err.message);
+          }
+        }
+      }
+
+      const parts = [];
+      if (created) parts.push(`${created} new share${created === 1 ? "" : "s"}`);
+      if (duplicate) parts.push(`${duplicate} already shared`);
+      if (skipped) parts.push(`${skipped} skipped (owner)`);
+      if (parts.length) setNotice(`Done — ${parts.join(", ")} (read-only).`);
+      if (failures.length) {
+        setError(`${failures.length} share${failures.length === 1 ? "" : "s"} failed: ${failures[0]}`);
+      }
+
+      if (single) setAccessList(await documentService.listAccess(single.id));
+      setSel((prev) => ({ ...prev, [tier]: [] }));
+      setPersonQuery("");
+      if ((created || duplicate) && onShared) onShared({ created, duplicate });
     } catch (err) {
       setError(err.message);
     } finally {
@@ -101,22 +170,28 @@ function ShareDialog({ doc, targets, onClose }) {
     setError(null);
     setNotice(null);
     try {
-      await documentService.revokeAccess(doc.id, accessId);
+      await documentService.revokeAccess(single.id, accessId);
       setAccessList((prev) => prev.filter((a) => a.id !== accessId));
     } catch (err) {
       setError(err.message);
     }
   }
 
+  const chips = tier === "ORGANIZATION" ? [] : sel[tier] || [];
+
   return (
     <>
       <div className="share-overlay" onClick={onClose} />
-      <div className="share-dialog" role="dialog" aria-label={`Share ${doc.file_name}`}>
+      <div className="share-dialog" role="dialog" aria-label="Share documents">
         <div className="share-dialog-header">
           <div>
-            <h2>Share document</h2>
+            <h2>{docList.length > 1 ? `Share ${docList.length} documents` : "Share document"}</h2>
             <span className="share-dialog-sub">
-              📄 {doc.title || doc.file_name} · recipients get read-only access
+              📄{" "}
+              {docList.length > 1
+                ? `${docList.length} documents selected`
+                : single?.title || single?.file_name}{" "}
+              · recipients get read-only access
             </span>
           </div>
           <button className="share-close" onClick={onClose} aria-label="Close share dialog">
@@ -132,22 +207,39 @@ function ShareDialog({ doc, targets, onClose }) {
                   key={t.key}
                   type="button"
                   className={`share-tier ${tier === t.key ? "active" : ""}`}
-                  onClick={() => {
-                    setTier(t.key);
-                    setTargetId("");
-                  }}
+                  onClick={() => setTier(t.key)}
                 >
                   {t.label}
                 </button>
               ))}
             </div>
 
+            {/* Selected-target chip bar (people / departments / roles). */}
+            {chips.length > 0 && (
+              <div className="share-chips" aria-label="Selected recipients">
+                {chips.map((c) => (
+                  <span key={c.id} className="share-chip">
+                    {c.label}
+                    <button
+                      type="button"
+                      className="share-chip-remove"
+                      onClick={() => toggle(c.id, c.label)}
+                      aria-label={`Remove ${c.label}`}
+                    >
+                      ✕
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+
             {tier === "USER" &&
               (() => {
                 const q = personQuery.trim().toLowerCase();
                 const people = (targets.users || [])
                   // The uploader owns the doc — sharing it to them is a no-op.
-                  .filter((u) => u.id !== doc.uploaded_by_user_id)
+                  // Only prune when a single doc is in play (uploaders differ otherwise).
+                  .filter((u) => !single || u.id !== single.uploaded_by_user_id)
                   .filter(
                     (u) =>
                       !q ||
@@ -176,13 +268,13 @@ function ShareDialog({ doc, targets, onClose }) {
                           <button
                             key={u.id}
                             type="button"
-                            className={`share-person ${targetId === u.id ? "active" : ""}`}
-                            onClick={() => setTargetId(u.id)}
-                            aria-pressed={targetId === u.id}
+                            className={`share-person ${isPicked(u.id) ? "active" : ""}`}
+                            onClick={() => toggle(u.id, u.name)}
+                            aria-pressed={isPicked(u.id)}
                           >
                             <span className="share-person-name">{u.name}</span>
                             <span className="share-person-email">{u.email}</span>
-                            {targetId === u.id && <span className="share-person-tick">✓</span>}
+                            {isPicked(u.id) && <span className="share-person-tick">✓</span>}
                           </button>
                         ))
                       )}
@@ -192,19 +284,47 @@ function ShareDialog({ doc, targets, onClose }) {
               })()}
 
             {tier === "DEPARTMENT" && (
-              <select value={targetId} onChange={(e) => setTargetId(e.target.value)}>
-                <option value="">Select a department…</option>
-                {(targets.departments || []).map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.name}
-                  </option>
+              <div className="share-people-list">
+                {(targets.departments || []).length === 0 ? (
+                  <p className="share-people-empty">No departments to share with.</p>
+                ) : (
+                  (targets.departments || []).map((d) => (
+                    <button
+                      key={d.id}
+                      type="button"
+                      className={`share-person ${isPicked(d.id) ? "active" : ""}`}
+                      onClick={() => toggle(d.id, d.name)}
+                      aria-pressed={isPicked(d.id)}
+                    >
+                      <span className="share-person-name">{d.name}</span>
+                      {isPicked(d.id) && <span className="share-person-tick">✓</span>}
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+
+            {tier === "ROLE" && (
+              <div className="share-people-list">
+                {(targets.roles || []).map((r) => (
+                  <button
+                    key={r.id}
+                    type="button"
+                    className={`share-person ${isPicked(r.id) ? "active" : ""}`}
+                    onClick={() => toggle(r.id, roleLabel(r.name))}
+                    aria-pressed={isPicked(r.id)}
+                  >
+                    <span className="share-person-name">{roleLabel(r.name)}</span>
+                    {isPicked(r.id) && <span className="share-person-tick">✓</span>}
+                  </button>
                 ))}
-              </select>
+              </div>
             )}
 
             {tier === "ORGANIZATION" && (
               <p className="share-org-note">
-                Everyone in your organization will be able to read this document.
+                Everyone in your organization will be able to read
+                {docList.length > 1 ? " these documents." : " this document."}
               </p>
             )}
 
@@ -239,7 +359,7 @@ function ShareDialog({ doc, targets, onClose }) {
             </div>
 
             <button className="share-submit" onClick={share} disabled={busy}>
-              {busy ? "Sharing…" : "Share"}
+              {busy ? "Sharing…" : chips.length > 1 ? `Share with ${chips.length}` : "Share"}
             </button>
           </div>
         ) : (
@@ -252,32 +372,34 @@ function ShareDialog({ doc, targets, onClose }) {
         {error && <div className="share-error">❌ {error}</div>}
         {notice && <div className="share-notice">✅ {notice}</div>}
 
-        <div className="share-access">
-          <h3>Shared with</h3>
-          {accessList.length === 0 ? (
-            <p className="share-access-empty">Not shared with anyone yet.</p>
-          ) : (
-            accessList.map((a) => (
-              <div key={a.id} className="share-access-row">
-                <div className="share-access-info">
-                  <span className="share-access-target">{targetLabel(a)}</span>
-                  <span className="share-access-expiry">
-                    {expiryLabel(a)}
-                    {a.granted_by ? ` · shared by ${a.granted_by.name}` : ""}
-                  </span>
+        {single && (
+          <div className="share-access">
+            <h3>Shared with</h3>
+            {accessList.length === 0 ? (
+              <p className="share-access-empty">Not shared with anyone yet.</p>
+            ) : (
+              accessList.map((a) => (
+                <div key={a.id} className="share-access-row">
+                  <div className="share-access-info">
+                    <span className="share-access-target">{targetLabel(a)}</span>
+                    <span className="share-access-expiry">
+                      {expiryLabel(a)}
+                      {a.granted_by ? ` · shared by ${a.granted_by.name}` : ""}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className="share-revoke"
+                    onClick={() => revoke(a.id)}
+                    title="Revoke this access"
+                  >
+                    Revoke
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  className="share-revoke"
-                  onClick={() => revoke(a.id)}
-                  title="Revoke this access"
-                >
-                  Revoke
-                </button>
-              </div>
-            ))
-          )}
-        </div>
+              ))
+            )}
+          </div>
+        )}
       </div>
     </>
   );
