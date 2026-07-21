@@ -1,0 +1,10 @@
+.env
+__pycache__/
+
+# Disposable local copies of documents whose originals live in Supabase Storage.
+# Safe to delete at any time; storage.py refetches on demand.
+.cache/
+
+# Dead: originals moved to Supabase Storage, vectors moved to pgvector.
+chroma_db/
+uploads/

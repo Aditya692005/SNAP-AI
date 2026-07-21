@@ -5,12 +5,12 @@ import Login from "../modules/auth/Login";
 import Signup from "../modules/auth/Signup";
 import VerifyEmail from "../modules/auth/VerifyEmail";
 import ForgotPassword from "../modules/auth/ForgotPassword";
-import ChangePassword from "../modules/auth/ChangePassword";
 import AcceptInvite from "../modules/auth/AcceptInvite";
 import Dashboard from "../modules/dashboard/Dashboard";
 import Documents from "../modules/documents/Documents";
 import AIAssistant from "../modules/ai/AIAssistant";
 import Admin from "../modules/admin/Admin";
+import Settings from "../modules/settings/Settings";
 import ProtectedRoute from "../components/ProtectedRoute";
 import PlaceholderPage from "../components/PlaceholderPage";
 
@@ -24,14 +24,15 @@ function AppRoutes() {
       <Route path="/forgot-password" element={<ForgotPassword />} />
       <Route path="/accept-invite" element={<AcceptInvite />} />
 
-      <Route path="/change-password" element={<ProtectedRoute><ChangePassword /></ProtectedRoute>} />
+      {/* Changing your password now lives in Settings; keep the old path working. */}
+      <Route path="/change-password" element={<Navigate to="/settings?tab=security" replace />} />
       <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
       <Route path="/documents" element={<ProtectedRoute><Documents /></ProtectedRoute>} />
       <Route path="/ai" element={<ProtectedRoute><AIAssistant /></ProtectedRoute>} />
 
       <Route path="/reports" element={<ProtectedRoute><PlaceholderPage title="Reports" description="Generate and view reports from your knowledge base." /></ProtectedRoute>} />
       <Route path="/admin" element={<ProtectedRoute role="org_admin"><Admin /></ProtectedRoute>} />
-      <Route path="/settings" element={<ProtectedRoute><PlaceholderPage title="Settings" description="Configure your SNAP AI workspace." /></ProtectedRoute>} />
+      <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
 
       {/* Any unknown route → dashboard if logged in, otherwise login */}
       <Route path="*" element={<Navigate to="/dashboard" replace />} />

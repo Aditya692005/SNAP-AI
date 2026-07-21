@@ -22,6 +22,8 @@ const {
   updateFailedLoginAttempts,
   setVerificationToken,
   updatePassword,
+  updateProfile: updateProfileRow,
+  setLastLogin,
   findInviteByToken,
   completeInvite,
   setPasswordResetOtp,
@@ -29,8 +31,16 @@ const {
   setResetAttempts,
   clearPasswordResetOtp,
 } = require("../models/userModel");
-const { findByDomain, findByContactEmail, createOrganization } = require("../models/organizationModel");
-const { findRoleByName, getPermissionsForRole } = require("../models/roleModel");
+const {
+  findByDomain,
+  findByContactEmail,
+  createOrganization,
+} = require("../models/organizationModel");
+const { findDepartmentById } = require("../models/departmentModel");
+const {
+  findRoleByName,
+  getPermissionsForRole,
+} = require("../models/roleModel");
 const { signToken } = require("../utils/token");
 const {
   validateLoginInput,
@@ -38,6 +48,7 @@ const {
   validatePasswordStrength,
   passwordsTooSimilar,
   isValidEmail,
+  sanitizeInput,
 } = require("../utils/validators");
 const {
   sendVerificationEmail,
@@ -62,9 +73,23 @@ const VERIFICATION_TTL_MS = 10 * 60 * 1000; // 10 minutes
 // it must NOT map to a single shared organization. Each such address becomes
 // its own one-person org instead (keyed by the full email).
 const FREE_EMAIL_DOMAINS = new Set([
-  "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com",
-  "msn.com", "yahoo.com", "ymail.com", "icloud.com", "me.com", "aol.com",
-  "proton.me", "protonmail.com", "gmx.com", "mail.com", "yandex.com", "zoho.com",
+  "gmail.com",
+  "googlemail.com",
+  "outlook.com",
+  "hotmail.com",
+  "live.com",
+  "msn.com",
+  "yahoo.com",
+  "ymail.com",
+  "icloud.com",
+  "me.com",
+  "aol.com",
+  "proton.me",
+  "protonmail.com",
+  "gmx.com",
+  "mail.com",
+  "yandex.com",
+  "zoho.com",
 ]);
 
 function isFreeEmailDomain(domain) {
@@ -74,7 +99,9 @@ function isFreeEmailDomain(domain) {
 // Locate the org for an email: by full address for free providers, by domain
 // for corporate domains.
 function findOrgForEmail(email, domain) {
-  return isFreeEmailDomain(domain) ? findByContactEmail(email) : findByDomain(domain);
+  return isFreeEmailDomain(domain)
+    ? findByContactEmail(email)
+    : findByDomain(domain);
 }
 
 // Turn an email domain into a readable org name: "acme.com" -> "Acme".
@@ -101,7 +128,9 @@ async function login(req, res, next) {
       throw new AppError("Invalid email or password.", 401);
     }
 
-    console.log(`[LOGIN] User found. Email verified: ${user.email_verified}, Account locked: ${user.locked_until}`);
+    console.log(
+      `[LOGIN] User found. Email verified: ${user.email_verified}, Account locked: ${user.locked_until}`,
+    );
 
     // Check if account is locked after failed attempts
     if (user.locked_until && new Date(user.locked_until) > new Date()) {
@@ -133,7 +162,10 @@ async function login(req, res, next) {
     // Refuse deactivated (admin-removed) accounts.
     if (user.status === "INACTIVE") {
       console.log(`[LOGIN] ❌ Deactivated account: ${email}`);
-      throw new AppError("This account has been deactivated. Contact your administrator.", 403);
+      throw new AppError(
+        "This account has been deactivated. Contact your administrator.",
+        403,
+      );
     }
 
     // Not verified yet (e.g. the original link expired): issue a FRESH link and
@@ -143,17 +175,29 @@ async function login(req, res, next) {
         Unverified login — issuing a new verification link for: ${email}`);
       const verificationToken = generateVerificationToken();
       const verificationExpires = new Date(Date.now() + VERIFICATION_TTL_MS);
-      await setVerificationToken(user.id, verificationToken, verificationExpires);
-      sendVerificationEmail(user.email, user.name, verificationToken).catch((e) =>
-        console.error(`[LOGIN] ❌ Resend email failed for ${email}:`, e.message)
+      await setVerificationToken(
+        user.id,
+        verificationToken,
+        verificationExpires,
+      );
+      sendVerificationEmail(user.email, user.name, verificationToken).catch(
+        (e) =>
+          console.error(
+            `[LOGIN] ❌ Resend email failed for ${email}:`,
+            e.message,
+          ),
       );
       throw new AppError(
         "Your email isn't verified yet. We've sent you a new verification link — it expires in 10 minutes.",
-        403
+        403,
       );
     }
 
     console.log(`[LOGIN] ✅ Login successful for user: ${email}`);
+    // Best-effort: a stamp failure must not cost the user their login.
+    await setLastLogin(user.id).catch((e) =>
+      console.error(`[LOGIN] last_login stamp failed for ${email}:`, e.message)
+    );
     const permissions = await getPermissionsForRole(user.role_id);
     const safeUser = {
       id: user.id,
@@ -178,7 +222,9 @@ async function login(req, res, next) {
 // organization details (name/bio/industry) from the would-be org_admin.
 async function orgStatus(req, res, next) {
   try {
-    const email = String(req.query.email || "").trim().toLowerCase();
+    const email = String(req.query.email || "")
+      .trim()
+      .toLowerCase();
     const domain = email.split("@")[1];
     if (!email.includes("@") || !domain) {
       return res.json({ valid: false });
@@ -191,8 +237,22 @@ async function orgStatus(req, res, next) {
       domain,
       // For free providers there's no meaningful domain-derived name, so let the
       // user name their org themselves.
-      organizationName: org ? org.name : (free ? "" : deriveOrgName(domain)),
+      organizationName: org ? org.name : free ? "" : deriveOrgName(domain),
     });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// GET /api/auth/email-exists?email=...
+async function emailExists(req, res, next) {
+  try {
+    const email = String(req.query.email || "")
+      .trim()
+      .toLowerCase();
+    if (!email || !email.includes("@")) return res.json({ exists: false });
+    const user = await findByEmail(email);
+    return res.json({ exists: !!user });
   } catch (err) {
     return next(err);
   }
@@ -229,40 +289,44 @@ async function signup(req, res, next) {
       throw new AppError("An account with this email already exists.", 409);
     }
 
-    // Resolve (or create) the organization for this email. When none exists,
-    // this user is the org_admin and sets up the org here. Free email providers
-    // are keyed by full address so unrelated people don't share an org.
-    let organization = await findOrgForEmail(normalizedEmail, domain);
-    let roleName = "employee";
-    if (!organization) {
-      const orgName = (organizationName && organizationName.trim()) || deriveOrgName(domain);
-      let plan = String(organizationSubscriptionPlan || "FREE").toUpperCase();
-      if (!SUBSCRIPTION_PLANS.includes(plan)) plan = "FREE";
-      try {
-        organization = await createOrganization({
-          name: orgName,
-          contactEmail: normalizedEmail,
-          description: organizationBio ? String(organizationBio).trim() : null,
-          industry: organizationIndustry ? String(organizationIndustry).trim() : null,
-          country: organizationCountry ? String(organizationCountry).trim() : "Unknown",
-          subscriptionPlan: plan,
-        });
-        roleName = "org_admin"; // first user of a brand-new org runs it
-        console.log(`[SIGNUP] Created organization '${organization.name}' (${plan}) for ${normalizedEmail}`);
-      } catch (e) {
-        // Race: another signup created the org first. Re-fetch and join instead.
-        organization = await findOrgForEmail(normalizedEmail, domain);
-        if (!organization) throw e;
-        roleName = "employee";
-      }
-    }
+    // Every public signup creates its OWN organization, and the signer runs it
+    // (org_admin). We deliberately do NOT look up an org by email domain: sharing
+    // a domain with an existing organization must never place someone inside it.
+    // Joining an existing org is invite-only — an admin pre-creates the account
+    // against their org (see acceptInvite), which is the only path that puts a
+    // user into an organization they didn't create.
+    const orgName =
+      (organizationName && organizationName.trim()) || deriveOrgName(domain);
+    let plan = String(organizationSubscriptionPlan || "FREE").toUpperCase();
+    if (!SUBSCRIPTION_PLANS.includes(plan)) plan = "FREE";
+    const organization = await createOrganization({
+      name: orgName,
+      contactEmail: normalizedEmail,
+      description: organizationBio ? String(organizationBio).trim() : null,
+      industry: organizationIndustry
+        ? String(organizationIndustry).trim()
+        : null,
+      country: organizationCountry
+        ? String(organizationCountry).trim()
+        : "Unknown",
+      subscriptionPlan: plan,
+    });
+    const roleName = "org_admin"; // the creator of a new org runs it
+    console.log(
+      `[SIGNUP] Created organization '${organization.name}' (${plan}) for ${normalizedEmail}`,
+    );
 
     const role = await findRoleByName(roleName);
     if (!role) {
-      throw new AppError(`Server misconfigured: missing '${roleName}' role. Run seed-roles.sql.`, 500);
+      throw new AppError(
+        `Server misconfigured: missing '${roleName}' role. Run seed-roles.sql.`,
+        500,
+      );
     }
 
-    console.log(`[SIGNUP] Creating ${roleName} account for: ${normalizedEmail}`);
+    console.log(
+      `[SIGNUP] Creating ${roleName} account for: ${normalizedEmail}`,
+    );
     const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
     const verificationToken = generateVerificationToken();
     const verificationExpires = new Date(Date.now() + VERIFICATION_TTL_MS);
@@ -278,19 +342,28 @@ async function signup(req, res, next) {
       verificationExpires,
     });
 
-    console.log(`[SIGNUP] User created. Sending verification email in background...`);
+    console.log(
+      `[SIGNUP] User created. Sending verification email in background...`,
+    );
     // Send verification email without blocking the response — Gmail SMTP can
     // take several seconds, and the result is only used for logging.
     sendVerificationEmail(normalizedEmail, name, verificationToken)
       .then((emailSent) => {
         if (!emailSent) {
-          console.warn(`[SIGNUP] ⚠️  Failed to send verification email to: ${normalizedEmail}`);
+          console.warn(
+            `[SIGNUP] ⚠️  Failed to send verification email to: ${normalizedEmail}`,
+          );
         } else {
-          console.log(`[SIGNUP] ✅ Verification email sent successfully to: ${normalizedEmail}`);
+          console.log(
+            `[SIGNUP] ✅ Verification email sent successfully to: ${normalizedEmail}`,
+          );
         }
       })
       .catch((err) => {
-        console.error(`[SIGNUP] ❌ Email send error for ${normalizedEmail}:`, err.message);
+        console.error(
+          `[SIGNUP] ❌ Email send error for ${normalizedEmail}:`,
+          err.message,
+        );
       });
 
     return res.status(201).json({
@@ -307,7 +380,9 @@ async function signup(req, res, next) {
 async function verifyEmailToken(req, res, next) {
   try {
     const { token } = req.body;
-    console.log(`[VERIFY] Email verification request with token: ${token?.substring(0, 10)}...`);
+    console.log(
+      `[VERIFY] Email verification request with token: ${token?.substring(0, 10)}...`,
+    );
 
     if (!token) {
       throw new AppError("Verification token required.", 400);
@@ -319,7 +394,9 @@ async function verifyEmailToken(req, res, next) {
       throw new AppError("Invalid or expired verification token.", 400);
     }
 
-    console.log(`[VERIFY] ✅ Email verified for user ID: ${user.id}, Email: ${user.email}`);
+    console.log(
+      `[VERIFY] ✅ Email verified for user ID: ${user.id}, Email: ${user.email}`,
+    );
 
     // User is now verified, return user data (they can now login)
     const safeUser = { id: user.id, email: user.email };
@@ -343,7 +420,47 @@ async function getCurrentUser(req, res, next) {
       throw new AppError("User not found.", 404);
     }
     const permissions = await getPermissionsForRole(user.role_id);
-    return res.status(200).json({ user: { ...user, permissions } });
+    // Resolve the department NAME (not just the id) so the profile can show it
+    // directly, and so it reflects a recent move rather than a stale login copy.
+    const department = user.department_id
+      ? await findDepartmentById(user.department_id)
+      : null;
+    return res
+      .status(200)
+      .json({
+        user: {
+          ...user,
+          permissions,
+          department_name: department?.name ?? null,
+        },
+      });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// PATCH /api/auth/me  { name }   (protected)
+// Self-service profile update. `name` is the ONLY field a user may change about
+// themselves — role, department, status and organization stay admin-only, so this
+// route can never become a privilege-escalation path. The response mirrors
+// getCurrentUser's shape so the client can reuse its user-cache write.
+async function updateProfile(req, res, next) {
+  try {
+    const name = sanitizeInput(req.body.name);
+    if (name.length < 2 || name.length > 255) {
+      throw new AppError("Name must be between 2 and 255 characters.", 400);
+    }
+
+    const user = await updateProfileRow(req.user.id, { name });
+    if (!user) {
+      throw new AppError("User not found.", 404);
+    }
+
+    const permissions = await getPermissionsForRole(user.role_id);
+    const department = user.department_id ? await findDepartmentById(user.department_id) : null;
+    return res
+      .status(200)
+      .json({ user: { ...user, permissions, department_name: department?.name ?? null } });
   } catch (err) {
     return next(err);
   }
@@ -355,7 +472,9 @@ async function getCurrentUser(req, res, next) {
 // non-existent account.
 async function forgotPassword(req, res, next) {
   try {
-    const email = String(req.body.email || "").trim().toLowerCase();
+    const email = String(req.body.email || "")
+      .trim()
+      .toLowerCase();
     if (!isValidEmail(email)) {
       throw new AppError("Please provide a valid email address.", 400);
     }
@@ -372,11 +491,13 @@ async function forgotPassword(req, res, next) {
     await setPasswordResetOtp(user.id, otpHash, expires);
 
     sendPasswordResetEmail(user.email, user.name, otp).catch((e) =>
-      console.error(`[FORGOT] ❌ OTP email failed for ${email}:`, e.message)
+      console.error(`[FORGOT] ❌ OTP email failed for ${email}:`, e.message),
     );
     console.log(`[FORGOT] OTP issued for ${email}`);
 
-    return res.json({ message: "A one-time password (OTP) has been sent to your email." });
+    return res.json({
+      message: "A one-time password (OTP) has been sent to your email.",
+    });
   } catch (err) {
     return next(err);
   }
@@ -388,7 +509,9 @@ async function forgotPassword(req, res, next) {
 // differ from the old one.
 async function resetPassword(req, res, next) {
   try {
-    const email = String(req.body.email || "").trim().toLowerCase();
+    const email = String(req.body.email || "")
+      .trim()
+      .toLowerCase();
     const { otp, password } = req.body;
     if (!email || !otp) throw new AppError("Email and OTP are required.", 400);
     if (!password) throw new AppError("New password is required.", 400);
@@ -400,22 +523,34 @@ async function resetPassword(req, res, next) {
 
     const user = await getResetInfoByEmail(email);
     if (!user || !user.password_reset_otp || !user.password_reset_expires) {
-      throw new AppError("No active reset request. Please request a new OTP.", 400);
+      throw new AppError(
+        "No active reset request. Please request a new OTP.",
+        400,
+      );
     }
     if (new Date(user.password_reset_expires) < new Date()) {
       await clearPasswordResetOtp(user.id);
-      throw new AppError("This OTP has expired. Please request a new one.", 400);
+      throw new AppError(
+        "This OTP has expired. Please request a new one.",
+        400,
+      );
     }
     if ((user.password_reset_attempts || 0) >= MAX_RESET_ATTEMPTS) {
       await clearPasswordResetOtp(user.id);
-      throw new AppError("Too many incorrect attempts. Please request a new OTP.", 429);
+      throw new AppError(
+        "Too many incorrect attempts. Please request a new OTP.",
+        429,
+      );
     }
     if (!(await bcrypt.compare(String(otp), user.password_reset_otp))) {
       const attempts = (user.password_reset_attempts || 0) + 1;
       const left = MAX_RESET_ATTEMPTS - attempts;
       if (left <= 0) {
         await clearPasswordResetOtp(user.id);
-        throw new AppError("Too many incorrect attempts. Please request a new OTP.", 429);
+        throw new AppError(
+          "Too many incorrect attempts. Please request a new OTP.",
+          429,
+        );
       }
       await setResetAttempts(user.id, attempts);
       throw new AppError(`Invalid OTP. ${left} attempt(s) left.`, 400);
@@ -423,14 +558,19 @@ async function resetPassword(req, res, next) {
 
     // New password must differ from the current one.
     if (await bcrypt.compare(password, user.password_hash)) {
-      throw new AppError("Your new password must be different from your current password.", 400);
+      throw new AppError(
+        "Your new password must be different from your current password.",
+        400,
+      );
     }
 
     const hash = await bcrypt.hash(password, SALT_ROUNDS);
     await updatePassword(user.id, hash);
     await clearPasswordResetOtp(user.id); // single-use
     console.log(`[RESET] ✅ Password reset for ${user.email}`);
-    return res.json({ message: "Password reset successful. You can now log in." });
+    return res.json({
+      message: "Password reset successful. You can now log in.",
+    });
   } catch (err) {
     return next(err);
   }
@@ -450,7 +590,8 @@ async function changePassword(req, res, next) {
     if (!user) throw new AppError("User not found.", 404);
 
     const currentOk = await bcrypt.compare(currentPassword, user.password_hash);
-    if (!currentOk) throw new AppError("Your current password is incorrect.", 400);
+    if (!currentOk)
+      throw new AppError("Your current password is incorrect.", 400);
 
     const pwErrors = validatePasswordStrength(newPassword);
     if (pwErrors.length > 0) {
@@ -458,7 +599,10 @@ async function changePassword(req, res, next) {
     }
 
     if (passwordsTooSimilar(currentPassword, newPassword)) {
-      throw new AppError("Your new password must not be similar to your current password.", 400);
+      throw new AppError(
+        "Your new password must not be similar to your current password.",
+        400,
+      );
     }
 
     const hash = await bcrypt.hash(newPassword, SALT_ROUNDS);
@@ -509,14 +653,27 @@ async function acceptInvite(req, res, next) {
     if (user.email_verified) {
       throw new AppError("This invite was already used. Please log in.", 400);
     }
-    if (!user.email_verification_expires || new Date(user.email_verification_expires) < new Date()) {
-      throw new AppError("This invite has expired. Ask your admin to resend it.", 400);
+    if (
+      !user.email_verification_expires ||
+      new Date(user.email_verification_expires) < new Date()
+    ) {
+      throw new AppError(
+        "This invite has expired. Ask your admin to resend it.",
+        400,
+      );
     }
 
     const hash = await bcrypt.hash(password, SALT_ROUNDS);
-    await completeInvite(user.id, hash, name && name.trim() ? name.trim() : null);
+    await completeInvite(
+      user.id,
+      hash,
+      name && name.trim() ? name.trim() : null,
+    );
     console.log(`[INVITE] ✅ Accepted by ${user.email}`);
-    return res.json({ message: "Account activated! You can now log in.", email: user.email });
+    return res.json({
+      message: "Account activated! You can now log in.",
+      email: user.email,
+    });
   } catch (err) {
     return next(err);
   }
@@ -527,10 +684,12 @@ module.exports = {
   signup,
   verifyEmailToken,
   getCurrentUser,
+  updateProfile,
   orgStatus,
   forgotPassword,
   resetPassword,
   changePassword,
   inviteInfo,
   acceptInvite,
+  emailExists,
 };

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import Sidebar from "../../components/Sidebar";
+import AppShell from "../../components/AppShell";
 import { adminService, authService } from "../../services/authService";
 import "./Admin.css";
 
@@ -278,9 +278,8 @@ function Admin() {
   }
 
   return (
-    <div className="admin">
-      <Sidebar />
-      <main className="admin-content">
+    <AppShell>
+      <div className="admin-content">
         <div className="admin-header">
           <div>
             <span className="admin-eyebrow">SNAP AI · Administration</span>
@@ -693,8 +692,8 @@ function Admin() {
             </div>
           </div>
         )}
-      </main>
-    </div>
+      </div>
+    </AppShell>
   );
 }
 

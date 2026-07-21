@@ -451,11 +451,12 @@ create index idx_widgets_org_dash           on dashboard_widgets (organization_d
 create index idx_reports_org                on reports (organization_id);
 create index idx_report_results_report      on report_results (report_id);
 
--- Approximate-nearest-neighbour index for embeddings (cosine).
--- Tune `lists` to roughly sqrt(row count) once you have data, and REINDEX after
--- the table has been populated (ivfflat clusters are meaningless on an empty table).
+-- Approximate-nearest-neighbour index for embeddings (cosine). HNSW: good recall
+-- out of the box, no `lists` tuning, and works on an empty table. Query recall is
+-- governed by hnsw.ef_search (default 40).
 create index idx_document_chunks_embedding
-    on document_chunks using ivfflat (embedding vector_cosine_ops) with (lists = 100);
+    on document_chunks using hnsw (embedding vector_cosine_ops)
+    with (m = 16, ef_construction = 64);
 
 -- ============================================================================
 -- updated_at triggers

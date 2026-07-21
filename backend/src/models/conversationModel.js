@@ -78,6 +78,33 @@ async function listMessages(conversationId) {
   return data || [];
 }
 
+// One message by id (with its conversation + metadata), or null. Used by the
+// widget refresh to recover the chart spec's source and originating request.
+async function findMessageById(id) {
+  let { data, error } = await supabase
+    .from("ai_messages")
+    .select("id, conversation_id, sender_type, content, metadata, created_at")
+    .eq("id", id)
+    .maybeSingle();
+  if (error && error.code === MISSING_COLUMN) {
+    ({ data, error } = await supabase
+      .from("ai_messages")
+      .select("id, conversation_id, sender_type, content, created_at")
+      .eq("id", id)
+      .maybeSingle());
+  }
+  if (error) throw error;
+  return data || null;
+}
+
+// Remove a single message (best-effort cleanup). Used to roll back a USER
+// question whose turn failed before an answer was produced, so it doesn't
+// linger as an unanswered turn that the next request would feed back to the LLM.
+async function deleteMessage(id) {
+  const { error } = await supabase.from("ai_messages").delete().eq("id", id);
+  if (error) throw error;
+}
+
 async function addMessage(conversationId, senderType, content, metadata = null) {
   const row = {
     conversation_id: conversationId,
@@ -117,6 +144,8 @@ module.exports = {
   findConversation,
   deleteConversation,
   listMessages,
+  findMessageById,
   addMessage,
+  deleteMessage,
   recordRetrievedChunks,
 };

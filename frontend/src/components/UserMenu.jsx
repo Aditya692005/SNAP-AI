@@ -1,41 +1,51 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { authService } from "../services/authService";
 import { getTheme, toggleTheme } from "../services/theme";
+import { initials, roleLabel } from "../utils/user";
 import "./UserMenu.css";
 
 const PUBLIC_PATHS = ["/", "/login", "/signup", "/verify-email", "/forgot-password", "/accept-invite"];
-
-const ROLE_LABELS = {
-  employee: "Employee",
-  manager: "Manager",
-  org_admin: "Company Admin",
-  admin: "Administrator",
-};
-
-function initials(name, email) {
-  const base = (name || email || "?").trim();
-  const parts = base.split(/\s+/).filter(Boolean);
-  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
-  return base.slice(0, 2).toUpperCase();
-}
 
 function UserMenu() {
   const location = useLocation();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [theme, setTheme] = useState(getTheme());
+  const [user, setUser] = useState(authService.getUser());
 
-  const user = authService.getUser();
+  const isPublic = PUBLIC_PATHS.includes(location.pathname);
+
+  // Re-sync the cached user from the server on mount so a department/role change
+  // made by an admin shows up (name + gating) without waiting for a re-login.
+  useEffect(() => {
+    if (isPublic || !authService.isAuthenticated()) return;
+    let alive = true;
+    authService.refreshUser().then((fresh) => {
+      if (alive && fresh) setUser(fresh);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [isPublic]);
+
+  // There's no global user store, so Settings announces a profile change and we
+  // pick the fresh copy up from the cache — otherwise the avatar and name here
+  // would keep showing the old value until this component happened to remount.
+  useEffect(() => {
+    const onUserUpdated = () => setUser(authService.getUser());
+    window.addEventListener("snap:user-updated", onUserUpdated);
+    return () => window.removeEventListener("snap:user-updated", onUserUpdated);
+  }, []);
 
   // Hide on public/auth pages and when logged out.
-  if (PUBLIC_PATHS.includes(location.pathname) || !authService.isAuthenticated() || !user) {
+  if (isPublic || !authService.isAuthenticated() || !user) {
     return null;
   }
 
   // Department is assigned later by an org_admin, so it may be unset at first.
-  const deptName = user.department_id ? "Assigned" : "Unassigned";
-  const roleLabel = ROLE_LABELS[user.role] || user.role || "—";
+  // Show a placeholder while the name is still loading for an assigned user.
+  const deptName = user.department_name || (user.department_id ? "…" : "Unassigned");
 
   function onToggleTheme() {
     setTheme(toggleTheme());
@@ -72,7 +82,7 @@ function UserMenu() {
             <div className="usermenu-rows">
               <div className="usermenu-row">
                 <span className="usermenu-key">Role</span>
-                <span className="usermenu-val">{roleLabel}</span>
+                <span className="usermenu-val">{roleLabel(user.role)}</span>
               </div>
               <div className="usermenu-row">
                 <span className="usermenu-key">Department</span>
@@ -86,7 +96,17 @@ function UserMenu() {
               className="usermenu-theme"
               onClick={() => {
                 setOpen(false);
-                navigate("/change-password");
+                navigate("/settings");
+              }}
+            >
+              <span>⚙️ Settings</span>
+            </button>
+
+            <button
+              className="usermenu-theme"
+              onClick={() => {
+                setOpen(false);
+                navigate("/settings?tab=security");
               }}
             >
               <span>🔑 Change password</span>

@@ -8,7 +8,7 @@ const supabase = require("../../supabase/supabase");
 // AND roles.created_by -> users.id), so the embed must name the exact FK
 // (users_role_id_fkey) or PostgREST errors with PGRST201 (ambiguous).
 const USER_SELECT =
-  "id, name, email, status, organization_id, department_id, role_id, email_verified, created_at, role:roles!users_role_id_fkey(name)";
+  "id, name, email, status, organization_id, department_id, role_id, email_verified, created_at, last_login, role:roles!users_role_id_fkey(name)";
 
 function flatten(u) {
   if (!u) return u;
@@ -99,6 +99,35 @@ async function updateUser(id, organizationId, fields) {
     .single();
   if (error) throw error;
   return flatten(data);
+}
+
+// ── Self-service (the user acting on their own account) ──────────────────────
+// Deliberately separate from updateUser(): that one is the ADMIN path and its
+// whitelist must never grow to include name, just as this one must never grow to
+// include role_id / department_id / status. Filtering on `id` alone is safe here
+// because the caller's id comes from the verified JWT, never from the request body.
+async function updateProfile(userId, { name }) {
+  const patch = {};
+  if (typeof name === "string") patch.name = name;
+  if (Object.keys(patch).length === 0) return null;
+  const { data, error } = await supabase
+    .from("users")
+    .update(patch)
+    .eq("id", userId)
+    .select(USER_SELECT)
+    .single();
+  if (error) throw error;
+  return flatten(data);
+}
+
+// Stamp the successful-login time. Best-effort: a failure here must never block
+// the login itself, so callers swallow the error.
+async function setLastLogin(userId) {
+  const { error } = await supabase
+    .from("users")
+    .update({ last_login: new Date().toISOString() })
+    .eq("id", userId);
+  if (error) throw error;
 }
 
 // Soft-delete: mark the account INACTIVE (login is then refused). Keeps the row
@@ -292,6 +321,8 @@ module.exports = {
   clearPasswordResetOtp,
   listUsers,
   updateUser,
+  updateProfile,
+  setLastLogin,
   deactivateUser,
   deleteUser,
 };
