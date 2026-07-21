@@ -1,8 +1,5 @@
-/* Slim icon rail that expands on hover (no click toggle). Collapsed width shows
-   icons only; hovering widens it and reveals the labels. */
 .sidebar {
-  width: 64px;
-  flex-shrink: 0;
+  width: 280px;
 
   min-height: 100vh;
 
@@ -12,48 +9,150 @@
   display: flex;
   flex-direction: column;
 
-  padding: 1.4rem 0.6rem;
+  padding: 2rem 1.5rem;
 
   background: rgba(255, 255, 255, 0.03);
+
   border-right: 1px solid rgba(255, 255, 255, 0.08);
+
   backdrop-filter: blur(20px);
 
-  font-family: "Manrope", -apple-system, "Segoe UI", sans-serif;
+  font-family: "IBM Plex Sans", sans-serif;
 
-  overflow: hidden;
-  white-space: nowrap;
-  z-index: 30;
-
-  transition: width 0.2s ease;
+  transition:
+    width 0.2s ease,
+    padding 0.2s ease;
 }
 
-/* Only the width changes on hover — padding stays fixed so the icons never move. */
-.sidebar:hover {
-  width: 220px;
+.sidebar.collapsed {
+  width: 75px;
+  padding: 2rem 0.75rem;
+}
+
+.sidebar-top {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 2rem;
+}
+
+.sidebar.collapsed .sidebar-top {
+  flex-direction: column-reverse;
+  justify-content: center;
+}
+
+.sidebar-logo {
+  display: flex;
+  align-items: center;
+  /* gap: 0.65rem; */
+  min-width: 0;
+  flex: 1;
+}
+
+.logo-mark {
+  flex-shrink: 0;
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: #ffffff;
+  font-weight: 800;
+  font-size: 2.25rem;
+  letter-spacing: 0.01em;
+  box-shadow: none;
+}
+
+.logo-text {
+  min-width: 0;
+  white-space: nowrap;
+  /* overflow: hidden; */
+  /* text-overflow: ellipsis; */
+}
+
+.sidebar-toggle {
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: #cbd5e1;
+  font-size: 1.25rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  align-self: center;
+  margin-left: 0;
+  padding-top: 4px;
+}
+
+.sidebar-toggle:hover {
+  background: rgba(139, 92, 246, 0.18);
+  border-color: rgba(139, 92, 246, 0.5);
+  color: #fff;
+}
+
+.sidebar-logo h2 {
+  font-size: 2rem;
+
+  font-weight: 700;
+
+  background: #8b64ff;
+  background-clip: text;
+  -webkit-background-clip: text;
+
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+.sidebar-logo p {
+  color: #64748b;
+
+  font-size: 0.9rem;
+
+  margin-top: 0.4rem;
+}
+
+.sidebar-divider {
+  height: 1px;
+
+  background: rgba(255, 255, 255, 0.08);
+
+  margin-bottom: 1.5rem;
 }
 
 .sidebar nav {
   display: flex;
+
   flex-direction: column;
+
   gap: 0.5rem;
 }
 
-/* Constant layout collapsed and expanded: the icon sits at a fixed left offset
-   (which centres it within the 64px rail) and the label simply fades in beside it. */
 .sidebar a {
   text-decoration: none;
-  color: #a9adb8;
-  padding: 11px 10px;
-  border: 1px solid transparent; /* reserve space so the active border doesn't nudge the icon */
-  border-radius: 8px;
+
+  color: #94a3b8;
+
+  padding: 14px 18px;
+
+  border-radius: 14px;
+
   font-weight: 500;
+
   display: flex;
   align-items: center;
-  justify-content: flex-start;
   gap: 0.85rem;
+
   transition:
     background 0.2s ease,
-    color 0.2s ease;
+    color 0.2s ease,
+    transform 0.2s ease;
 }
 
 .nav-icon {
@@ -61,42 +160,70 @@
   align-items: center;
   justify-content: center;
   font-size: 1.5rem;
-  width: 1.5rem;
+  width: 1.25rem;
   flex-shrink: 0;
   line-height: 1;
 }
 
 .nav-label {
+  white-space: nowrap;
   overflow: hidden;
-  width: 0;
-  opacity: 0;
-  transition: opacity 0.15s ease;
 }
 
-.sidebar:hover .nav-label {
-  width: auto;
-  opacity: 1;
+.sidebar.collapsed nav a {
+  justify-content: center;
+  padding: 14px 0;
+  gap: 0;
+}
+
+.sidebar.collapsed .nav-label {
+  display: none;
 }
 
 .sidebar a:hover {
-  background: rgba(255, 255, 255, 0.06);
-  color: #ffffff;
+  background: rgba(139, 92, 246, 0.12);
+
+  color: white;
+
+  transform: translateX(4px);
+}
+
+.sidebar.collapsed a:hover {
+  transform: none;
 }
 
 .sidebar a.active {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.2);
-  color: #ffffff;
+  background: linear-gradient(
+    135deg,
+    rgba(139, 92, 246, 0.18),
+    rgba(99, 102, 241, 0.12)
+  );
+
+  border: 1px solid rgba(139, 92, 246, 0.25);
+
+  color: white;
+
+  box-shadow: 0 0 20px rgba(139, 92, 246, 0.15);
 }
 
 .sidebar-footer {
   margin-top: auto;
-  padding-top: 1.5rem;
+
+  padding-top: 2rem;
+
   border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .sidebar-footer p {
-  color: #7d7d7d;
+  color: #64748b;
+
   font-size: 0.85rem;
+
   text-align: center;
+}
+
+@media (max-width: 900px) {
+  .sidebar {
+    width: 240px;
+  }
 }

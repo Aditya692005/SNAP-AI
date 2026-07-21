@@ -6,9 +6,7 @@ const {
   signup,
   verifyEmailToken,
   getCurrentUser,
-  updateProfile,
   orgStatus,
-  emailExists,
   forgotPassword,
   resetPassword,
   changePassword,
@@ -23,20 +21,17 @@ router.post("/login", login);
 router.post("/signup", signup);
 router.post("/verify", verifyEmailToken); // Verify email with token
 router.get("/me", requireAuth, getCurrentUser);
-router.patch("/me", requireAuth, updateProfile); // self-service: name only
 // Public: does this email's domain already have an organization? Drives whether
 // the signup form shows the "set up your organization" fields.
 router.get("/org-status", orgStatus);
-// Public: does an account for this email already exist?
-router.get("/email-exists", emailExists);
 
 // Password flows
-router.post("/forgot-password", forgotPassword); // public: email a reset link
-router.post("/reset-password", resetPassword); // public: set new password via token
+router.post("/forgot-password", forgotPassword);          // public: email a reset link
+router.post("/reset-password", resetPassword);            // public: set new password via token
 router.post("/change-password", requireAuth, changePassword); // logged-in: current + new
 
 // Invitations (admin-added users)
-router.get("/invite-info", inviteInfo); // public: who is this invite for?
+router.get("/invite-info", inviteInfo);    // public: who is this invite for?
 router.post("/accept-invite", acceptInvite); // public: set password + activate
 
 // NOTE: the old public GET /departments route is gone. Departments are now

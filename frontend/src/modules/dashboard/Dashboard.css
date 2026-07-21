@@ -1,213 +1,88 @@
-/* Dashboard — matches the Login / Signup design language: charcoal gradient
-   background, Playfair Display for display headings, Manrope for everything else,
-   flat sharp-cornered monochrome panels. Semantic colours (delta up/down, stale,
-   status) are kept where they carry meaning; all the chrome is greyscale. */
+.dashboard {
+  min-height: 100vh;
+  display: flex;
+  background:
+    radial-gradient(1100px 600px at 80% -10%, rgba(139, 92, 246, 0.12), transparent 60%),
+    radial-gradient(900px 500px at -10% 10%, rgba(34, 211, 238, 0.08), transparent 55%),
+    #04070f;
+  color: white;
+  font-family: "IBM Plex Sans", sans-serif;
+}
 
-/* The page shell (background, top bar, sidebar row) lives in AppShell.css. */
+.dashboard-content {
+  flex: 1;
+  padding: 2.25rem 3rem 4rem;
+  position: relative;
+  min-width: 0;
+}
 
-/* ── Controls row: create + scope switch ────────────────── */
-.dashboard-controls {
+/* ── Header ─────────────────────────────────────────────── */
+.dashboard-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 2rem;
+  /* Leave room for the fixed profile avatar in the top-right corner. */
+  padding-right: 3.25rem;
+}
+
+.dashboard-eyebrow {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #a78bfa;
+  margin-bottom: 0.5rem;
+}
+
+.dashboard-org-meta {
+  margin: 0.35rem 0 0;
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #94a3b8;
+}
+
+.dashboard-header h1 {
+  font-size: 2.6rem;
+  line-height: 1.1;
+  margin: 0 0 0.6rem;
+  background: linear-gradient(120deg, #f8fafc, #c4b5fd 60%, #67e8f9);
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+.dashboard-header p {
+  color: #94a3b8;
+  line-height: 1.7;
+  max-width: 620px;
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.dashboard-toolbar {
   display: flex;
   align-items: center;
-  gap: 1rem;
-  flex-wrap: wrap;
-  margin-bottom: 1.1rem;
-}
-
-.control-btn {
-  padding: 0.6rem 1.1rem;
-  background: transparent;
-  border: 1px solid #3a3b42;
-  color: #e8e8e8;
-  font-family: inherit;
-  font-size: 0.9rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: border-color 0.18s ease, background 0.18s ease;
-}
-
-.control-btn:hover {
-  border-color: #ffffff;
-  background: rgba(255, 255, 255, 0.04);
-}
-
-.scope-group {
-  display: flex;
   gap: 0.6rem;
   flex-wrap: wrap;
 }
 
-.scope-btn {
-  padding: 0.55rem 1.4rem;
-  background: transparent;
-  border: 1px solid #3a3b42;
-  color: #cfd2da;
-  font-family: inherit;
-  font-size: 0.9rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: border-color 0.18s ease, background 0.18s ease, color 0.18s ease;
-}
-
-.scope-btn:hover {
-  border-color: #6b6d78;
-  color: #ffffff;
-}
-
-.scope-btn.active {
-  background: linear-gradient(135deg, #ffffff, #d6d6d6);
-  border-color: #ffffff;
-  color: #0b0b0d;
-}
-
-/* ── Body: main column + Updates column ─────────────────── */
-.dashboard-body {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
-  gap: 1.6rem;
-  align-items: start;
-}
-
-.dashboard-main-col {
-  min-width: 0;
-}
-
-.updates-col {
-  display: flex;
-  flex-direction: column;
-  gap: 0.9rem;
-  position: sticky;
-  top: 1.2rem;
-  min-height: 460px; /* keeps the edge toggle vertically centred even when collapsed */
-}
-
-/* Collapsed: the grid squeezes this column to a slim rail (see
-   .dashboard-body.updates-collapsed) and only the toggle stays visible. */
-.dashboard-body.updates-collapsed {
-  grid-template-columns: minmax(0, 1fr) 26px;
-}
-
-.updates-col.collapsed .updates-title,
-.updates-col.collapsed .updates-panel {
-  display: none;
-}
-
-/* Edge toggle — straddles the column's left border, vertically centred.
-   ‹ (pointing out toward the charts) = expand, › (pointing in) = collapse. */
-.updates-toggle {
-  position: absolute;
-  left: -13px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 26px;
-  height: 26px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 0 3px; /* optically centre the glyph */
-  background: #17181d;
-  border: 1px solid #3a3b42;
-  color: #cfd2da;
-  font-size: 1.05rem;
-  line-height: 1;
-  cursor: pointer;
-  z-index: 5;
-  transition: border-color 0.18s ease, color 0.18s ease;
-}
-
-.updates-toggle:hover {
-  border-color: #ffffff;
-  color: #ffffff;
-}
-
-/* In the slim rail there is no left edge to straddle — centre it instead. */
-.updates-col.collapsed .updates-toggle {
-  left: 50%;
-  transform: translate(-50%, -50%);
-}
-
-.updates-title {
-  align-self: flex-start;
-  margin: 0;
-  padding: 0.5rem 1.2rem;
-  border: 1px solid #3a3b42;
-  font-family: "Playfair Display", Georgia, serif;
-  font-size: 1.05rem;
-  letter-spacing: 0.02em;
-  color: #ffffff;
-}
-
-.updates-panel {
-  min-height: 460px;
-  border: 1px solid #2f2f2f;
-  background: rgba(255, 255, 255, 0.02);
-  padding: 1.2rem;
-}
-
-.updates-empty {
-  margin: 0;
-  color: #7d7d7d;
-  font-size: 0.9rem;
-  line-height: 1.7;
-}
-
-/* ── Quick-action buttons (Refresh / ghost) ─────────────── */
-.ghost-btn {
-  background: transparent;
-  border: 1px solid #3a3b42;
-  color: #e2e2e6;
-  padding: 8px 14px;
-  font-family: inherit;
-  font-size: 0.84rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: border-color 0.18s ease, background 0.18s ease;
-}
-
-.ghost-btn:hover:not(:disabled) {
-  border-color: #ffffff;
-  background: rgba(255, 255, 255, 0.04);
-}
-
-.ghost-btn:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.ghost-btn.small {
-  padding: 0.32rem 0.7rem;
-  font-size: 0.8rem;
-  white-space: nowrap;
-}
-
-.ghost-btn.small.danger {
-  border-color: rgba(248, 113, 113, 0.4);
-  color: #fca5a5;
-}
-.ghost-btn.small.danger:hover:not(:disabled) {
-  background: rgba(248, 113, 113, 0.14);
-  border-color: rgba(248, 113, 113, 0.6);
-}
-
-/* ── Sources button ─────────────────────────────────────── */
-.sources-btn {
+.chip {
   display: inline-flex;
   align-items: center;
-  gap: 0.45rem;
-  background: transparent;
-  border: 1px solid #3a3b42;
-  color: #e8e8e8;
-  padding: 8px 14px;
-  font-family: inherit;
-  font-size: 0.84rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: border-color 0.18s ease, background 0.18s ease;
-}
-
-.sources-btn:hover {
-  border-color: #ffffff;
-  background: rgba(255, 255, 255, 0.04);
+  gap: 0.4rem;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  padding: 7px 13px;
+  font-size: 0.8rem;
+  color: #cbd5e1;
+  white-space: nowrap;
 }
 
 .chip-dot {
@@ -215,135 +90,229 @@
   height: 7px;
   border-radius: 50%;
   background: #34d399;
-  box-shadow: 0 0 8px rgba(52, 211, 153, 0.6);
+  box-shadow: 0 0 8px rgba(52, 211, 153, 0.7);
 }
 
-.sources-count {
-  background: rgba(0, 0, 0, 0.35);
-  border: 1px solid #2f2f2f;
-  padding: 1px 8px;
-  font-size: 0.74rem;
+/* ── Currency selector ──────────────────────────────────── */
+.currency-select {
+  position: relative;
 }
 
-/* ── Dashboard-name tabs ────────────────────────────────── */
-.dashboard-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  margin-bottom: 1rem;
-  border-bottom: 1px solid #2a2b31;
-  padding-bottom: 0.75rem;
-}
-
-.dash-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.45rem;
-  padding: 0.42rem 1rem;
-  background: transparent;
-  border: 1px solid #3a3b42;
-  color: #cfd2da;
-  font-family: inherit;
-  font-size: 0.85rem;
-  font-weight: 500;
+.currency-btn {
   cursor: pointer;
-  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+  font-weight: 600;
+  font-family: inherit;
+  gap: 0.35rem;
 }
 
-.dash-tab:hover {
-  border-color: #6b6d78;
-  color: #ffffff;
+.currency-btn:hover {
+  border-color: rgba(139, 92, 246, 0.5);
+  background: rgba(139, 92, 246, 0.12);
 }
 
-.dash-tab.active {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: #ffffff;
-  color: #ffffff;
+.currency-btn .caret {
+  font-size: 0.65rem;
+  color: #94a3b8;
 }
 
-.dash-tab-input,
-.dash-rename-input {
-  padding: 0.42rem 1rem;
-  background: #0f0f0f;
-  border: 1px solid #ffffff;
-  color: #f5f5f5;
+.currency-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+}
+
+.currency-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 31;
+  min-width: 130px;
+  background: #0b1020;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  padding: 5px;
+  box-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.7);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.currency-menu button {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: #cbd5e1;
   font-family: inherit;
   font-size: 0.85rem;
-  outline: none;
-  min-width: 12rem;
+  font-weight: 600;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s ease;
 }
 
-.dash-tab-input::placeholder,
-.dash-rename-input::placeholder {
-  color: #7d7d7d;
+.currency-menu button:hover {
+  background: rgba(255, 255, 255, 0.06);
 }
 
-.dash-tab-badge {
-  font-size: 0.62rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  padding: 0.1rem 0.35rem;
-  background: rgba(255, 255, 255, 0.1);
-  color: #a9adb8;
+.currency-menu button.active {
+  background: rgba(139, 92, 246, 0.18);
+  color: #e9e3ff;
 }
 
-.dashboard-board-actions {
+.currency-menu .cur-sym {
+  width: 16px;
+  text-align: center;
+  color: #a78bfa;
+}
+
+.currency-menu .cur-check {
+  margin-left: auto;
+  color: #34d399;
+}
+
+.fx-note {
+  font-size: 0.74rem;
+  color: #64748b;
+  white-space: nowrap;
+}
+
+/* ── Period / granularity bar ───────────────────────────── */
+.period-bar {
   display: flex;
-  gap: 0.5rem;
-  margin-bottom: 1.4rem;
-  flex-wrap: wrap;
   align-items: center;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.012));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  padding: 0.7rem 0.9rem;
+  margin-bottom: 1.4rem;
 }
 
-.add-metric-inline {
-  display: inline-flex;
-  align-items: center;
+.gran-segmented {
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.period-btn {
+  cursor: pointer;
+  font-weight: 600;
+  font-family: inherit;
   gap: 0.4rem;
 }
 
-.add-metric-error {
-  color: #f87171;
+.period-btn:hover {
+  border-color: rgba(139, 92, 246, 0.5);
+  background: rgba(139, 92, 246, 0.12);
+}
+
+.period-menu {
+  max-height: 280px;
+  overflow-y: auto;
+  min-width: 150px;
+}
+
+.period-hint {
   font-size: 0.78rem;
-}
-
-.dash-readonly-hint {
-  font-size: 0.8rem;
-  color: #a9adb8;
-  font-style: italic;
-}
-
-.dash-updated-hint {
-  font-size: 0.75rem;
-  color: #7d7d7d;
+  color: #64748b;
   margin-left: auto;
 }
 
-/* ── KPI / metric cards ─────────────────────────────────── */
+@media (max-width: 700px) {
+  .period-hint {
+    margin-left: 0;
+    width: 100%;
+  }
+}
+
+.ghost-btn {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #e2e8f0;
+  border-radius: 10px;
+  padding: 8px 14px;
+  font-size: 0.84rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+
+.ghost-btn:hover:not(:disabled) {
+  background: rgba(139, 92, 246, 0.18);
+  border-color: rgba(139, 92, 246, 0.5);
+  transform: translateY(-1px);
+}
+
+.ghost-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ── Department sections ────────────────────────────────── */
+.dept-section {
+  margin-bottom: 1.6rem;
+}
+
+.dept-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.9rem;
+}
+
+.dept-icon {
+  font-size: 1.05rem;
+  line-height: 1;
+}
+
+.dept-heading h2 {
+  font-size: 1.05rem;
+  margin: 0;
+  letter-spacing: 0.01em;
+}
+
+.dept-rule {
+  flex: 1;
+  height: 1px;
+  opacity: 0.35;
+  border-radius: 1px;
+}
+
+/* ── KPI cards ──────────────────────────────────────────── */
 .kpi-row {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 1rem;
-  margin-bottom: 1.5rem;
 }
 
 .kpi-card {
+  --accent: rgba(255, 255, 255, 0.16);
   display: flex;
   flex-direction: column;
   gap: 0.7rem;
   text-align: left;
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid #2f2f2f;
+  background: linear-gradient(165deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.015));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
   padding: 1.1rem 1.2rem;
   cursor: pointer;
   font-family: inherit;
   color: inherit;
-  min-height: 132px;
-  transition: border-color 0.18s ease, background 0.18s ease;
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
 }
 
 .kpi-card:hover:not(:disabled) {
-  border-color: #6b6d78;
-  background: rgba(255, 255, 255, 0.04);
+  transform: translateY(-3px);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.kpi-card.active {
+  border-color: var(--accent);
+  box-shadow: 0 10px 35px -12px var(--accent), inset 0 0 0 1px var(--accent);
 }
 
 .kpi-card.static {
@@ -355,45 +324,25 @@
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding-right: 1.5rem; /* room for the × remove button */
+}
+
+.kpi-icon {
+  font-size: 1rem;
+  line-height: 1;
 }
 
 .kpi-label {
-  font-size: 0.75rem;
-  color: #a9adb8;
+  font-size: 0.78rem;
+  color: #94a3b8;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.05em;
   font-weight: 600;
-}
-
-.kpi-period-select {
-  margin-left: auto;
-  position: relative;
-  z-index: 3;
-  background: #0f0f0f;
-  color: #cfd2da;
-  border: 1px solid #3a3b42;
-  font-family: inherit;
-  font-size: 0.72rem;
-  font-weight: 600;
-  padding: 0.1rem 0.3rem;
-  cursor: pointer;
-  max-width: 8.5rem;
-}
-
-.kpi-period-select:hover {
-  border-color: #6b6d78;
-}
-
-.kpi-period-tag {
-  color: #7d7d7d;
-  font-weight: 500;
 }
 
 .kpi-value {
-  font-size: 1.9rem;
+  font-size: 1.85rem;
   font-weight: 700;
-  color: #ffffff;
+  color: #f1f5f9;
   letter-spacing: -0.01em;
 }
 
@@ -413,45 +362,103 @@
 
 .kpi-delta.up { color: #34d399; }
 .kpi-delta.down { color: #f87171; }
-.kpi-delta.muted { color: #7d7d7d; font-weight: 500; }
+.kpi-delta.muted { color: #64748b; font-weight: 500; }
 
-/* Hover-remove (×) on a metric card */
-.kpi-card-wrap {
+.spark {
+  width: 130px;
+  height: 38px;
+  flex-shrink: 0;
+}
+
+.spark-empty {
+  width: 130px;
+  height: 38px;
+}
+
+/* ── Focused main chart ─────────────────────────────────── */
+.focus-panel {
+  --accent: #8b5cf6;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.012));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 20px;
+  padding: 1.4rem 1.6rem;
+  margin-bottom: 1.5rem;
   position: relative;
-  display: flex;
+  overflow: hidden;
 }
-.kpi-card-wrap > .kpi-card {
-  flex: 1;
-}
-.kpi-remove {
+
+.focus-panel::before {
+  content: "";
   position: absolute;
-  top: 6px;
-  right: 6px;
-  z-index: 2;
-  width: 20px;
-  height: 20px;
+  inset: 0 0 auto 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--accent), transparent);
+}
+
+.focus-header {
   display: flex;
   align-items: center;
-  justify-content: center;
-  border: none;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.45);
-  color: #e2e2e6;
-  font-size: 0.95rem;
-  line-height: 1;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.12s ease, background 0.12s ease;
-}
-.kpi-card-wrap:hover .kpi-remove {
-  opacity: 1;
-}
-.kpi-remove:hover {
-  background: #ef4444;
-  color: #fff;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
 }
 
-/* ── Charts ─────────────────────────────────────────────── */
+.focus-eyebrow {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.focus-header h2 {
+  margin: 0.2rem 0 0;
+  font-size: 1.5rem;
+}
+
+.focus-chart {
+  min-height: 320px;
+}
+
+.focus-chart .chart-canvas-wrap {
+  height: 340px;
+}
+
+/* ── Segmented control ──────────────────────────────────── */
+.segmented {
+  display: inline-flex;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 11px;
+  padding: 4px;
+  gap: 3px;
+}
+
+.segmented button {
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  font-family: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 7px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.segmented button:hover {
+  color: #e2e8f0;
+}
+
+.segmented button.active {
+  background: linear-gradient(135deg, #8b5cf6, #6366f1);
+  color: white;
+  box-shadow: 0 4px 14px -4px rgba(139, 92, 246, 0.6);
+}
+
+/* ── Secondary charts ───────────────────────────────────── */
 .dashboard-charts {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -460,55 +467,24 @@
 }
 
 .chart-panel {
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid #2f2f2f;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.01));
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 16px;
   padding: 0.9rem 1rem;
-  /* Grid items default to min-width:auto and won't shrink below their content —
-     a wide chart/table then overflowed into the Updates column. Allow shrink. */
-  min-width: 0;
-  transition: border-color 0.18s ease;
+  transition: border-color 0.18s ease, transform 0.18s ease;
 }
 
 .chart-panel:hover {
-  border-color: #6b6d78;
+  border-color: rgba(139, 92, 246, 0.35);
+  transform: translateY(-2px);
 }
 
-/* Blend the chart card into the page: drop ChartBlock's own dark navy box, its
-   border and padding, and recolour the table header so nothing clashes with the
-   charcoal background. */
-.chart-panel .chart-block {
-  background: transparent;
-  border: none;
-  padding: 0;
-  margin-top: 0;
-}
-.chart-panel .chart-table th {
-  background: rgba(255, 255, 255, 0.07);
-  color: #e8e8e8;
-}
-
-/* Re-uploaded source → chart may be stale until refreshed */
-.chart-panel.stale {
-  border-color: rgba(245, 158, 11, 0.5);
-}
-
-.widget-stale-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  margin-bottom: 0.7rem;
-  padding: 0.5rem 0.7rem;
-  background: rgba(245, 158, 11, 0.1);
-  border: 1px solid rgba(245, 158, 11, 0.3);
-  color: #fbbf24;
-  font-size: 0.82rem;
-}
-
-/* ── Welcome / empty states ─────────────────────────────── */
+/* ── Welcome / empty ────────────────────────────────────── */
 .welcome-card {
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid #2f2f2f;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 20px;
+  backdrop-filter: blur(20px);
   padding: 2.5rem;
   margin-bottom: 2rem;
   text-align: center;
@@ -516,13 +492,11 @@
 
 .welcome-card h2 {
   margin-bottom: 1rem;
-  color: #ffffff;
-  font-family: "Playfair Display", Georgia, serif;
-  font-weight: 500;
+  color: white;
 }
 
 .welcome-card p {
-  color: #a9adb8;
+  color: #94a3b8;
   line-height: 1.8;
   max-width: 620px;
   margin: 0 auto;
@@ -532,33 +506,125 @@
   display: inline-block;
   margin-top: 1.5rem;
   border: none;
-  padding: 13px 28px;
-  color: #0b0b0d;
-  font-family: inherit;
+  border-radius: 14px;
+  padding: 14px 28px;
+  color: white;
   font-size: 1rem;
-  font-weight: 700;
+  font-weight: 600;
   cursor: pointer;
   text-decoration: none;
-  background: linear-gradient(135deg, #ffffff, #d6d6d6);
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  background: linear-gradient(135deg, #8b5cf6, #6366f1);
+  transition: all 0.3s ease;
 }
 
 .upload-btn:hover {
   transform: translateY(-2px);
-  box-shadow: 0 10px 28px rgba(255, 255, 255, 0.12);
+  box-shadow: 0 10px 30px rgba(139, 92, 246, 0.35);
 }
 
 .dashboard-empty {
-  color: #7d7d7d;
+  color: #64748b;
   padding: 1.5rem 0;
   text-align: center;
 }
 
-/* ── Sources / Trash drawer ─────────────────────────────── */
+/* ── Sources button ─────────────────────────────────────── */
+.sources-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.22), rgba(99, 102, 241, 0.22));
+  border: 1px solid rgba(139, 92, 246, 0.5);
+  color: #e9e3ff;
+  border-radius: 10px;
+  padding: 8px 14px;
+  font-size: 0.84rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+
+.sources-btn:hover {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.4), rgba(99, 102, 241, 0.4));
+  transform: translateY(-1px);
+}
+
+.sources-btn.alt {
+  background: linear-gradient(135deg, rgba(34, 211, 238, 0.18), rgba(52, 211, 153, 0.18));
+  border-color: rgba(34, 211, 238, 0.45);
+  color: #d6f6ff;
+}
+
+.sources-btn.alt:hover {
+  background: linear-gradient(135deg, rgba(34, 211, 238, 0.34), rgba(52, 211, 153, 0.34));
+}
+
+/* ── Metrics picker drawer ──────────────────────────────── */
+.metrics-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+  overflow-y: auto;
+}
+
+.metric-group-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #94a3b8;
+  margin-bottom: 0.4rem;
+}
+
+.metric-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0.7rem;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.metric-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.metric-row-name {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  color: #e2e8f0;
+}
+
+.data-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(148, 163, 184, 0.4);
+}
+
+.data-dot.live {
+  background: #34d399;
+  box-shadow: 0 0 7px rgba(52, 211, 153, 0.7);
+}
+
+.sources-count {
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 0.74rem;
+}
+
+/* ── Sources drawer ─────────────────────────────────────── */
 .sources-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(10, 11, 15, 0.6);
+  background: rgba(2, 6, 18, 0.55);
   backdrop-filter: blur(2px);
   opacity: 0;
   pointer-events: none;
@@ -577,8 +643,10 @@
   right: 0;
   height: 100vh;
   width: min(420px, 90vw);
-  background: linear-gradient(180deg, #1a1b21 0%, #141519 100%);
-  border-left: 1px solid #2f2f2f;
+  background:
+    radial-gradient(600px 300px at 100% 0%, rgba(139, 92, 246, 0.12), transparent 60%),
+    #070b16;
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
   box-shadow: -20px 0 50px -20px rgba(0, 0, 0, 0.7);
   padding: 1.4rem 1.5rem;
   display: flex;
@@ -602,33 +670,40 @@
 }
 
 .drawer-header h2 {
-  font-family: "Playfair Display", Georgia, serif;
-  font-weight: 500;
-  font-size: 1.3rem;
+  font-size: 1.25rem;
   margin: 0 0 0.25rem;
 }
 
 .sources-hint {
   font-size: 0.8rem;
-  color: #7d7d7d;
+  color: #64748b;
 }
 
 .drawer-close {
-  background: transparent;
-  border: 1px solid #3a3b42;
-  color: #cfd2da;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #cbd5e1;
   width: 32px;
   height: 32px;
+  border-radius: 9px;
   font-size: 0.9rem;
   cursor: pointer;
   flex-shrink: 0;
-  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+  transition: all 0.15s ease;
 }
 
 .drawer-close:hover {
-  background: rgba(248, 113, 113, 0.16);
+  background: rgba(248, 113, 113, 0.18);
   border-color: rgba(248, 113, 113, 0.5);
   color: #fca5a5;
+}
+
+.drawer-actions {
+  display: flex;
+}
+
+.drawer-actions .ghost-btn {
+  width: 100%;
 }
 
 .sources-list {
@@ -643,14 +718,15 @@
   justify-content: space-between;
   gap: 1rem;
   padding: 0.7rem 0.9rem;
-  border: 1px solid #2a2b31;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
   background: rgba(255, 255, 255, 0.015);
   transition: border-color 0.15s ease, background 0.15s ease;
 }
 
 .source-row.included {
-  border-color: #4b4d55;
-  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(139, 92, 246, 0.28);
+  background: rgba(139, 92, 246, 0.05);
 }
 
 .source-actions {
@@ -668,6 +744,7 @@
   color: #fca5a5;
   background: rgba(239, 68, 68, 0.08);
   border: 1px solid rgba(239, 68, 68, 0.28);
+  border-radius: 8px;
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease;
 }
@@ -685,7 +762,7 @@
 }
 
 .source-name {
-  color: #e8e8e8;
+  color: #e2e8f0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -697,6 +774,7 @@
   text-transform: uppercase;
   letter-spacing: 0.04em;
   padding: 2px 8px;
+  border-radius: 999px;
   flex-shrink: 0;
   font-weight: 600;
 }
@@ -704,10 +782,10 @@
 .source-status.done { background: rgba(52, 211, 153, 0.15); color: #34d399; }
 .source-status.pending { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
 .source-status.empty,
-.source-status.unprocessed { background: rgba(148, 163, 184, 0.15); color: #a9adb8; }
+.source-status.unprocessed { background: rgba(148, 163, 184, 0.15); color: #94a3b8; }
 .source-status.error { background: rgba(248, 113, 113, 0.15); color: #f87171; }
 
-/* Toggle switch */
+/* Animated toggle switch */
 .source-toggle {
   display: flex;
   align-items: center;
@@ -742,87 +820,34 @@
   width: 17px;
   height: 17px;
   border-radius: 50%;
-  background: #e8e8e8;
+  background: #e2e8f0;
   transition: transform 0.2s ease;
 }
 
 .source-toggle input:checked + .switch {
-  background: linear-gradient(135deg, #ffffff, #cfcfcf);
+  background: linear-gradient(135deg, #8b5cf6, #6366f1);
 }
 
 .source-toggle input:checked + .switch::after {
   transform: translateX(17px);
-  background: #0b0b0d;
 }
 
 .switch-label {
   font-size: 0.8rem;
-  color: #cfd2da;
+  color: #cbd5e1;
   width: 62px;
 }
 
-/* ── Auto-added metrics toast ───────────────────────────── */
-.dashboard-toast {
-  position: fixed;
-  bottom: 24px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 60;
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  max-width: 90vw;
-  padding: 0.7rem 1rem;
-  background: #1f2027;
-  color: #e8e8e8;
-  border: 1px solid #3a3b42;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-  font-size: 0.9rem;
-}
-.toast-undo {
-  border: none;
-  background: linear-gradient(135deg, #ffffff, #d6d6d6);
-  color: #0b0b0d;
-  padding: 4px 12px;
-  cursor: pointer;
-  font-family: inherit;
-  font-weight: 700;
-}
-.toast-undo:hover {
-  filter: brightness(0.95);
-}
-.toast-dismiss {
-  border: none;
-  background: none;
-  color: #a9adb8;
-  cursor: pointer;
-  font-size: 0.9rem;
-}
-
 /* ── Responsive ─────────────────────────────────────────── */
-@media (max-width: 1100px) {
-  .dashboard-body,
-  .dashboard-body.updates-collapsed {
-    grid-template-columns: 1fr;
-  }
-  /* relative (not static): the edge toggle positions against this column */
-  .updates-col {
-    position: relative;
-    top: 0;
-    min-height: 0;
-  }
-  .updates-col.collapsed {
-    min-height: 44px; /* just enough rail for the centred toggle */
-  }
-  .updates-panel {
-    min-height: 240px;
-  }
-}
-
 @media (max-width: 1000px) {
+  .dashboard-content {
+    padding: 1.5rem;
+  }
+
   .kpi-row {
     grid-template-columns: repeat(2, 1fr);
   }
+
   .dashboard-charts {
     grid-template-columns: 1fr;
   }

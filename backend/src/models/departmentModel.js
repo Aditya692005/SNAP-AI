@@ -90,43 +90,6 @@ async function deleteDepartment(id) {
   if (error) throw error;
 }
 
-// A department plus all of its descendants (departments.parent_id tree),
-// scoped to one org. Drives manager-level sharing/visibility: a manager
-// governs the subtree rooted at their own department. Fetches the org's
-// departments once and walks the tree in JS (orgs are small). Returns [] when
-// rootDeptId is null/absent from the org.
-async function departmentSubtreeIds(organizationId, rootDeptId) {
-  if (!rootDeptId) return [];
-  const { data, error } = await supabase
-    .from("departments")
-    .select("id, parent_id")
-    .eq("organization_id", organizationId);
-  if (error) throw error;
-
-  const childrenOf = new Map();
-  let rootExists = false;
-  for (const d of data || []) {
-    if (d.id === rootDeptId) rootExists = true;
-    if (d.parent_id) {
-      if (!childrenOf.has(d.parent_id)) childrenOf.set(d.parent_id, []);
-      childrenOf.get(d.parent_id).push(d.id);
-    }
-  }
-  if (!rootExists) return [];
-
-  const ids = [];
-  const queue = [rootDeptId];
-  const seen = new Set(); // guard against parent_id cycles from bad data
-  while (queue.length > 0) {
-    const id = queue.shift();
-    if (seen.has(id)) continue;
-    seen.add(id);
-    ids.push(id);
-    queue.push(...(childrenOf.get(id) || []));
-  }
-  return ids;
-}
-
 module.exports = {
   listDepartments,
   findDepartmentById,
@@ -136,5 +99,4 @@ module.exports = {
   reassignDepartmentUsers,
   deactivateDepartmentUsers,
   deleteDepartment,
-  departmentSubtreeIds,
 };

@@ -38,21 +38,14 @@ async function requireAuth(req, res, next) {
       return next(new AppError("Your account has been deactivated.", 401));
     }
 
-    // Reconcile the mutable authorization context from the DB on every request
-    // so an admin's change (moving a user to another department, changing their
-    // role) takes effect immediately instead of waiting for the JWT to expire
-    // and be re-issued at re-login. The department especially drives which
-    // department dashboard the user sees, so a stale token value would keep a
-    // moved user pinned to their old team's board.
-    req.user.organization_id = req.user.organization_id ?? fresh.organization_id ?? null;
-    req.user.department_id = fresh.department_id ?? null;
-    req.user.role = fresh.role ?? null;
-    // Always recompute permissions from the DB rather than trusting the array
-    // embedded in the JWT at login. A token-role-name comparison used to skip
-    // this, but it missed two real cases: an admin EDITING a role's permission
-    // set, and a user moved between two roles that share a name (custom roles).
-    // Both must take effect on the next request, not the next login.
-    req.user.permissions = await getPermissionsForRole(fresh.role_id);
+    // Tokens issued before organization/permissions were added (stale ones) get
+    // their authorization context backfilled so gating stays correct.
+    if (!Array.isArray(req.user.permissions)) {
+      req.user.organization_id = req.user.organization_id ?? fresh.organization_id ?? null;
+      req.user.role = req.user.role ?? fresh.role ?? null;
+      req.user.department_id = req.user.department_id ?? fresh.department_id ?? null;
+      req.user.permissions = await getPermissionsForRole(fresh.role_id);
+    }
     return next();
   } catch (err) {
     return next(err);

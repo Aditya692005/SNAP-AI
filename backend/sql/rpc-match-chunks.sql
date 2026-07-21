@@ -7,22 +7,15 @@
 -- recreated. If the column is already 384 you can run only part (2) below.
 -- ============================================================================
 
--- 0) Ensure the columns this RPC returns exist (self-contained: safe to run this
---    file on its own, regardless of migration order).
-alter table document_chunks add column if not exists char_start int;
-alter table document_chunks add column if not exists char_end   int;
-alter table document_chunks add column if not exists metadata    jsonb;
-
--- 1) Ensure the embedding column is vector(384). The ANN index is bound to the
---    column type, so drop it first, then recreate as HNSW (see rag-hnsw-index.sql).
+-- 1) Ensure the embedding column is vector(384). The ivfflat index is bound to
+--    the column type, so drop it first, then recreate.
 drop index if exists idx_document_chunks_embedding;
 
 alter table document_chunks
     alter column embedding type vector(384);
 
 create index idx_document_chunks_embedding
-    on document_chunks using hnsw (embedding vector_cosine_ops)
-    with (m = 16, ef_construction = 64);
+    on document_chunks using ivfflat (embedding vector_cosine_ops) with (lists = 100);
 
 -- 2) Recreate the search function with the matching 384-dim signature.
 --    supabase-js / supabase-py cannot issue `<=>` directly, so retrieval goes
@@ -46,10 +39,7 @@ returns table (
     file_name   text,
     chunk_index int,
     chunk_text  text,
-    similarity  float,
-    char_start  int,
-    char_end    int,
-    metadata    jsonb
+    similarity  float
 )
 language sql
 stable
@@ -60,10 +50,7 @@ as $$
         d.file_name,
         dc.chunk_index,
         dc.chunk_text,
-        1 - (dc.embedding <=> query_embedding) as similarity,
-        dc.char_start,
-        dc.char_end,
-        dc.metadata
+        1 - (dc.embedding <=> query_embedding) as similarity
     from document_chunks dc
     join documents d on d.id = dc.document_id
     where d.organization_id = p_organization_id

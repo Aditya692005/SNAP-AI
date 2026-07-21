@@ -1,35 +1,46 @@
-/* Placeholder pages (e.g. Reports) — the shared charcoal shell comes from
-   AppShell; this just styles the heading and the "coming soon" card. */
+.placeholder-layout {
+  min-height: 100vh;
+  display: flex;
+  background: #020713;
+  color: white;
+  font-family: "IBM Plex Sans", sans-serif;
+}
+
+.placeholder-content {
+  flex: 1;
+  padding: 2rem 3rem;
+}
 
 .placeholder-header {
   margin-bottom: 2rem;
 }
 
 .placeholder-header h1 {
-  font-family: "Playfair Display", Georgia, serif;
-  font-size: 2.1rem;
-  font-weight: 500;
-  color: #ffffff;
+  font-size: 3rem;
   margin-bottom: 0.5rem;
+  background: #8b5cf6;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
 }
 
 .placeholder-header p {
-  color: #9a9da8;
+  color: #94a3b8;
 }
 
 .placeholder-card {
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid #2f2f2f;
+  background: #0a1224;
+  border: 1px solid #1e293b;
+  border-radius: 12px;
   padding: 2rem;
   max-width: 520px;
 }
 
 .placeholder-card h2 {
-  font-weight: 600;
-  color: #f0f0f0;
   margin-bottom: 0.5rem;
 }
 
 .placeholder-card p {
-  color: #9a9da8;
+  color: #94a3b8;
 }

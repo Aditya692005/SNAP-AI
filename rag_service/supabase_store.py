@@ -17,19 +17,10 @@ _client = None
 
 
 def sb():
-    """Shared Supabase client.
-
-    Prefers the SERVICE_ROLE key. The app's own tables run with RLS disabled, so the
-    anon key is enough for them — but Storage is not: storage.objects has RLS on and it
-    cannot be disabled on hosted Supabase, so the private `documents` bucket (where the
-    original uploaded files now live) is unreachable without service_role. Falls back to
-    the anon key so a deployment that hasn't set the new var yet still serves chat and
-    search; only the file-fetching paths break.
-    """
     global _client
     if _client is None:
         url = os.environ["SUPABASE_URL"]
-        key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.environ["SUPABASE_KEY"]
+        key = os.environ["SUPABASE_KEY"]
         _client = create_client(url, key)
     return _client
 
@@ -37,37 +28,6 @@ def sb():
 def _vec(embedding) -> str:
     """List[float] -> pgvector text literal."""
     return "[" + ",".join(repr(float(x)) for x in embedding) + "]"
-
-
-def storage_path_for(
-    document_id: str | None = None,
-    file_name: str | None = None,
-    organization_id: str | None = None,
-) -> tuple[str, str] | None:
-    """Locate a document's ORIGINAL bytes: -> (storage_path, file_name), or None.
-
-    By `document_id` when we have it — exact, and the only unambiguous way. Otherwise by
-    file name, which callers that only remember a name (a pinned chart, a cited source)
-    must fall back to; that lookup MUST be scoped by organization_id, because a file name
-    is not unique across tenants and resolving one without an org would happily hand back
-    a different company's document. Newest wins when a name repeats within an org.
-    """
-    q = sb().table("documents").select("storage_path, file_name")
-    if document_id:
-        q = q.eq("id", document_id)
-    elif file_name:
-        q = q.eq("file_name", file_name)
-        if organization_id:
-            q = q.eq("organization_id", organization_id)
-        q = q.order("created_at", desc=True)
-    else:
-        return None
-
-    res = q.limit(1).execute()
-    rows = res.data or []
-    if not rows or not rows[0].get("storage_path"):
-        return None
-    return rows[0]["storage_path"], rows[0].get("file_name") or (file_name or "")
 
 
 def insert_document_table(document_id: str, table) -> None:
@@ -83,84 +43,19 @@ def insert_document_table(document_id: str, table) -> None:
     ).execute()
 
 
-def get_document_version(document_id: str) -> int:
-    """Current version of a document (bumped on re-upload). 1 if unknown or the
-    `version` column isn't deployed yet."""
-    try:
-        res = sb().table("documents").select("version").eq("id", document_id).limit(1).execute()
-        data = res.data or []
-        if data and data[0].get("version") is not None:
-            return int(data[0]["version"])
-    except Exception:
-        pass
-    return 1
-
-
-def insert_document_chunks(
-    document_id: str,
-    texts: list[str],
-    embeddings: list,
-    *,
-    organization_id: str | None = None,
-    doc_version: int = 1,
-    source: str | None = None,
-    metas: list[dict] | None = None,
-    start_index: int = 0,
-) -> int:
-    """Insert chunks with tenant id + version + rough token count + metadata +
-    char offsets. `metas[i]` (optional, parallel to texts) may carry
-    {char_start, char_end, page} for chunk i; page/section go into metadata jsonb
-    alongside the source filename, offsets into their own columns.
-    token_count is a cheap ~chars/4 estimate. Falls back to the minimal column
-    set if the P1.2/P2.7 migrations aren't applied yet, so ingestion never
-    hard-breaks on a migration lag."""
-    metas = metas or []
-    rows = []
-    for i, (text, emb) in enumerate(zip(texts, embeddings)):
-        meta = metas[i] if i < len(metas) else {}
-        md = {"source": source} if source else {}
-        if meta.get("page") is not None:
-            md["page"] = meta["page"]
-        rows.append({
+def insert_document_chunks(document_id: str, texts: list[str], embeddings: list, start_index: int = 0) -> int:
+    rows = [
+        {
             "document_id": document_id,
-            "organization_id": organization_id,
             "chunk_index": start_index + i,
             "chunk_text": text,
             "embedding": _vec(emb),
-            "doc_version": doc_version,
-            "token_count": max(1, len(text) // 4),
-            "metadata": md or None,
-            "char_start": meta.get("char_start"),
-            "char_end": meta.get("char_end"),
-        })
-    if not rows:
-        return 0
-    try:
+        }
+        for i, (text, emb) in enumerate(zip(texts, embeddings))
+    ]
+    if rows:
         sb().table("document_chunks").insert(rows).execute()
-    except Exception:
-        minimal = [
-            {"document_id": r["document_id"], "chunk_index": r["chunk_index"],
-             "chunk_text": r["chunk_text"], "embedding": r["embedding"]}
-            for r in rows
-        ]
-        sb().table("document_chunks").insert(minimal).execute()
     return len(rows)
-
-
-def hybrid_match_chunks(query_embedding, query_text: str, organization_id: str, document_ids=None, match_count: int = 30) -> list[dict]:
-    """Hybrid dense + full-text search via the RRF-fusing RPC. Returns rows with
-    {id, document_id, file_name, chunk_index, chunk_text, similarity, fts_rank,
-    score}. Raises if the P1.3 migration (function/tsv column) isn't applied —
-    callers fall back to dense-only match_chunks."""
-    params = {
-        "query_embedding": _vec(query_embedding),
-        "query_text": query_text or "",
-        "p_organization_id": organization_id,
-        "match_count": match_count,
-        "p_document_ids": document_ids,
-    }
-    res = sb().rpc("hybrid_match_document_chunks", params).execute()
-    return res.data or []
 
 
 def match_chunks(query_embedding, organization_id: str, document_ids=None, match_count: int = 5) -> list[dict]:
@@ -183,14 +78,6 @@ def file_names_for_documents(document_ids) -> list[str]:
         return []
     res = sb().table("documents").select("file_name").in_("id", document_ids).execute()
     return list({str(r["file_name"]) for r in (res.data or []) if r.get("file_name")})
-
-
-def documents_by_ids(document_ids) -> list[dict]:
-    """[{id, file_name}] rows for a set of document ids (retrieval preview)."""
-    if not document_ids:
-        return []
-    res = sb().table("documents").select("id, file_name").in_("id", document_ids).execute()
-    return res.data or []
 
 
 def tables_for_documents(document_ids) -> list[dict]:

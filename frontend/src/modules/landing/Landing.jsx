@@ -6,8 +6,11 @@ function Landing() {
 
   return (
     <div className="Landing">
+      <div className="glow glow-1"></div>
+      <div className="glow glow-2"></div>
+
       <div className="content">
-        <p className="landing-eyebrow">Enterprise AI Operations Platform</p>
+        <p className="subtitle">Enterprise AI Operations Platform</p>
 
         <h1>SNAP AI</h1>
 

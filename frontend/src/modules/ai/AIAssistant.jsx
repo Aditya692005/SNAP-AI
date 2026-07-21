@@ -1,48 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import AppShell from "../../components/AppShell";
-import ToastStack from "../../components/Toast";
+import Sidebar from "../../components/Sidebar";
 import ChartBlock from "./ChartBlock";
-import { authService } from "../../services/authService";
 import "./AIAssistant.css";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
-
-// Collapse retrieval provenance to one chip per (file, page), keeping the best
-// (highest-similarity) span, ordered by relevance. Backs the "Cited from" chips.
-function dedupeCitations(citations) {
-  const byKey = new Map();
-  for (const c of citations || []) {
-    const key = `${c.file_name || ""}|${c.page ?? ""}`;
-    const prev = byKey.get(key);
-    if (!prev || (c.similarity ?? 0) > (prev.similarity ?? 0)) byKey.set(key, c);
-  }
-  return [...byKey.values()].sort((a, b) => (b.similarity ?? 0) - (a.similarity ?? 0));
-}
-
-// The thread the user last had open, so navigating away and back (which unmounts
-// this component and clears its in-memory messages) reopens the same
-// conversation instead of dropping the user on a blank chat.
-const ACTIVE_CONVO_KEY = "activeConversationId";
 
 const GREETING = {
   role: "assistant",
   text: "Hi! I'm SNAP AI. Upload documents and ask me anything — including \"show me a bar chart of sales by region\" to generate charts, or \"generate a report summarizing this document\" to create a downloadable PDF.",
 };
-
-// Requests that SYNTHESIZE across documents — charts, tables, reports,
-// comparisons, or an explicit multi-year range — should see ALL of the user's
-// data, not just the single best-matching file. Otherwise data split across
-// uploads (e.g. 2024-25 in one file, 2026-27 in another) silently goes missing
-// from the result. Mirrors the RAG service's wants_chart / wants_table /
-// wants_document intent so the scoping matches what the server will do.
-const AGGREGATE_INTENT_RE =
-  /\b(chart|graph|plot|visuali[sz]e|visuali[sz]ation|diagram|histogram|scatter|pie|doughnut|trend|table|compare|comparison|report|over time|by (year|quarter|month|region|category|department|product))\b|from\s+\d{4}\s+to\s+\d{4}/i;
-
-function wantsAggregate(text) {
-  return AGGREGATE_INTENT_RE.test(text || "");
-}
 
 function getToken() {
   return localStorage.getItem("token");
@@ -67,32 +35,14 @@ function AIAssistant() {
   const [conversationId, setConversationId] = useState(null);
   const [conversations, setConversations] = useState([]);
   const [showHistory, setShowHistory] = useState(false);
-  // Transient popup notifications (auto-dismiss after a few seconds).
-  const [toasts, setToasts] = useState([]);
-  // "Pin to dashboard" picker: { spec, aiMessageId, dashboards } while choosing.
-  const [pinPicker, setPinPicker] = useState(null);
-  const [pinningTo, setPinningTo] = useState(null); // dashboard id being pinned to
 
   const bottomRef = useRef(null);
   const fileRef = useRef(null);
-  const toastIdRef = useRef(0);
 
-  function notify(text, type = "success") {
-    const id = ++toastIdRef.current;
-    setToasts((prev) => [...prev, { id, text, type }]);
-  }
-
-  function dismissToast(id) {
-    setToasts((prev) => prev.filter((t) => t.id !== id));
-  }
-
-  // ── on mount: load docs + past conversations, and reopen the last thread ──────
+  // ── on mount: load docs + past conversations ─────────────────────────────────
   useEffect(() => {
     fetchDocs();
     fetchConversations();
-    // Restore the conversation the user last had open (survives navigation).
-    const saved = localStorage.getItem(ACTIVE_CONVO_KEY);
-    if (saved) loadConversation(saved, { silent: true });
   }, []);
 
   useEffect(() => {
@@ -128,9 +78,7 @@ function AIAssistant() {
   }
 
   // Load a past thread's messages (with their saved sources/charts/documents).
-  // `silent` is used by the on-mount restore so a since-deleted thread doesn't
-  // pop an error toast — it just clears the stale pointer and shows a fresh chat.
-  async function loadConversation(id, { silent = false } = {}) {
+  async function loadConversation(id) {
     try {
       const res = await fetch(`${API_BASE}/api/conversations/${id}`, {
         headers: authHeaders(),
@@ -146,23 +94,21 @@ function AIAssistant() {
           m.sender_type === "USER"
             ? { role: "user", text: m.content }
             : {
-                id: m.id,
                 role: "assistant",
                 text: m.content,
                 sources: m.metadata?.sources || [],
-                citations: m.metadata?.citations || [],
                 chart: m.metadata?.chart || undefined,
                 document: m.metadata?.document || undefined,
-                metric: m.metadata?.metric || undefined,
               }
         );
       setMessages([GREETING, ...mapped]);
       setConversationId(id);
-      localStorage.setItem(ACTIVE_CONVO_KEY, id);
       setShowHistory(false);
     } catch (err) {
-      localStorage.removeItem(ACTIVE_CONVO_KEY); // drop a stale/deleted pointer
-      if (!silent) notify(err.message, "error");
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", text: `❌ ${err.message}`, error: true },
+      ]);
     }
   }
 
@@ -179,9 +125,11 @@ function AIAssistant() {
       }
       setConversations((prev) => prev.filter((c) => c.id !== id));
       if (conversationId === id) newChat();
-      notify("Conversation deleted.");
     } catch (err) {
-      notify(err.message, "error");
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", text: `❌ ${err.message}`, error: true },
+      ]);
     }
   }
 
@@ -189,7 +137,6 @@ function AIAssistant() {
     setConversationId(null);
     setMessages([GREETING]);
     setShowHistory(false);
-    localStorage.removeItem(ACTIVE_CONVO_KEY);
   }
 
   // ── remove ONE document everywhere (vector store + DB + Supabase + dashboard) ──
@@ -212,94 +159,30 @@ function AIAssistant() {
       }
       setDocList((prev) => prev.filter((x) => x.id !== d.id));
       setSelectedDocIds((prev) => prev.filter((id) => id !== d.id));
-      notify(`Removed "${d.file_name}" from the AI, database, and dashboard.`);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          text: `🗑️ Removed **${d.file_name}** from the AI, vector store, database, and dashboard metrics.`,
+        },
+      ]);
     } catch (err) {
-      notify(err.message, "error");
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", text: `❌ ${err.message}`, error: true },
+      ]);
     }
   }
 
   // ── send chat message ──────────────────────────────────────────────────────
-  // Two-phase send: first ask the backend which documents the question matches
-  // (a vector search, no LLM). The picker is shown ONLY when the match is
-  // ambiguous (several documents with similar scores) — when one document
-  // clearly wins the answer is scoped to it automatically, saving a click.
-  // Skipped entirely when the user already picked docs in the drawer, when
-  // nothing matches (plain chat), or when the preview fails (best-effort).
   async function sendMessage() {
     const text = input.trim();
     if (!text || loading) return;
 
     setMessages((prev) => [...prev, { role: "user", text }]);
     setInput("");
-
-    if (selectedDocIds.length > 0 || docList.length === 0) {
-      await askAI(text, selectedDocIds.length > 0 ? selectedDocIds : undefined);
-      return;
-    }
-
-    // Charts / tables / reports routinely combine data spread across several
-    // files. The preview step below narrows to the single best-matching
-    // document, which would drop the others and lose whole periods — so for
-    // these requests skip narrowing and use everything the user can access.
-    if (wantsAggregate(text)) {
-      await askAI(text, undefined);
-      return;
-    }
-
     setLoading(true);
-    let docs = [];
-    let ambiguous = false;
-    let previewOk = false;
-    try {
-      const res = await fetch(`${API_BASE}/api/rag/chat/preview`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({ message: text }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        docs = data.documents || [];
-        ambiguous = !!data.ambiguous;
-        previewOk = true;
-      }
-    } catch {
-      /* preview unavailable — fall through and answer normally */
-    }
 
-    // Keep `loading` on through the hand-off to askAI. Clearing it here — between
-    // the preview and the answer — would blink the typing dots off for a frame,
-    // making it look like the assistant stopped. askAI owns `loading` from here
-    // (it's already true), so the dots stay visible straight through to the answer.
-    // Nothing matched, or preview failed → answer over everything the user can see.
-    if (!previewOk || docs.length === 0) {
-      await askAI(text, undefined);
-      return;
-    }
-    // One clear winner (or a single match) → answer scoped to it, no picker.
-    if (!ambiguous) {
-      await askAI(text, docs.map((d) => d.id));
-      return;
-    }
-    // Several close matches → stop the spinner and let the user disambiguate.
-    setLoading(false);
-    setMessages((prev) => [
-      ...prev,
-      {
-        role: "assistant",
-        picker: {
-          question: text,
-          docs,
-          checked: docs.map((d) => d.id),
-          status: "open", // open → done | cancelled
-        },
-      },
-    ]);
-  }
-
-  // Ask the AI for the actual answer, searching only `documentIds` (undefined =
-  // everything the user can access).
-  async function askAI(text, documentIds) {
-    setLoading(true);
     try {
       const res = await fetch(`${API_BASE}/api/rag/chat`, {
         method: "POST",
@@ -307,7 +190,7 @@ function AIAssistant() {
         body: JSON.stringify({
           message: text,
           conversation_id: conversationId || undefined,
-          document_ids: documentIds,
+          document_ids: selectedDocIds.length > 0 ? selectedDocIds : undefined,
         }),
       });
 
@@ -329,22 +212,15 @@ function AIAssistant() {
           ...prev,
         ]);
       }
-      // Remember the open thread so navigating away and back reopens it.
-      if (data.conversation_id) {
-        localStorage.setItem(ACTIVE_CONVO_KEY, data.conversation_id);
-      }
       setMessages((prev) => [
         ...prev,
         {
-          id: data.message_id, // DB ai_messages.id — lets a pinned chart link back
           role: "assistant",
           text: data.answer,
           sources: data.sources || [],
-          citations: data.retrieved || [], // provenance: source + page + char span
           doc_count: data.doc_count,
           chart: data.chart || undefined, // present when the prompt asked for a chart
           document: data.document || undefined, // present when a report was generated
-          metric: data.metric || undefined, // present when the prompt asked to track a metric
         },
       ]);
     } catch (err) {
@@ -357,100 +233,20 @@ function AIAssistant() {
     }
   }
 
-  // ── document picker (confirm which docs the answer may use) ──────────────────
-  function setPickerChecked(index, docId, on) {
-    setMessages((prev) =>
-      prev.map((m, i) =>
-        i === index && m.picker
-          ? {
-              ...m,
-              picker: {
-                ...m.picker,
-                checked: on
-                  ? [...m.picker.checked, docId]
-                  : m.picker.checked.filter((id) => id !== docId),
-              },
-            }
-          : m
-      )
-    );
-  }
-
-  function closePicker(index, status) {
-    setMessages((prev) =>
-      prev.map((m, i) =>
-        i === index && m.picker ? { ...m, picker: { ...m.picker, status } } : m
-      )
-    );
-  }
-
-  async function confirmPicker(index) {
-    const p = messages[index]?.picker;
-    if (!p || p.status !== "open" || p.checked.length === 0) return;
-    closePicker(index, "done");
-    await askAI(p.question, p.checked);
-  }
-
   // ── upload one file ──────────────────────────────────────────────────────────
-  async function uploadOne(file, overwrite = false) {
+  async function uploadOne(file) {
     const form = new FormData();
     form.append("file", file);
-    if (overwrite) form.append("overwrite", "true");
     const res = await fetch(`${API_BASE}/api/rag/upload`, {
       method: "POST",
       headers: authHeaders(),
       body: form,
     });
     if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      const err = new Error(body.message || "Upload failed");
-      err.code = body.code; // "DUPLICATE_FILENAME" when the name is taken
-      err.canOverwrite = body.can_overwrite;
-      throw err;
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || "Upload failed");
     }
     return res.json();
-  }
-
-  // "report.pdf" → "report (1).pdf" — starting suggestion for the rename prompt.
-  function suggestRename(name) {
-    const dot = name.lastIndexOf(".");
-    const base = dot > 0 ? name.slice(0, dot) : name;
-    const ext = dot > 0 ? name.slice(dot) : "";
-    return `${base} (1)${ext}`;
-  }
-
-  // Upload one file; when a document with the same name already exists, ask the
-  // user to update the existing document or rename the new file (re-checked, so
-  // a rename that collides again just asks again).
-  async function uploadResolvingDuplicates(file) {
-    try {
-      return await uploadOne(file);
-    } catch (err) {
-      if (err.code !== "DUPLICATE_FILENAME") throw err;
-
-      if (err.canOverwrite) {
-        const update = window.confirm(
-          `A document named "${file.name}" already exists.\n\n` +
-            "OK — update the existing document with this file (charts built from it can be refreshed).\n" +
-            "Cancel — keep both by renaming the new file."
-        );
-        if (update) return uploadOne(file, true);
-      } else {
-        window.alert(
-          `"${file.name}" was already uploaded by someone else in your organization — give your file a different name.`
-        );
-      }
-
-      const newName = window.prompt(
-        `New name for "${file.name}":`,
-        suggestRename(file.name)
-      );
-      if (!newName || !newName.trim() || newName.trim() === file.name) {
-        throw new Error("upload cancelled", { cause: err });
-      }
-      const renamed = new File([file], newName.trim(), { type: file.type });
-      return uploadResolvingDuplicates(renamed);
-    }
   }
 
   // ── upload one or more documents ─────────────────────────────────────────────
@@ -467,12 +263,10 @@ function AIAssistant() {
     const failed = [];
     for (const file of files) {
       try {
-        const data = await uploadResolvingDuplicates(file);
+        const data = await uploadOne(file);
         succeeded.push({ filename: data.filename, chunks: data.chunks, documentId: data.document_id });
       } catch (err) {
-        if (err.message !== "upload cancelled") {
-          failed.push({ filename: file.name, error: err.message });
-        }
+        failed.push({ filename: file.name, error: err.message });
       } finally {
         setUploadProgress((p) => (p ? { ...p, done: p.done + 1 } : p));
       }
@@ -484,25 +278,30 @@ function AIAssistant() {
       setSelectedDocIds([succeeded[0].documentId]);
     }
 
-    if (succeeded.length === 1 && failed.length === 0) {
-      notify(
-        `Indexed "${succeeded[0].filename}" (${succeeded[0].chunks} chunks) — selected for this chat.`
-      );
-    } else if (succeeded.length > 0) {
-      notify(
-        `Indexed ${succeeded.length} documents:\n${succeeded
-          .map((s) => s.filename)
-          .join(", ")}`
+    const lines = [];
+    if (succeeded.length > 0) {
+      lines.push(
+        `✅ Indexed ${succeeded.length} document${succeeded.length > 1 ? "s" : ""}:`,
+        ...succeeded.map((s) => `- **${s.filename}** — ${s.chunks} chunks`)
       );
     }
     if (failed.length > 0) {
-      notify(
-        `${failed.length} upload${failed.length > 1 ? "s" : ""} failed:\n${failed
-          .map((f) => `${f.filename} — ${f.error}`)
-          .join("\n")}`,
-        "error"
+      lines.push(
+        `❌ ${failed.length} failed:`,
+        ...failed.map((f) => `- **${f.filename}** — ${f.error}`)
       );
     }
+    if (succeeded.length === 1 && failed.length === 0) {
+      lines.push(
+        "",
+        'I\'ve selected this document for our chat. Try *"Give me a summary of this document"* or any question about it.'
+      );
+    }
+
+    setMessages((prev) => [
+      ...prev,
+      { role: "assistant", text: lines.join("\n"), error: succeeded.length === 0 },
+    ]);
 
     fetchDocs();
     setUploading(false);
@@ -532,161 +331,47 @@ function AIAssistant() {
       setDocList([]);
       setSelectedDocIds([]);
       setShowDocs(false);
-      notify("Cleared all documents and reset the dashboard metrics.");
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          text: "🗑️ Cleared all documents and reset the dashboard metrics. Upload new documents to start again.",
+        },
+      ]);
     } catch (err) {
-      notify(err.message, "error");
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", text: `❌ ${err.message}`, error: true },
+      ]);
     } finally {
       setClearing(false);
     }
   }
 
-  // ── pin a chart or metric to a dashboard ─────────────────────────────────────
-  // The board list is the same for both: the user's personal dashboards, any
-  // DEPARTMENT board they can edit (managers/admins), and the ORGANIZATION board
-  // if they can edit it (admins).
-  async function loadPinTargets() {
-    let personal = [];
-    let department = [];
-    let organization = null;
+  // ── pin a generated chart/table to the dashboard ─────────────────────────────
+  async function pinChart(spec) {
     try {
-      const res = await fetch(`${API_BASE}/api/dashboard/dashboards`, {
-        headers: authHeaders(),
-      });
-      if (res.ok) personal = (await res.json()).dashboards || [];
-    } catch {
-      // fall through — pin to the server-side default dashboard
-    }
-    if (authService.canManageDepartmentDashboards()) {
-      try {
-        const res = await fetch(`${API_BASE}/api/dashboard/department`, {
-          headers: authHeaders(),
-        });
-        if (res.ok) {
-          department = ((await res.json()).dashboards || []).filter((b) => b.can_edit);
-        }
-      } catch {
-        // department boards unavailable — just offer personal ones
-      }
-    }
-    if (authService.canManageOrganizationDashboard()) {
-      try {
-        const res = await fetch(`${API_BASE}/api/dashboard/organization`, {
-          headers: authHeaders(),
-        });
-        if (res.ok) {
-          const board = (await res.json()).dashboard;
-          if (board && board.can_edit) organization = board;
-        }
-      } catch {
-        // org board unavailable — just offer the others
-      }
-    }
-    return [
-      ...personal.map((d) => ({ kind: "personal", id: d.id, name: d.name })),
-      ...department.map((b) => ({
-        kind: "department",
-        id: b.id,
-        name: b.department_name,
-        badge: "department",
-      })),
-      ...(organization
-        ? [{ kind: "organization", id: organization.id, name: organization.name, badge: "organization" }]
-        : []),
-    ];
-  }
-
-  // Clicking "Pin"/"Add to dashboard" asks WHICH board when there's more than one;
-  // with a single target there's nothing to choose, so we place it straight away.
-  async function pinChart(spec, aiMessageId) {
-    const targets = await loadPinTargets();
-    if (targets.length > 1) {
-      setPinPicker({ kind: "chart", payload: spec, title: spec.title || "This chart", aiMessageId, targets });
-      return;
-    }
-    await pinToTarget("chart", spec, aiMessageId, targets[0] || null);
-  }
-
-  async function pinMetric(metric, aiMessageId) {
-    const targets = await loadPinTargets();
-    if (targets.length > 1) {
-      setPinPicker({ kind: "metric", payload: metric, title: metric.label, aiMessageId, targets });
-      return;
-    }
-    await pinToTarget("metric", metric, aiMessageId, targets[0] || null);
-  }
-
-  // Place a chart or a metric on `target` (null → the user's default personal
-  // board). For charts, aiMessageId links the widget back to the message that
-  // produced it so the dashboard can regenerate it on re-upload.
-  async function pinToTarget(kind, payload, aiMessageId, target) {
-    setPinningTo(target ? target.id : "default");
-    try {
-      const targetKind = target ? target.kind : "personal";
-      const isDept = targetKind === "department";
-      const isOrg = targetKind === "organization";
-      const scopeLabel = isDept ? " (department)" : isOrg ? " (organization)" : "";
-      const where = target ? `"${target.name}"${scopeLabel}` : "your dashboard";
-
-      if (kind === "metric") {
-        const res = await fetch(`${API_BASE}/api/dashboard/track-metric`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...authHeaders() },
-          body: JSON.stringify({
-            label: payload.label,
-            kind: payload.kind,
-            metric_key: payload.metric_key,
-            target: targetKind,
-            board_id: target ? target.id : null,
-          }),
-        });
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({}));
-          throw new Error(err.message || "Could not add the metric");
-        }
-        const already = res.status === 200; // 200 = already on that board
-        notify(
-          already
-            ? `"${payload.label}" is already on ${where} — no duplicate added.`
-            : `Added "${payload.label}" to ${where} — it will fill in as your documents are read.`
-        );
-        setPinPicker(null);
-        return;
-      }
-
-      const spec = payload;
-      const url = isDept
-        ? `${API_BASE}/api/dashboard/department/${target.id}/widgets`
-        : isOrg
-          ? `${API_BASE}/api/dashboard/organization/widgets`
-          : `${API_BASE}/api/dashboard/widgets`;
-      const body = {
-        widget_type: "ai_chart",
-        title: spec.title || null,
-        config: { spec },
-        ai_message_id: aiMessageId || null,
-      };
-      if (!isDept && !isOrg) body.dashboard_id = target ? target.id : null; // personal board id
-      const res = await fetch(url, {
+      const res = await fetch(`${API_BASE}/api/dashboard/charts`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ spec }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.message || "Could not pin chart");
       }
-      // 200 = it was already pinned there (idempotent); 201 = newly added.
-      const alreadyPinned = res.status === 200;
-      notify(
-        alreadyPinned
-          ? `That chart is already on ${where} — no duplicate added.`
-          : `Added that chart to ${where}.`
-      );
-      setPinPicker(null);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          text: "📌 Added that chart to your dashboard — open the **Dashboard** to see it under *Pinned charts*.",
+        },
+      ]);
     } catch (err) {
-      notify(err.message, "error");
-    } finally {
-      setPinningTo(null);
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", text: `❌ ${err.message}`, error: true },
+      ]);
     }
   }
 
@@ -718,7 +403,10 @@ function AIAssistant() {
       a.remove();
       URL.revokeObjectURL(url);
     } catch (err) {
-      notify(`Could not download "${filename}": ${err.message}`, "error");
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", text: `❌ Could not download "${filename}": ${err.message}`, error: true },
+      ]);
     }
   }
 
@@ -737,25 +425,32 @@ function AIAssistant() {
       const data = await res.json();
       await fetchDocs();
       if (data.document_id) setSelectedDocIds([data.document_id]); // chat with the new report
-      notify(
-        `Added "${filename}" to the knowledge base (${data.chunks} chunks) — selected for this chat.`
-      );
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          text: `✅ Added **${filename}** to my knowledge base (${data.chunks} chunks). I've selected it for our chat — ask me anything about it.`,
+        },
+      ]);
     } catch (err) {
-      notify(err.message, "error");
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", text: `❌ ${err.message}`, error: true },
+      ]);
     }
   }
 
   // ── render ─────────────────────────────────────────────────────────────────
   return (
-    <AppShell className="ai-page">
-      <ToastStack toasts={toasts} onDismiss={dismissToast} />
+    <div className="ai-layout">
+      <Sidebar />
 
-      <div className="ai-content">
+      <main className="ai-content">
         {/* Header */}
         <div className="ai-header">
           <div className="ai-header-title">
             <div>
-              <h1>AI Assistant</h1>
+              <h1>SNAP AI Assistant</h1>
               <p>
                 {docList.length > 0
                   ? `${docList.length} document${docList.length > 1 ? "s" : ""} uploaded`
@@ -852,57 +547,7 @@ function AIAssistant() {
         <div className="chat-messages">
           {messages.map((msg, i) => (
             <div key={i} className={`chat-bubble ${msg.role} ${msg.error ? "error" : ""}`}>
-              {msg.picker ? (
-                <div className="doc-picker">
-                  <div className="doc-picker-title">
-                    {msg.picker.status === "cancelled"
-                      ? "Okay, I won't answer that one."
-                      : msg.picker.status === "done"
-                        ? "Answering from these documents:"
-                        : "I'd answer this from the documents below — untick any you don't want me to use:"}
-                  </div>
-                  {msg.picker.status !== "cancelled" && (
-                    <div className="doc-picker-list">
-                      {msg.picker.docs
-                        .filter(
-                          (d) =>
-                            msg.picker.status === "open" ||
-                            msg.picker.checked.includes(d.id)
-                        )
-                        .map((d) => (
-                          <label key={d.id} className="doc-picker-item">
-                            <input
-                              type="checkbox"
-                              disabled={msg.picker.status !== "open"}
-                              checked={msg.picker.checked.includes(d.id)}
-                              onChange={(e) => setPickerChecked(i, d.id, e.target.checked)}
-                            />
-                            <span className="doc-picker-name">📄 {d.file_name}</span>
-                          </label>
-                        ))}
-                    </div>
-                  )}
-                  {msg.picker.status === "open" && (
-                    <div className="doc-picker-actions">
-                      <button
-                        type="button"
-                        className="doc-picker-answer"
-                        onClick={() => confirmPicker(i)}
-                        disabled={loading || msg.picker.checked.length === 0}
-                      >
-                        Answer with {msg.picker.checked.length} selected
-                      </button>
-                      <button
-                        type="button"
-                        className="doc-picker-cancel"
-                        onClick={() => closePicker(i, "cancelled")}
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  )}
-                </div>
-              ) : msg.role === "assistant" && !msg.error ? (
+              {msg.role === "assistant" && !msg.error ? (
                 <div className="bubble-text markdown">
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm]}
@@ -919,27 +564,7 @@ function AIAssistant() {
               ) : (
                 <div className="bubble-text">{msg.text}</div>
               )}
-              {msg.chart && <ChartBlock spec={msg.chart} onPin={() => pinChart(msg.chart, msg.id)} />}
-              {msg.metric && (
-                <div className="doc-card">
-                  <div className="doc-card-info">
-                    <span className="doc-card-icon">📊</span>
-                    <span className="doc-card-title">
-                      {msg.metric.label}
-                      <span className="metric-kind-tag"> · {msg.metric.kind}</span>
-                    </span>
-                  </div>
-                  <div className="doc-card-actions">
-                    <button
-                      type="button"
-                      onClick={() => pinMetric(msg.metric, msg.id)}
-                      title="Track this metric as a KPI card on a dashboard"
-                    >
-                      📊 Add to dashboard
-                    </button>
-                  </div>
-                </div>
-              )}
+              {msg.chart && <ChartBlock spec={msg.chart} onPin={pinChart} />}
               {msg.document && (
                 <div className="doc-card">
                   <div className="doc-card-info">
@@ -964,47 +589,21 @@ function AIAssistant() {
                   </div>
                 </div>
               )}
-              {msg.citations?.length > 0 ? (
+              {msg.sources?.length > 0 && (
                 <div className="bubble-sources">
-                  Cited from:{" "}
-                  {dedupeCitations(msg.citations).map((c, i) => {
-                    const name = c.file_name || "source";
-                    const pct = c.similarity != null ? Math.round(c.similarity * 100) : null;
-                    const span =
-                      c.char_start != null && c.char_end != null
-                        ? ` · chars ${c.char_start}–${c.char_end}`
-                        : "";
-                    return (
-                      <button
-                        key={`${name}-${c.page ?? ""}-${i}`}
-                        type="button"
-                        className="source-chip"
-                        onClick={() => c.file_name && downloadSource(c.file_name)}
-                        title={`${pct != null ? `Relevance ${pct}%` : ""}${span} — click to open the source`}
-                      >
-                        📄 {name}
-                        {c.page != null ? ` · p.${c.page}` : ""}
-                      </button>
-                    );
-                  })}
+                  Sources:{" "}
+                  {msg.sources.map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      className="source-chip"
+                      onClick={() => downloadSource(s)}
+                      title={`Download ${s}`}
+                    >
+                      ⬇ {s}
+                    </button>
+                  ))}
                 </div>
-              ) : (
-                msg.sources?.length > 0 && (
-                  <div className="bubble-sources">
-                    Sources:{" "}
-                    {msg.sources.map((s) => (
-                      <button
-                        key={s}
-                        type="button"
-                        className="source-chip"
-                        onClick={() => downloadSource(s)}
-                        title={`Download ${s}`}
-                      >
-                        ⬇ {s}
-                      </button>
-                    ))}
-                  </div>
-                )
               )}
             </div>
           ))}
@@ -1040,7 +639,7 @@ function AIAssistant() {
             </button>
           </div>
         </div>
-      </div>
+      </main>
 
       {/* Documents drawer — newest uploaded first; click a doc to select it */}
       <div
@@ -1163,49 +762,7 @@ function AIAssistant() {
           </div>
         )}
       </aside>
-
-      {/* Pin-to-dashboard picker — shown when the user has more than one dashboard */}
-      {pinPicker && (
-        <>
-          <div
-            className="pin-overlay"
-            onClick={() => pinningTo === null && setPinPicker(null)}
-          />
-          <div className="pin-modal" role="dialog" aria-label="Choose a dashboard">
-            <div className="pin-modal-title">
-              {pinPicker.kind === "metric" ? "Track this metric on which dashboard?" : "Pin to which dashboard?"}
-            </div>
-            <div className="pin-modal-hint">
-              {pinPicker.title} will appear as a{" "}
-              {pinPicker.kind === "metric" ? "KPI card" : "widget"} there.
-            </div>
-            <div className="pin-modal-list">
-              {pinPicker.targets.map((t) => (
-                <button
-                  key={`${t.kind}-${t.id}`}
-                  type="button"
-                  className="pin-modal-option"
-                  disabled={pinningTo !== null}
-                  onClick={() => pinToTarget(pinPicker.kind, pinPicker.payload, pinPicker.aiMessageId, t)}
-                >
-                  <span className="pin-modal-name">{t.name}</span>
-                  {t.badge && <span className="pin-modal-badge">{t.badge}</span>}
-                  {pinningTo === t.id && <span className="pin-modal-busy">Adding…</span>}
-                </button>
-              ))}
-            </div>
-            <button
-              type="button"
-              className="pin-modal-cancel"
-              onClick={() => setPinPicker(null)}
-              disabled={pinningTo !== null}
-            >
-              Cancel
-            </button>
-          </div>
-        </>
-      )}
-    </AppShell>
+    </div>
   );
 }
 

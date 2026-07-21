@@ -48,16 +48,13 @@ join permissions p on p.action in (
 where r.name = 'manager' and r.organization_id is null
 on conflict do nothing;
 
--- employee -> upload/view/share docs + AI + view dept dashboard ----------------
--- ASSIGN_DOCUMENTS = user-to-user sharing of their own uploads (the share route
--- separately restricts non-admins to documents they uploaded).
+-- employee -> upload/view docs + AI + view dept dashboard ----------------------
 insert into role_permissions (role_id, permission_id)
 select r.id, p.id
 from roles r
 join permissions p on p.action in (
     'UPLOAD_DOCUMENTS',
     'VIEW_DOCUMENTS',
-    'ASSIGN_DOCUMENTS',
     'USE_AI_ASSISTANT',
     'VIEW_DEPARTMENT_DASHBOARD'
 )

@@ -19,17 +19,14 @@ html[data-theme="light"] select optgroup {
   color: #0f172a;
 }
 
-/* Page shell (every signed-in page now shares AppShell's .app-page) */
-html[data-theme="light"] .app-page {
+/* Page shells */
+html[data-theme="light"] .dashboard,
+html[data-theme="light"] .ai-layout,
+html[data-theme="light"] .admin,
+html[data-theme="light"] .documents-layout {
   background: #eef1f7;
   color: #0f172a;
 }
-html[data-theme="light"] .app-topbar {
-  background: #ffffff;
-  border-bottom-color: #e2e8f0;
-}
-html[data-theme="light"] .topbar-company { color: #334155; }
-html[data-theme="light"] .topbar-brand { color: #0f172a; }
 
 /* Sidebar */
 html[data-theme="light"] .sidebar {
@@ -64,7 +61,6 @@ html[data-theme="light"] .docs-drawer,
 html[data-theme="light"] .docs-drawer-item,
 html[data-theme="light"] .welcome-card,
 html[data-theme="light"] .admin-panel,
-html[data-theme="light"] .settings-panel,
 html[data-theme="light"] .dept-row,
 html[data-theme="light"] .source-row,
 html[data-theme="light"] .chart-block,
@@ -73,12 +69,6 @@ html[data-theme="light"] .usermenu-panel {
   background: #ffffff;
   border-color: #e2e8f0;
   color: #0f172a;
-}
-
-html[data-theme="light"] .kpi-period-select {
-  background: #f1f5f9;
-  color: #334155;
-  border-color: #cbd5e1;
 }
 
 /* Text that was white/near-white */
@@ -133,7 +123,6 @@ html[data-theme="light"] .period-menu button { color: #334155; }
 /* Segmented controls */
 html[data-theme="light"] .segmented,
 html[data-theme="light"] .admin-tabs,
-html[data-theme="light"] .settings-tabs,
 html[data-theme="light"] .gran-segmented {
   background: #eef1f7;
   border-color: #e2e8f0;
@@ -216,13 +205,6 @@ html[data-theme="light"] .chat-input textarea::placeholder { color: #94a3b8; }
 html[data-theme="light"] .doc-card { background: #f8fafc; border-color: #e2e8f0; }
 html[data-theme="light"] .doc-card-title { color: #1e293b; }
 
-/* Document picker (pre-answer confirmation) */
-html[data-theme="light"] .doc-picker-title { color: #1e293b; }
-html[data-theme="light"] .doc-picker-item { background: #f8fafc; border-color: #e2e8f0; }
-html[data-theme="light"] .doc-picker-name { color: #1e293b; }
-html[data-theme="light"] .doc-picker-cancel { border-color: #cbd5e1; color: #475569; }
-html[data-theme="light"] .doc-picker-cancel:hover { color: #1e293b; border-color: #94a3b8; }
-
 /* Chart / table block */
 html[data-theme="light"] .chart-block { background: #ffffff; border-color: #e2e8f0; }
 html[data-theme="light"] .chart-title { color: #1e293b; }
@@ -270,52 +252,3 @@ html[data-theme="light"] .bubble-text.markdown th,
 html[data-theme="light"] .bubble-text.markdown td { border-color: #e2e8f0; }
 html[data-theme="light"] .bubble-text.markdown tr:nth-child(even) td { background: #f8fafc; }
 html[data-theme="light"] .bubble-text.markdown hr { border-top-color: #e2e8f0; }
-
-/* ──────────────────────────────────────────────────────────────────────────
-   Settings — light mode
-   (.settings / .settings-panel / .settings-tabs are folded into the shared
-   shell, card and segmented-control groups above.)
-   ────────────────────────────────────────────────────────────────────────── */
-html[data-theme="light"] .settings-content { color: #0f172a; }
-html[data-theme="light"] .settings-header p { color: #64748b; }
-html[data-theme="light"] .settings-hint,
-html[data-theme="light"] .settings-key { color: #64748b; }
-
-html[data-theme="light"] .settings-panel-title,
-html[data-theme="light"] .settings-identity-text h2,
-html[data-theme="light"] .settings-val,
-html[data-theme="light"] .settings-theme-label {
-  color: #0f172a;
-}
-html[data-theme="light"] .settings-identity-text span { color: #64748b; }
-html[data-theme="light"] .settings-theme-hint { color: #64748b; }
-
-html[data-theme="light"] .settings-field label,
-html[data-theme="light"] .settings-form label { color: #334155; }
-
-html[data-theme="light"] .settings-sep { background: #e2e8f0; }
-html[data-theme="light"] .settings-row { border-bottom-color: #e2e8f0; }
-
-/* Theme picker cards */
-html[data-theme="light"] .settings-theme-card {
-  background: #f8fafc;
-  border-color: #cbd5e1;
-}
-html[data-theme="light"] .settings-theme-card:hover { border-color: #94a3b8; }
-html[data-theme="light"] .settings-theme-card.active {
-  border-color: #8b5cf6;
-  background: rgba(139, 92, 246, 0.1);
-}
-
-/* Toasts: the dark translucent fills wash out on a light background */
-html[data-theme="light"] .settings-error {
-  background: #fef2f2;
-  border-color: #fecaca;
-  color: #b91c1c;
-}
-html[data-theme="light"] .settings-notice {
-  background: #f0fdf4;
-  border-color: #bbf7d0;
-  color: #15803d;
-}
-html[data-theme="light"] .settings-reqs { color: #dc2626; }

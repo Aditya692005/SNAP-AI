@@ -8,11 +8,6 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
 // user) logs them out promptly. Checks on every navigation, on window focus,
 // and on a short interval. The backend's requireAuth returns 401 for a
 // deactivated/invalid account, which is our signal to clear and redirect.
-//
-// A successful check also REFRESHES the cached user (role / department /
-// permissions): an admin's change — promoting someone, granting a role a new
-// permission — then reaches UI gating within one poll instead of waiting for
-// the next login. Listeners react to the "snap:user-updated" event.
 export default function SessionWatcher() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -26,17 +21,6 @@ export default function SessionWatcher() {
       if (res.status === 401) {
         authService.logout();
         navigate("/login", { replace: true });
-        return;
-      }
-      if (res.ok) {
-        const data = await res.json().catch(() => null);
-        if (data?.user) {
-          const next = JSON.stringify(data.user);
-          if (localStorage.getItem("user") !== next) {
-            localStorage.setItem("user", next);
-            window.dispatchEvent(new Event("snap:user-updated"));
-          }
-        }
       }
     } catch {
       /* network blip — ignore, try again next tick */

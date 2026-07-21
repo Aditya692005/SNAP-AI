@@ -6,23 +6,21 @@ Start with: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 import json
 import os
 import re
-import tempfile
-import time
+import shutil
 from datetime import datetime
-from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
 import markdown
-import numpy as np
 import pandas as pd
 from fpdf import FPDF
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -31,7 +29,6 @@ from langchain_google_genai.chat_models import ChatGoogleGenerativeAIError
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-import storage as docstore
 import supabase_store as store
 from handlers import parse_file
 
@@ -43,12 +40,11 @@ if not GOOGLE_API_KEY:
 
 # Model is configurable so you can switch to one with available quota without
 # code changes (each Gemini model has its own free-tier daily request limit).
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.0-flash")
 
-# ── Original files ─────────────────────────────────────────────────────────────
-# There is no uploads/ directory any more. Original document bytes live in Supabase
-# Storage; storage.py fetches them into a disposable local cache on demand. Anywhere
-# this file used to build `UPLOAD_DIR / source` it now calls docstore.resolve_source().
+# ── Paths ──────────────────────────────────────────────────────────────────────
+UPLOAD_DIR = Path("./uploads")
+UPLOAD_DIR.mkdir(exist_ok=True)
 
 # ── LangChain components ───────────────────────────────────────────────────────
 embeddings = HuggingFaceEmbeddings(
@@ -64,18 +60,6 @@ if EMBED_DIM != 384:
         f"Embedding model returns {EMBED_DIM} dims but document_chunks expects 384."
     )
 
-# Cross-encoder reranker (P1.4): reorders the hybrid candidate pool by true
-# query-chunk relevance. Local + CPU, using the already-installed
-# sentence-transformers. Guarded so the service still starts if the model can't
-# be downloaded — retrieval then keeps the fused (RRF) order.
-RERANKER_MODEL = os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
-try:
-    from sentence_transformers import CrossEncoder
-    reranker = CrossEncoder(RERANKER_MODEL, device="cpu")
-except Exception as _rerank_exc:  # noqa: BLE001
-    reranker = None
-    print(f"[rag] cross-encoder reranker unavailable ({_rerank_exc}); using fused order")
-
 llm = ChatGoogleGenerativeAI(
     model=GEMINI_MODEL,
     google_api_key=GOOGLE_API_KEY,
@@ -83,76 +67,6 @@ llm = ChatGoogleGenerativeAI(
 )
 
 splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
-
-# ── Semantic chunking (P2.6) ──────────────────────────────────────────────────
-# Dependency-free embedding-boundary chunker: split a block into sentences, embed
-# them (reusing MiniLM), and start a new chunk where consecutive-sentence
-# similarity drops (a topic shift) or a size cap is hit. Each chunk keeps its
-# exact char span within the block (start/end) — reused for citations in P2.7.
-# Returns None to signal the caller should fall back to the recursive splitter.
-SEMANTIC_MAX_CHARS = 1200        # hard cap so a chunk can't grow unbounded
-SEMANTIC_MIN_CHARS = 200         # merge tiny tail chunks into the previous one
-SEMANTIC_BREAK_PERCENTILE = 25   # break where similarity is in the lowest quartile
-SEMANTIC_INPUT_CAP = 40_000      # above this, use the cheap splitter (bound cost)
-
-_SENT_BOUNDARY = re.compile(r"(?<=[.!?])\s+|\n{2,}")
-
-
-def _sentence_spans(text: str) -> list[tuple[int, int]]:
-    """(start, end) char spans of the sentences in `text`, preserving positions."""
-    spans, start = [], 0
-    for m in _SENT_BOUNDARY.finditer(text):
-        if text[start:m.start()].strip():
-            spans.append((start, m.start()))
-        start = m.end()
-    if text[start:].strip():
-        spans.append((start, len(text)))
-    return spans
-
-
-def semantic_split(text: str) -> list[dict] | None:
-    """Chunk `text` at semantic boundaries. Each item is
-    {text, start, end} with start/end being char offsets INTO `text`.
-    None => caller should fall back to the recursive splitter."""
-    text = text or ""
-    if not text.strip():
-        return []
-    if len(text) < SEMANTIC_MIN_CHARS or len(text) > SEMANTIC_INPUT_CAP:
-        return [{"text": text, "start": 0, "end": len(text)}]
-    spans = _sentence_spans(text)
-    if len(spans) <= 1:
-        return [{"text": text, "start": 0, "end": len(text)}]
-    try:
-        vecs = np.asarray(embeddings.embed_documents([text[s:e] for s, e in spans]))
-    except Exception:
-        return None
-    norms = np.linalg.norm(vecs, axis=1)
-    sims = []
-    for i in range(len(spans) - 1):
-        denom = norms[i] * norms[i + 1]
-        sims.append(float(vecs[i] @ vecs[i + 1] / denom) if denom else 0.0)
-    threshold = float(np.percentile(sims, SEMANTIC_BREAK_PERCENTILE)) if sims else 0.0
-
-    chunks: list[dict] = []
-    buf_start = spans[0][0]
-    for i, (_, cur_end) in enumerate(spans):
-        is_last = i == len(spans) - 1
-        at_break = i < len(sims) and sims[i] < threshold
-        too_big = (cur_end - buf_start) >= SEMANTIC_MAX_CHARS
-        if is_last or at_break or too_big:
-            if text[buf_start:cur_end].strip():
-                chunks.append({"text": text[buf_start:cur_end], "start": buf_start, "end": cur_end})
-            if not is_last:
-                buf_start = spans[i + 1][0]
-
-    merged: list[dict] = []
-    for c in chunks:
-        if merged and (c["end"] - c["start"]) < SEMANTIC_MIN_CHARS:
-            merged[-1]["end"] = c["end"]
-            merged[-1]["text"] = text[merged[-1]["start"]:c["end"]]
-        else:
-            merged.append(c)
-    return merged
 
 # ── Per-session chat history (list of HumanMessage / AIMessage) ───────────────
 session_histories: dict[str, list] = {}
@@ -238,50 +152,20 @@ def index_document(document_id: str, organization_id: str, path: Path, filename:
     summaries -> embedded document_chunks. Returns {chunks, tables}."""
     parsed = parse_file(path)
 
-    chunk_texts: list[str] = []
-    chunk_metas: list[dict] = []  # parallel: {char_start, char_end, page} per chunk
-
-    # Prose blocks → semantic chunking (falls back to the recursive splitter when
-    # semantic_split declines). `page` is the 1-based block index — the page for
-    # PDFs, the slide for PPTX, else just a section ordinal. Offsets are within
-    # the block, so a citation reads "page N, chars start–end".
-    for block_i, block in enumerate(parsed.text_chunks):
-        if not (block and block.strip()):
-            continue
-        page = block_i + 1
-        sem = semantic_split(block)
-        if sem is None:
-            for c in splitter.split_text(block):
-                if c.strip():
-                    chunk_texts.append(c)
-                    chunk_metas.append({"page": page})  # offsets unknown for fallback
-        else:
-            for c in sem:
-                chunk_texts.append(c["text"])
-                chunk_metas.append({"char_start": c["start"], "char_end": c["end"], "page": page})
-
-    # Table summaries → short generated text (not a verbatim source span, so no
-    # offsets); the recursive splitter is fine.
+    text_blocks = list(parsed.text_chunks)
     for table in parsed.tables:
         store.insert_document_table(document_id, table)
-        summary = summarize_table(table)
-        if summary and summary.strip():
-            for c in splitter.split_text(summary):
-                if c.strip():
-                    chunk_texts.append(c)
-                    chunk_metas.append({})
+        text_blocks.append(summarize_table(table))
+
+    chunk_texts: list[str] = []
+    for block in text_blocks:
+        if block and block.strip():
+            chunk_texts.extend(splitter.split_text(block))
+    chunk_texts = [c for c in chunk_texts if c.strip()]
 
     if chunk_texts:
         vectors = embeddings.embed_documents(chunk_texts)
-        store.insert_document_chunks(
-            document_id,
-            chunk_texts,
-            vectors,
-            organization_id=organization_id,
-            doc_version=store.get_document_version(document_id),
-            source=filename,
-            metas=chunk_metas,
-        )
+        store.insert_document_chunks(document_id, chunk_texts, vectors)
 
     return {"chunks": len(chunk_texts), "tables": len(parsed.tables)}
 
@@ -292,13 +176,8 @@ async def index_endpoint(
     document_id: str = Form(...),
     organization_id: str = Form(...),
 ):
-    """Phase 2 ingestion. The backend creates the documents row (with org + user), puts
-    the original bytes in Supabase Storage, then posts them here with the document_id to
-    embed into Supabase.
-
-    We parse from a TEMP file and throw it away. The bytes arrive in the request, so
-    there's nothing to fetch — and the durable copy is already in the bucket, so keeping
-    one here would just be a second, quietly diverging original."""
+    """Phase 2 ingestion. The backend creates the documents row (with org + user)
+    then posts the file here with its document_id to embed into Supabase."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided.")
     suffix = Path(file.filename).suffix.lower()
@@ -308,17 +187,16 @@ async def index_endpoint(
             detail=f"Unsupported type '{suffix}'. Allowed: {sorted(ALLOWED_EXTENSIONS)}",
         )
 
-    with tempfile.TemporaryDirectory() as tmp:
-        # Keep the real name: some parsers dispatch on the extension.
-        dest = Path(tmp) / Path(file.filename).name
-        dest.write_bytes(await file.read())
+    dest = UPLOAD_DIR / file.filename
+    with dest.open("wb") as f:
+        shutil.copyfileobj(file.file, f)
 
-        # Idempotent re-index: clear any existing chunks/tables for this document.
-        store.delete_document_data(document_id)
-        try:
-            result = index_document(document_id, organization_id, dest, file.filename)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Indexing failed: {exc}")
+    # Idempotent re-index: clear any existing chunks/tables for this document.
+    store.delete_document_data(document_id)
+    try:
+        result = index_document(document_id, organization_id, dest, file.filename)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Indexing failed: {exc}")
 
     return {"document_id": document_id, "filename": file.filename, **result}
 
@@ -364,28 +242,6 @@ def wants_chart(question: str) -> bool:
     return any(k in q for k in CHART_KEYWORDS)
 
 
-# Requests to PRODUCE a table (a pinnable table widget, not a prose answer):
-# either a produce-verb followed by "table" ("make a table of each hat and its
-# focus"), or a phrase form with no verb ("sales by region as a table"). A bare
-# "table" stays a prose question — "what does the table on page 3 say?" must
-# NOT match.
-TABLE_RE = re.compile(
-    r"\b(make|create|show|give|draw|build|generate|display|present|produce|"
-    r"put|render|represent|convert|turn|organize|organise|format|tabulate)\b"
-    r".{0,60}?\btable\b",
-    re.IGNORECASE,
-)
-TABLE_PHRASES = (
-    "as a table", "in a table", "table of", "table format", "tabular",
-    "tabulate", "table showing", "table with", "table comparing",
-)
-
-
-def wants_table(question: str) -> bool:
-    q = question.lower()
-    return bool(TABLE_RE.search(question)) or any(k in q for k in TABLE_PHRASES)
-
-
 # A generate-style verb followed (allowing filler words) by a document noun
 # signals the user wants a generated report/PDF — e.g. "make me a report",
 # "create a detailed PDF of the findings", "draft a one-page brief".
@@ -401,66 +257,21 @@ def wants_document(question: str) -> bool:
     return bool(DOC_RE.search(question))
 
 
-# Meta/conversational questions are answerable from the chat itself (or are just
-# small talk) and don't draw on the uploaded documents — so citing document
-# sources for them would be misleading. These get a normal answer with NO
-# sources. Kept specific to avoid swallowing genuine document questions (e.g.
-# "what time period does the data cover?" must NOT match "what time is it").
-META_KEYWORDS = (
-    "last question i asked", "last question i've asked", "my last question",
-    "my previous question", "previous question i asked", "what did i just ask",
-    "what did i ask you", "what was my last", "what did i say",
-    "my last message", "repeat my question",
-    "what time is it", "what's the time", "what is the time", "current time",
-    "current date", "today's date", "what's today's date",
-    "what is today's date", "what day is it",
-    "what is your name", "what's your name", "who are you",
-    "what can you do", "what do you do",
-    "repeat that", "say that again", "what did you just say",
-    "what did we talk about", "what have we discussed",
-)
-
-
-def is_meta_question(question: str) -> bool:
-    q = question.lower()
-    return any(k in q for k in META_KEYWORDS)
-
-
-# Phrases signalling the user wants a chart built from data the AI ALREADY
-# presented (a table/answer whose sources were already cited), rather than a
-# fresh look at the documents — e.g. "make a bar graph of the above table". A
-# chart that merely re-plots already-cited data is just a graphical view of that
-# answer, so it shouldn't re-cite the same sources.
-PRIOR_OUTPUT_KEYWORDS = (
-    "the above", "above table", "above data", "that table", "this table",
-    "that data", "this data", "the previous table", "previous table",
-    "table you gave", "table you showed", "table you provided",
-    "you just gave", "you just showed", "based on that", "of that table",
-    "from that table", "the same table", "same data", "that graph",
-)
-
-
-def references_prior_output(question: str) -> bool:
-    q = question.lower()
-    return any(k in q for k in PRIOR_OUTPUT_KEYWORDS)
-
-
 # ── Visualization helpers ────────────────────────────────────────────────────
 # Max characters of dataset preview fed to the model when building a chart spec.
 MAX_VIZ_CHARS = 60_000
 
 
-def load_dataframe(
-    source: str, document_id: str | None = None, organization_id: str | None = None
-) -> "pd.DataFrame | None":
-    """Re-read the ORIGINAL uploaded file as a DataFrame (CSV / Excel only).
+def load_dataframe(source: str) -> "pd.DataFrame | None":
+    """Re-read the original uploaded file as a DataFrame (CSV / Excel only).
 
-    Charts need accurate numeric data, so for tabular files we re-parse the original
-    rather than relying on the chunked/embedded text. Returns None for non-tabular files
-    or if parsing fails.
+    Charts need accurate numeric data, so for tabular files we parse the source
+    on disk rather than relying on the chunked/embedded text. Returns None for
+    non-tabular files or if parsing fails.
     """
-    path = docstore.resolve_source(source, document_id, organization_id)
-    if path is None:
+    safe_name = Path(source).name
+    path = (UPLOAD_DIR / safe_name).resolve()
+    if UPLOAD_DIR.resolve() not in path.parents or not path.is_file():
         return None
     suffix = path.suffix.lower()
     try:
@@ -473,28 +284,26 @@ def load_dataframe(
     return None
 
 
-def build_source_context(
-    source: str | None, document_id: str | None = None, organization_id: str | None = None
-) -> tuple[str, bool]:
-    """Context read from a single document's ORIGINAL file — used by dashboard metric
+def build_source_context(source: str | None) -> tuple[str, bool]:
+    """Disk-only context for a single uploaded file — used by dashboard metric
     extraction and the standalone /visualize and /generate-document endpoints.
     Tabular files -> CSV text; other types -> extracted text. No vector store."""
-    if not source and not document_id:
+    if not source:
         return "", False
-    df = load_dataframe(source, document_id, organization_id)
+    df = load_dataframe(source)
     if df is not None:
         text = "TABULAR DATA (CSV, first rows):\n" + df.head(500).to_csv(index=False)
         return text[:MAX_VIZ_CHARS], True
-
-    path = docstore.resolve_source(source, document_id, organization_id)
-    if path is None:
-        return "", False
-    try:
-        parsed = parse_file(path)
-        text = "DOCUMENT TEXT:\n" + "\n\n".join(parsed.text_chunks)
-        return text[:MAX_VIZ_CHARS], False
-    except Exception:
-        return "", False
+    safe = Path(source).name
+    path = (UPLOAD_DIR / safe).resolve()
+    if UPLOAD_DIR.resolve() in path.parents and path.is_file():
+        try:
+            parsed = parse_file(path)
+            text = "DOCUMENT TEXT:\n" + "\n\n".join(parsed.text_chunks)
+            return text[:MAX_VIZ_CHARS], False
+        except Exception:
+            return "", False
+    return "", False
 
 
 VIZ_PROMPT = ChatPromptTemplate.from_messages([
@@ -515,13 +324,6 @@ VIZ_PROMPT = ChatPromptTemplate.from_messages([
      "Rules:\n"
      "- Pick the most suitable chart_type for the request and the data.\n"
      "- Use ONLY values present in the dataset; never invent data.\n"
-     "- The dataset may contain MULTIPLE tables (e.g. different time ranges or "
-     "metrics split across separate files) that share columns. Treat them as ONE "
-     "combined dataset: merge their rows and use EVERY matching period/category "
-     "found across ALL tables.\n"
-     "- When the request names a range (e.g. '2024 to 2027'), include EVERY period "
-     "in that range that appears in ANY table, sorted chronologically — never stop "
-     "at the periods from just one table.\n"
      "- Aggregate/group when the request implies it (e.g. totals by category).\n"
      "- labels and each dataset's data array must be the SAME length.\n"
      "- pie/doughnut must have exactly one dataset.\n"
@@ -571,13 +373,7 @@ def build_viz_context_supabase(instruction: str, organization_id, document_ids, 
     if focus_document_id:
         ids = [focus_document_id]
     else:
-        ranked = rank_documents_by_relevance(instruction, organization_id, document_ids)
-        # Charts often compare data SPLIT across several files (e.g. 2024-25 in one
-        # upload, 2026-27 in another). Narrowing to the top-ranked docs drops the
-        # rest and loses whole periods, so include EVERY accessible doc — ranked
-        # ones first so the most relevant survive if we hit the context cap.
-        rest = [d for d in (document_ids or []) if d not in ranked]
-        ids = ranked + rest
+        ids = rank_documents_by_relevance(instruction, organization_id, document_ids)
     parts = []
     used = set()
     tables_by_doc: dict = {}
@@ -621,13 +417,8 @@ async def _visualize_from_dataset(dataset: str, is_tabular: bool, instruction: s
     return spec
 
 
-async def run_visualization(
-    source: str | None,
-    instruction: str,
-    organization_id: str | None = None,
-    document_id: str | None = None,
-) -> dict:
-    dataset, is_tabular = build_source_context(source, document_id, organization_id)
+async def run_visualization(source: str | None, instruction: str) -> dict:
+    dataset, is_tabular = build_source_context(source)
     return await _visualize_from_dataset(dataset, is_tabular, instruction, source or "document")
 
 
@@ -638,233 +429,84 @@ async def run_visualization_supabase(instruction: str, organization_id, document
     return spec, source_files
 
 
-# ── Deterministic tabular aggregation ────────────────────────────────────────
-# "Average NO2 for all cities" over a 3,540-row table can't be answered by chunk
-# retrieval (returns only top-k chunks) or by dumping the table to the LLM (the
-# context cap truncates it — cities past the cutoff vanish — and the model can't
-# reliably average thousands of rows anyway). When a request is an aggregation of
-# a named numeric column GROUPED BY a named category, compute it exactly in
-# pandas over every row instead. Restricted to the grouped case on purpose:
-# ungrouped/filtered aggregates ("total revenue in 2024") need a WHERE the parser
-# doesn't model, so those fall through to the normal RAG path.
-_AGG_PATTERNS = [
-    (r"\b(mean|average|avg)\b", "mean"),
-    (r"\b(total|sum)\b", "sum"),
-    (r"\b(count|how many|number of)\b", "count"),
-    (r"\b(max|maximum|highest|peak|largest)\b", "max"),
-    (r"\b(min|minimum|lowest|smallest)\b", "min"),
-]
-_AGG_LABEL = {"mean": "average", "sum": "total", "count": "count of", "max": "maximum", "min": "minimum"}
-
-
-def _detect_agg_func(message: str) -> str | None:
-    for pat, fn in _AGG_PATTERNS:
-        if re.search(pat, message, re.I):
-            return fn
-    return None
-
-
-def _word_tokens(text: str) -> set:
-    return {t for t in re.split(r"[^a-z0-9]+", str(text).lower()) if t}
-
-
-def _singular(tok: str) -> str:
-    """Crude singularizer so plural query words match column names (cities->city)."""
-    if len(tok) > 4 and tok.endswith("ies"):
-        return f"{tok[:-3]}y"
-    if len(tok) > 4 and tok.endswith("ses"):
-        return tok[:-2]
-    if len(tok) > 3 and tok.endswith("s") and not tok.endswith("ss"):
-        return tok[:-1]
-    return tok
-
-
-def _is_numeric_col(series) -> bool:
-    col = _to_numeric(series)
-    return int(col.notna().sum()) >= max(1, int(0.5 * len(series)))
-
-
-def _match_metric_columns(message, df) -> list:
-    """Numeric columns explicitly named in the message (e.g. 'NO2' -> 'NO2')."""
-    mtoks = _word_tokens(message)
-    return [c for c in df.columns if (_word_tokens(c) & mtoks) and _is_numeric_col(df[c])]
-
-
-# Filler words that must NOT drive column matching — otherwise "chart OF avg NO2
-# BY city" would match a "Type OF Location" column on the stray "of".
-_GROUP_STOP = {
-    "the", "all", "each", "every", "per", "by", "for", "across", "of", "and", "in",
-    "to", "from", "me", "give", "show", "list", "get", "chart", "bar", "line", "graph",
-    "plot", "pie", "doughnut", "table", "average", "avg", "mean", "total", "sum",
-    "count", "max", "min", "maximum", "minimum", "highest", "lowest", "number",
-    "emission", "emissions", "value", "values", "data", "compare", "comparison",
-}
-
-
-def _match_group_column(message, df, exclude) -> str | None:
-    """A categorical column named in the message ('cities' -> 'City/Town/...')."""
-    mtoks = {
-        _singular(t) for t in _word_tokens(message)
-        if len(t) >= 3 and t not in _GROUP_STOP
-    }
-    for c in df.columns:
-        if c in exclude or _is_numeric_col(df[c]):
-            continue
-        ctoks = {_singular(t) for t in _word_tokens(c) if t not in _GROUP_STOP}
-        if ctoks & mtoks:
-            return c
-    return None
-
-
-def compute_tabular_aggregation(message, rows) -> dict | None:
-    """Compute (metric agg BY group) over `rows`, or None if not applicable."""
-    if not rows:
-        return None
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return None
-    func = _detect_agg_func(message)
-    if not func:
-        return None
-    metric_cols = _match_metric_columns(message, df)
-    if not metric_cols:
-        return None
-    group_col = _match_group_column(message, df, exclude=set(metric_cols))
-    if not group_col:
-        return None  # only the grouped case is safe (no WHERE-filter modelling)
-    for mc in metric_cols:
-        df[mc] = _to_numeric(df[mc])
-    grouped = df.groupby(group_col)[metric_cols].agg(func).reset_index().sort_values(group_col)
-    out_rows = []
-    for rec in grouped.to_dict("records"):
-        row: dict = {group_col: str(rec[group_col])}
-        for mc in metric_cols:
-            v = rec[mc]
-            row[mc] = None if pd.isna(v) else round(float(v), 2)
-        out_rows.append(row)
-    return {"func": func, "group_col": group_col, "metric_cols": metric_cols, "rows": out_rows}
-
-
-def run_aggregation_supabase(message, organization_id, document_ids, focus_document_id, want_chart) -> dict | None:
-    """Deterministic groupby answer over the relevant docs' stored tables.
-    Returns ChatResponse kwargs (answer/sources/chart), or None to fall through."""
-    if focus_document_id:
-        ids = [focus_document_id]
-    elif document_ids:
-        ids = list(document_ids)
-    else:
-        return None
-    all_rows, used = [], []
-    for t in store.tables_for_documents(ids):
-        trows = (t.get("table_data") or {}).get("rows") or []
-        if trows:
-            all_rows.extend(trows)
-            if t.get("document_id") not in used:
-                used.append(t.get("document_id"))
-    agg = compute_tabular_aggregation(message, all_rows)
-    if agg is None:
-        return None
-
-    gcol, mcols, out_rows = agg["group_col"], agg["metric_cols"], agg["rows"]
-    label = _AGG_LABEL.get(str(agg["func"])) or str(agg["func"])
-    sources = store.file_names_for_documents(used)
-    note = f"{label.title()} of {', '.join(mcols)} by {gcol}, computed exactly over {len(all_rows)} rows."
-
-    if want_chart:
-        spec = {
-            "chart_type": "bar",
-            "title": f"{label.title()} {', '.join(mcols)} by {gcol}",
-            "labels": [r[gcol] for r in out_rows],
-            "datasets": [{"label": mc, "data": [r[mc] for r in out_rows]} for mc in mcols],
-            "notes": note,
-            "source": "",
-            "is_tabular": True,
-        }
-        return {"answer": note, "sources": sources, "chart": spec}
-
-    cols = [gcol] + mcols
-    md = "| " + " | ".join(cols) + " |\n| " + " | ".join(["---"] * len(cols)) + " |\n"
-    for r in out_rows:
-        md += "| " + " | ".join("" if r.get(c) is None else str(r.get(c)) for c in cols) + " |\n"
-    return {"answer": f"{note}\n\n{md}", "sources": sources, "chart": None}
-
-
 # ── Dashboard metric extraction ──────────────────────────────────────────────
-# Open-ended: the LLM proposes its own metric key/department/kind from whatever
-# the document actually contains, rather than picking from a fixed catalog. This
-# lets any team's metrics (deployment_frequency, churn, NPS, ...) surface without
-# a code change. The department is a cosmetic grouping tag, never a filter.
-_METRIC_SLUG_RE = re.compile(r"[^a-z0-9]+")
+# Department-specific metric catalog the dashboard understands. Maps each
+# canonical metric key to the department it belongs to. The prompt maps synonyms
+# onto these keys. Extraction runs for ALL of these regardless of what the user
+# has chosen to display on their dashboard.
+METRIC_CATALOG = {
+    # Finance
+    "revenue": "finance",
+    "profit": "finance",
+    "expenditure": "finance",
+    "cash_flow": "finance",
+    # Sales
+    "sales": "sales",
+    "units_sold": "sales",
+    "new_customers": "sales",
+    "average_deal_size": "sales",
+    # Marketing
+    "marketing_spend": "marketing",
+    "leads": "marketing",
+    "conversion_rate": "marketing",
+    "website_traffic": "marketing",
+    # Human Resources
+    "headcount": "hr",
+    "attrition_rate": "hr",
+    "new_hires": "hr",
+    "training_cost": "hr",
+    # Operations
+    "production_output": "operations",
+    "defect_rate": "operations",
+    "inventory": "operations",
+    "on_time_delivery": "operations",
+}
+CANONICAL_METRICS = tuple(METRIC_CATALOG.keys())
 
-
-def slugify_metric(name: str) -> str:
-    """Turn the free-text key the LLM proposed into a stable snake_case key
-    (e.g. "Total Revenue!" -> "total_revenue")."""
-    return _METRIC_SLUG_RE.sub("_", name.strip().lower()).strip("_")
-
-
-# The value kinds the dashboard knows how to format. Anything else falls back to
-# a plain number.
-_ALLOWED_KINDS = {"currency", "percent", "count", "number"}
-
-# Base extraction instructions (open-ended: the LLM names metrics itself). Built
-# as a plain string so per-request user-defined metrics can be appended without
-# ChatPromptTemplate brace-escaping issues.
-METRICS_SYSTEM_TEXT = (
-    "You extract quantitative business metrics from a document for a "
-    "dashboard. Return STRICT JSON only: a JSON ARRAY of metric objects, "
-    "nothing else.\n\n"
-    "Name each metric yourself based on what the document contains - you are "
-    "NOT limited to a fixed list. Use a short, generic snake_case key for the "
-    "concept (e.g. revenue, marketing_spend, deployment_frequency, "
-    "net_promoter_score) and reuse the same key for the same concept across "
-    "data points so it aggregates cleanly.\n\n"
-    "Each object:\n"
-    "{\n"
-    '  "metric": short snake_case key naming the concept,\n'
-    '  "department": best-guess domain grouping (finance, sales, marketing, '
-    "hr, operations, engineering, ... or a new one if none fit),\n"
-    '  "kind": one of "currency","percent","count","number",\n'
-    '  "period": "YYYY" | "YYYY-MM" | "YYYY-Qn", or null if none stated,\n'
-    '  "value": a plain number (no commas, currency symbols, %, or units),\n'
-    '  "currency": ISO code like "USD" if known, else null,\n'
-    '  "category": a breakdown label (e.g. region/department/product) or null,\n'
-    '  "confidence": 0.0-1.0\n'
-    "}\n\n"
-    "Rules:\n"
-    "- Use ONLY numbers present in the document; never invent values.\n"
-    "- Emit one object per (metric, period, category) data point you find.\n"
-    "- For rates/percentages set kind=\"percent\" and emit the plain number "
-    "(e.g. 12.5 for 12.5%); for money set kind=\"currency\".\n"
-    "- Only extract genuine quantitative metrics; skip prose and identifiers.\n"
-    "- If the document contains no such metrics, return [].\n"
-    "- Output ONLY the JSON array."
+# Human-readable enumeration of allowed keys grouped by department, fed to the
+# model so it knows exactly which metric keys it may emit.
+_CATALOG_BY_DEPT: dict[str, list[str]] = {}
+for _k, _d in METRIC_CATALOG.items():
+    _CATALOG_BY_DEPT.setdefault(_d, []).append(_k)
+ALLOWED_METRICS_TEXT = "\n".join(
+    f"- {dept}: {', '.join(keys)}" for dept, keys in _CATALOG_BY_DEPT.items()
 )
 
-# Reuse StrOutputParser to flatten the model reply (handles str or the
-# content-block list some Gemini models return).
-_metrics_parser = StrOutputParser()
-
-
-def build_metrics_system(custom_defs: list[dict] | None) -> str:
-    """Append the user's tracked metric definitions so extraction actively looks
-    for them and reuses their exact keys, on top of open-ended discovery."""
-    text = METRICS_SYSTEM_TEXT
-    lines = []
-    for c in custom_defs or []:
-        key = slugify_metric(str(c.get("key") or c.get("metric_key") or ""))
-        if not key:
-            continue
-        label = str(c.get("label") or key)
-        desc = str(c.get("description") or "").strip()
-        lines.append(f"- {key} ({label}): {desc}" if desc else f"- {key} ({label})")
-    if lines:
-        text += (
-            "\n\nThe user is specifically tracking these metrics — actively look "
-            "for them and use these EXACT keys when the document contains them "
-            "(still extract other metrics you find too):\n" + "\n".join(lines)
-        )
-    return text
+METRICS_PROMPT = ChatPromptTemplate.from_messages([
+    ("system",
+     "You extract department-specific business metrics from a document for a "
+     "dashboard. Return STRICT JSON only: a JSON ARRAY of metric objects, "
+     "nothing else.\n\n"
+     "Allowed metric keys, grouped by department:\n"
+     f"{ALLOWED_METRICS_TEXT}\n\n"
+     "Map common synonyms onto these keys, e.g.: expenses/costs->expenditure, "
+     "net income/earnings->profit, turnover/total revenue->revenue, "
+     "operating cash->cash_flow, units/quantity sold->units_sold, "
+     "new accounts->new_customers, ad spend/campaign budget->marketing_spend, "
+     "MQLs/prospects->leads, conv. rate/close rate->conversion_rate, "
+     "visits/sessions->website_traffic, employees/staff->headcount, "
+     "turnover rate/churn (staff)->attrition_rate, recruits->new_hires, "
+     "output/production volume->production_output, defects/scrap->defect_rate, "
+     "stock on hand->inventory, OTD/on-time %->on_time_delivery.\n\n"
+     "Each object:\n"
+     "{{\n"
+     '  "metric": one of the allowed keys above,\n'
+     '  "department": the department that key belongs to,\n'
+     '  "period": "YYYY" | "YYYY-MM" | "YYYY-Qn", or null if none stated,\n'
+     '  "value": a plain number (no commas, currency symbols, %, or units),\n'
+     '  "currency": ISO code like "USD" if known, else null,\n'
+     '  "category": a breakdown label (e.g. region/department/product) or null,\n'
+     '  "confidence": 0.0-1.0\n'
+     "}}\n\n"
+     "Rules:\n"
+     "- Use ONLY numbers present in the document; never invent values.\n"
+     "- Emit one object per (metric, period, category) data point you find.\n"
+     "- For rates/percentages emit the plain number (e.g. 12.5 for 12.5%).\n"
+     "- Ignore anything that does not map to an allowed key.\n"
+     "- If the document contains no such metrics, return [].\n"
+     "- Output ONLY the JSON array."),
+    ("human", "DOCUMENT:\n{dataset}"),
+])
 
 
 def parse_json_array(raw: str) -> list:
@@ -882,13 +524,9 @@ def parse_json_array(raw: str) -> list:
 
 
 def normalize_metric(raw: dict) -> dict | None:
-    """Validate/normalize one extracted metric; drop anything unusable.
-
-    Open-ended: the metric key/department/kind come from the LLM's own output
-    (slugified/defaulted here), not from a fixed catalog. Only a non-empty key
-    and a numeric value are required."""
-    metric = slugify_metric(str(raw.get("metric", "")))
-    if not metric:
+    """Validate/normalize one extracted metric; drop anything unusable."""
+    metric = str(raw.get("metric", "")).strip().lower()
+    if metric not in CANONICAL_METRICS:
         return None
     value_raw = raw.get("value")
     if value_raw is None:
@@ -900,18 +538,13 @@ def normalize_metric(raw: dict) -> dict | None:
     period = raw.get("period")
     category = raw.get("category")
     currency = raw.get("currency")
-    department = str(raw.get("department") or "general").strip().lower() or "general"
-    kind = str(raw.get("kind") or "number").strip().lower()
-    if kind not in _ALLOWED_KINDS:
-        kind = "number"
     try:
         confidence = float(raw.get("confidence", 0.5))
     except (TypeError, ValueError):
         confidence = 0.5
     return {
         "metric": metric,
-        "department": department,
-        "kind": kind,
+        "department": METRIC_CATALOG[metric],
         "period": str(period) if period not in (None, "") else None,
         "value": value,
         "currency": str(currency) if currency else None,
@@ -920,265 +553,25 @@ def normalize_metric(raw: dict) -> dict | None:
     }
 
 
-# ── Deterministic tabular extraction ─────────────────────────────────────────
-# Asking the LLM to enumerate every (metric, period) cell of a table makes it
-# sample and silently drop rows, so periods go missing (a 14-metric x 8-quarter
-# sheet is 112 objects — the model summarises instead of listing them all). For
-# CSV/Excel we instead MELT the dataframe in code: every row x numeric column
-# becomes one data point, capturing ALL periods with zero sampling. The LLM is
-# not involved in reading the values.
-MAX_TABULAR_ROWS = 50_000
-
-_MONTH_INDEX = {}
-for _i, _m in enumerate(
-    ["january", "february", "march", "april", "may", "june", "july", "august",
-     "september", "october", "november", "december"], start=1):
-    _MONTH_INDEX[_m] = _i
-    _MONTH_INDEX[_m[:3]] = _i
-
-_PERCENT_HINTS = ("rate", "ratio", "percent", "percentage", "margin", "growth",
-                  "share", "yield", "utilization", "occupancy", "cpc", "ctr")
-_CURRENCY_HINTS = ("revenue", "income", "sales", "profit", "cost", "expenditure",
-                   "expense", "price", "fee", "royalt", "salary", "amount", "budget",
-                   "spend", "turnover", "mrr", "arr", "gmv", "arpu", "payment",
-                   "earnings", "billing", "cash")
-_COUNT_HINTS = ("count", "calls", "number", "num", "qty", "quantity", "users",
-                "employee", "visit", "click", "order", "unit", "cities", "session",
-                "signup", "subscriber", "headcount", "ticket")
-
-
-def _guess_kind(col: str) -> str:
-    c = col.lower()
-    if any(h in c for h in _PERCENT_HINTS):
-        return "percent"
-    if any(h in c for h in _CURRENCY_HINTS):
-        return "currency"
-    if any(h in c for h in _COUNT_HINTS):
-        return "count"
-    return "number"
-
-
-def _to_numeric(series) -> "pd.Series":
-    """Coerce a column to numbers, stripping thousands separators / currency / %."""
-    if series.dtype == object:
-        cleaned = series.astype(str).str.replace(r"[,$€£%\s]", "", regex=True)
-        return pd.Series(pd.to_numeric(cleaned, errors="coerce"))
-    return pd.Series(pd.to_numeric(series, errors="coerce"))
-
-
-def _fmt_year(v) -> str | None:
-    try:
-        y = int(float(str(v).strip()))
-    except (TypeError, ValueError):
-        return None
-    return str(y) if 1900 <= y <= 2100 else None
-
-
-def _fmt_quarter(v) -> str | None:
-    m = re.search(r"([1-4])", str(v))
-    return f"Q{m.group(1)}" if m else None
-
-
-def _fmt_month(v) -> str | None:
-    s = str(v).strip().lower()
-    if s in _MONTH_INDEX:
-        return f"{_MONTH_INDEX[s]:02d}"
-    try:
-        n = int(float(s))
-        if 1 <= n <= 12:
-            return f"{n:02d}"
-    except (TypeError, ValueError):
-        pass
-    return None
-
-
-def _find_col(df, pattern):
-    for c in df.columns:
-        if re.fullmatch(pattern, str(c).strip(), re.I):
-            return c
-    return None
-
-
-def _build_period_extractor(df):
-    """Return (row -> period string | None, {columns used as the period key}).
-    Recognises Year+Quarter, Year+Month, a Date/Period column, or Year alone."""
-    year_col = _find_col(df, r"year|fy|yr")
-    q_col = _find_col(df, r"quarter|qtr|q")
-    m_col = _find_col(df, r"month|mon|mo")
-    date_col = None
-    for c in df.columns:
-        if re.search(r"date|period|timestamp", str(c).strip(), re.I):
-            date_col = c
-            break
-
-    if year_col and q_col:
-        def fn(row):
-            y, q = _fmt_year(row[year_col]), _fmt_quarter(row[q_col])
-            return f"{y}-{q}" if y and q else y
-        return fn, {year_col, q_col}
-    if year_col and m_col:
-        def fn(row):
-            y, mm = _fmt_year(row[year_col]), _fmt_month(row[m_col])
-            return f"{y}-{mm}" if y and mm else y
-        return fn, {year_col, m_col}
-    if date_col is not None:
-        def fn(row):
-            dt = pd.to_datetime(row[date_col], errors="coerce")
-            if pd.isna(dt):
-                s = str(row[date_col]).strip()  # already a label like "2024-Q1"?
-                return s or None
-            return f"{dt.year}-{dt.month:02d}"
-        return fn, {date_col}
-    if year_col:
-        return (lambda row: _fmt_year(row[year_col])), {year_col}
-    return None, set()
-
-
-def extract_metrics_tabular(df, custom_defs: list[dict] | None = None) -> list[dict] | None:
-    """Melt a dataframe into one metric point per (row, numeric column). Returns
-    None (→ caller falls back to the LLM) when the table has no recognisable
-    period column or no numeric columns, so categorical/wide tables still work."""
-    if df is None or df.empty:
-        return None
-    df = df.head(MAX_TABULAR_ROWS)
-    period_fn, period_cols = _build_period_extractor(df)
-    if period_fn is None:
-        return None  # no time signal → let the LLM handle it (may find categories)
-
-    def_kind = {}
-    for c in (custom_defs or []):
-        k = slugify_metric(str(c.get("key") or c.get("metric_key") or ""))
-        if k and c.get("kind"):
-            def_kind[k] = str(c["kind"]).strip().lower()
-
-    metric_cols = []
-    threshold = max(1, int(0.5 * len(df)))
-    for c in df.columns:
-        if c in period_cols:
-            continue
-        col = _to_numeric(df[c])
-        if int(col.notna().sum()) >= threshold:
-            metric_cols.append((c, col))
-    if not metric_cols:
-        return None
-
-    periods = [period_fn(df.iloc[i]) for i in range(len(df))]
-    raw_points = []
-    for c, col in metric_cols:
-        key = slugify_metric(str(c))
-        if not key:
-            continue
-        kind = def_kind.get(key) or _guess_kind(str(c))
-        for i in range(len(df)):
-            v = col.iloc[i]
-            if pd.isna(v):
-                continue
-            raw_points.append({
-                "metric": key,
-                "department": "general",
-                "kind": kind,
-                "period": periods[i],
-                "value": float(v),
-                "currency": None,
-                "category": None,
-                "confidence": 0.9,
-            })
-    return [m for m in (normalize_metric(p) for p in raw_points) if m]
-
-
-# ── Chunked LLM extraction (text / PDF / unstructured tables) ─────────────────
-# Non-tabular sources still need the LLM, but a single truncated pass drops
-# whatever falls past the cap. Instead we feed the WHOLE document in windows and
-# merge, de-duping by (metric, period, category) so overlaps don't double-count.
-EXTRACT_CHUNK_CHARS = 15_000
-EXTRACT_CHUNK_OVERLAP = 500
-MAX_EXTRACT_CHUNKS = 12
-
-
-def _full_source_text(
-    source: str, document_id: str | None = None, organization_id: str | None = None
-) -> str:
-    """Whole-document text for extraction — NOT capped at MAX_VIZ_CHARS."""
-    df = load_dataframe(source, document_id, organization_id)
-    if df is not None:
-        return "TABULAR DATA (CSV):\n" + df.head(MAX_TABULAR_ROWS).to_csv(index=False)
-    path = docstore.resolve_source(source, document_id, organization_id)
-    if path is None:
-        return ""
-    try:
-        return "DOCUMENT TEXT:\n" + "\n\n".join(parse_file(path).text_chunks)
-    except Exception:
-        return ""
-
-
-def _split_for_extraction(text: str) -> list[str]:
-    if len(text) <= EXTRACT_CHUNK_CHARS:
-        return [text]
-    chunks, i = [], 0
-    while i < len(text) and len(chunks) < MAX_EXTRACT_CHUNKS:
-        chunks.append(text[i:i + EXTRACT_CHUNK_CHARS])
-        i += EXTRACT_CHUNK_CHARS - EXTRACT_CHUNK_OVERLAP
-    return chunks
-
-
-def _dedup_metrics(metrics: list[dict]) -> list[dict]:
-    """Collapse identical (metric, period, category) points, keeping the most
-    confident — so overlapping chunks don't inflate values."""
-    best: dict = {}
-    for m in metrics:
-        key = (m["metric"], m.get("period"), m.get("category"))
-        if key not in best or m.get("confidence", 0) > best[key].get("confidence", 0):
-            best[key] = m
-    return list(best.values())
-
-
-async def _extract_chunk(text: str, system_text: str) -> list[dict]:
-    resp = await llm.ainvoke([
-        SystemMessage(content=system_text),
-        HumanMessage(content=f"DOCUMENT:\n{text}"),
-    ])
-    raw = _metrics_parser.invoke(resp)
+async def extract_metrics(source: str) -> list[dict]:
+    """Pull canonical financial metrics from one uploaded document."""
+    dataset, _ = build_source_context(source)
+    if not dataset.strip():
+        return []
+    chain = METRICS_PROMPT | llm | StrOutputParser()
+    raw = await chain.ainvoke({"dataset": dataset})
     try:
         items = parse_json_array(raw)
     except (json.JSONDecodeError, ValueError):
         return []
-    return [m for m in (normalize_metric(i) for i in items if isinstance(i, dict)) if m]
-
-
-async def extract_metrics(
-    source: str,
-    custom_defs: list[dict] | None = None,
-    document_id: str | None = None,
-    organization_id: str | None = None,
-) -> list[dict]:
-    """Metric extraction from one uploaded document.
-
-    Tabular files are melted deterministically (every period captured, no LLM
-    sampling). Everything else — and any table we can't structure — is extracted
-    by the LLM chunk-by-chunk over the WHOLE document and merged, so periods no
-    longer fall past a truncation cap. `custom_defs` steer the LLM path and set
-    the kind on the tabular path."""
-    df = load_dataframe(source, document_id, organization_id)
-    if df is not None:
-        tabular = extract_metrics_tabular(df, custom_defs)
-        if tabular:
-            return tabular
-        # Couldn't structure the table → fall through to the LLM.
-
-    text = _full_source_text(source, document_id, organization_id)
-    if not text.strip():
-        return []
-    system_text = build_metrics_system(custom_defs)
-    collected: list[dict] = []
-    for chunk in _split_for_extraction(text):
-        collected.extend(await _extract_chunk(chunk, system_text))
-    return _dedup_metrics(collected)
+    metrics = [m for m in (normalize_metric(i) for i in items if isinstance(i, dict)) if m]
+    return metrics
 
 
 # ── Document generation helpers ──────────────────────────────────────────────
-# Generated reports go to Supabase Storage under `generated/<org>/`, like everything
-# else. They get their own prefix rather than a document's because they exist as a file
-# before any documents row does — one is created only if the user clicks "Add to AI".
+# Where generated reports (PDFs) are written. They live alongside uploads so the
+# existing /download endpoint can serve them and they can be re-indexed.
+GENERATED_DIR = UPLOAD_DIR
 MAX_DOC_CONTEXT_CHARS = 80_000
 
 # Bundled Unicode font. fpdf2's core fonts (Helvetica) are Latin-1 only and choke
@@ -1274,9 +667,7 @@ def build_doc_context_supabase(instruction: str, organization_id, document_ids, 
     return context, used
 
 
-async def _generate_doc_from_context(
-    context: str, instruction: str, source_label, organization_id: str
-) -> dict:
+async def _generate_doc_from_context(context: str, instruction: str, source_label) -> dict:
     if not context.strip():
         raise HTTPException(status_code=400, detail="No document content to work from.")
 
@@ -1285,38 +676,24 @@ async def _generate_doc_from_context(
 
     title = extract_title(md_text)
     filename = f"{slugify(title)}-{datetime.now():%Y%m%d-%H%M%S}.pdf"
+    out_path = (GENERATED_DIR / filename).resolve()
+    try:
+        markdown_to_pdf(md_text, out_path)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {exc}")
 
-    # Build the PDF in a temp dir, then hand it to Storage. Nothing durable is written
-    # here — the backend serves the download straight out of the bucket.
-    with tempfile.TemporaryDirectory() as tmp:
-        out_path = Path(tmp) / filename
-        try:
-            markdown_to_pdf(md_text, out_path)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"PDF generation failed: {exc}")
-        try:
-            storage_path = docstore.put_generated(organization_id, filename, out_path)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Could not store the report: {exc}")
-
-    return {
-        "filename": filename,
-        "storage_path": storage_path,
-        "title": title,
-        "markdown": md_text,
-        "source": source_label,
-    }
+    return {"filename": filename, "title": title, "markdown": md_text, "source": source_label}
 
 
-async def run_document_generation(instruction: str, source: str | None, organization_id: str) -> dict:
-    context, _ = build_source_context(source, organization_id=organization_id)
-    return await _generate_doc_from_context(context, instruction, source, organization_id)
+async def run_document_generation(instruction: str, source: str | None) -> dict:
+    context, _ = build_source_context(source)
+    return await _generate_doc_from_context(context, instruction, source)
 
 
 async def run_document_generation_supabase(instruction: str, organization_id, document_ids, focus_document_id) -> tuple[dict, list]:
     context, used_ids = build_doc_context_supabase(instruction, organization_id, document_ids, focus_document_id)
     source_files = store.file_names_for_documents(used_ids)
-    doc = await _generate_doc_from_context(context, instruction, focus_document_id, organization_id)
+    doc = await _generate_doc_from_context(context, instruction, focus_document_id)
     return doc, source_files
 
 
@@ -1335,80 +712,12 @@ def to_lc_messages(history: list[dict] | None) -> list:
     return msgs
 
 
-# How many candidates hybrid search returns before we trim to k (widened in P1.4
-# so the cross-encoder reranker has a real pool to reorder).
-HYBRID_CANDIDATES = 30
-
-# ── Retrieval caches (P1.5) ───────────────────────────────────────────────────
-# (a) embedding cache: identical/whitespace-different queries skip re-embedding.
-# (b) result cache: a full retrieval result is reused for a short TTL, so re-asks
-#     within a turn are instant. Time-based invalidation is safe because a new
-#     upload only needs to be reflected after the TTL (a few seconds).
-_RESULT_TTL_SECONDS = 60
-_result_cache: dict[str, tuple[float, list]] = {}
-_cache_stats = {"result_hits": 0, "result_miss": 0}
-
-
-def _norm_query(q: str) -> str:
-    return " ".join((q or "").split())
-
-
-@lru_cache(maxsize=512)
-def _embed_query_cached(norm_q: str) -> tuple:
-    # Cached by normalized text; tuple is hashable + immutable for lru_cache.
-    return tuple(embeddings.embed_query(norm_q))
-
-
-def _result_key(organization_id: str, document_ids, norm_q: str, k: int) -> str:
-    docs = ",".join(sorted(document_ids)) if document_ids else "*"
-    return f"{organization_id}|{docs}|{k}|{norm_q}"
-
-
 def retrieve_chunks(question: str, organization_id: str, document_ids=None, k: int = 5) -> list[dict]:
-    """Retrieve the most relevant chunks, scoped to an org and (optionally) the
-    accessible document ids. Hybrid dense + full-text (RRF) → cross-encoder
-    rerank; falls back to dense-only if the P1.3 migration isn't applied.
-    Caches the query embedding and the final result (short TTL)."""
-    norm_q = _norm_query(question)
-    key = _result_key(organization_id, document_ids, norm_q, k)
-    now = time.time()
-    cached = _result_cache.get(key)
-    if cached and cached[0] > now:
-        _cache_stats["result_hits"] += 1
-        return cached[1]
-    _cache_stats["result_miss"] += 1
-
-    query_vec = list(_embed_query_cached(norm_q))
-    try:
-        hits = store.hybrid_match_chunks(
-            query_vec, question, organization_id,
-            document_ids=document_ids, match_count=max(k, HYBRID_CANDIDATES),
-        )
-    except Exception:
-        hits = store.match_chunks(query_vec, organization_id, document_ids=document_ids, match_count=k)
-    result = rerank_hits(question, hits, k)
-
-    _result_cache[key] = (now + _RESULT_TTL_SECONDS, result)
-    if len(_result_cache) > 1024:  # bound: drop expired, else oldest-ish
-        for kk in [k2 for k2, v in list(_result_cache.items()) if v[0] <= now][:512] or list(_result_cache)[:256]:
-            _result_cache.pop(kk, None)
-    return result
-
-
-def rerank_hits(question: str, hits: list[dict], k: int) -> list[dict]:
-    """Reorder candidates by cross-encoder relevance, returning the top-k. Falls
-    back to the incoming order (fused RRF / dense score) if the reranker is
-    unavailable or errors, so retrieval never hard-fails on the reranker."""
-    if not hits or reranker is None or len(hits) <= 1:
-        return hits[:k]
-    try:
-        scores = reranker.predict([(question, h["chunk_text"]) for h in hits])
-        for h, s in zip(hits, scores):
-            h["rerank_score"] = float(s)
-        hits = sorted(hits, key=lambda h: h.get("rerank_score", 0.0), reverse=True)
-    except Exception:
-        pass  # keep fused order
-    return hits[:k]
+    """Phase 2 retrieval: embed the question and find the nearest chunks via the
+    match_document_chunks RPC, scoped to an org and (optionally) a set of
+    accessible document ids. Returns the RPC rows."""
+    query_vec = embeddings.embed_query(question)
+    return store.match_chunks(query_vec, organization_id, document_ids=document_ids, match_count=k)
 
 def render_document_tables(document_id) -> str:
     """A document's stored tabular data (document_tables) rendered as CSV text, so
@@ -1485,16 +794,7 @@ async def run_rag_chain(
     context = "\n\n".join(context_parts)
 
     retrieved: list[dict] = [
-        {
-            "chunk_id": h["id"],
-            "document_id": h["document_id"],
-            "file_name": h.get("file_name"),
-            "similarity": h["similarity"],
-            "chunk_index": h.get("chunk_index"),
-            "char_start": h.get("char_start"),
-            "char_end": h.get("char_end"),
-            "page": (h.get("metadata") or {}).get("page"),
-        }
+        {"chunk_id": h["id"], "document_id": h["document_id"], "similarity": h["similarity"]}
         for h in hits
     ]
     # Sources are the source FILE NAMES (downloadable), not document ids.
@@ -1578,13 +878,6 @@ async def chat(req: ChatRequest):
 
         n_docs = len(req.document_ids or [])
 
-        # Meta/conversational questions ("what was my last question?", "what time
-        # is it?") are answered from the chat itself, not the documents — so give a
-        # normal answer with NO sources cited.
-        if is_meta_question(req.message):
-            answer = await run_plain_chain(req.message, req.session_id, req.history)
-            return ChatResponse(answer=answer, sources=[], doc_count=0)
-
         # Generated report/PDF from the accessible/focused documents.
         if wants_document(req.message):
             doc, source_files = await run_document_generation_supabase(
@@ -1596,32 +889,14 @@ async def chat(req: ChatRequest):
             )
             return ChatResponse(answer=answer, sources=source_files, doc_count=n_docs, document=doc)
 
-        # Deterministic aggregation over tabular data ("average NO2 by city",
-        # "total sales by region"): computed exactly from the stored table so no
-        # rows are lost to the context cap and the numbers are precise. Handles
-        # both the chart form and the plain-answer form; falls through when the
-        # request isn't a (numeric agg BY category) over a table.
-        agg = run_aggregation_supabase(
-            req.message, req.organization_id, req.document_ids, req.focus_document_id,
-            want_chart=wants_chart(req.message) or wants_table(req.message),
-        )
-        if agg is not None:
-            return ChatResponse(
-                answer=agg["answer"], sources=agg["sources"], doc_count=n_docs, chart=agg.get("chart")
-            )
-
         # Chart/table from the accessible/focused documents.
-        if wants_chart(req.message) or wants_table(req.message):
+        if wants_chart(req.message):
             try:
                 spec, source_files = await run_visualization_supabase(
                     req.message, req.organization_id, req.document_ids, req.focus_document_id
                 )
                 answer = spec.get("notes") or spec.get("title") or "Here's the chart you asked for."
-                # A chart that merely re-plots data the AI already presented (and
-                # cited) is just a graphical view of that answer — don't re-cite
-                # the same sources for it.
-                sources = [] if references_prior_output(req.message) else source_files
-                return ChatResponse(answer=answer, sources=sources, doc_count=n_docs, chart=spec)
+                return ChatResponse(answer=answer, sources=source_files, doc_count=n_docs, chart=spec)
             except HTTPException:
                 pass  # not chartable → fall through to a normal answer
 
@@ -1655,89 +930,17 @@ async def chat(req: ChatRequest):
         raise HTTPException(status_code=502, detail=f"Gemini error: {msg}")
 
 
-class RetrievePreviewRequest(BaseModel):
-    message: str
-    organization_id: str
-    document_ids: list[str] | None = None  # docs the user may see
-
-
-# Retrieval-preview thresholds. Cosine similarities from all-MiniLM-L6-v2 are
-# not absolutely calibrated (score ranges shift with query wording/length), so
-# we filter RELATIVELY to each query's top hit rather than by a fixed cutoff:
-#   • REL_MARGIN — keep a doc only if its best chunk is within this of the top
-#     doc's best chunk. If the top doc leads the runner-up by more than this,
-#     the runner-up is dropped and the answer auto-scopes to the clear winner.
-#   • ABS_FLOOR — a low junk guard: drop docs whose best chunk is below this even
-#     if they'd survive the relative filter (guards against an all-weak match set).
-#   • MAX_PREVIEW_DOCS — never surface more than this many.
-# A query is "ambiguous" (→ show the picker) only when 2+ docs survive with
-# similar scores; otherwise the client answers directly without a picker step.
-PREVIEW_REL_MARGIN = 0.06
-PREVIEW_ABS_FLOOR = 0.30
-MAX_PREVIEW_DOCS = 4
-
-
-@app.post("/retrieve-preview")
-async def retrieve_preview(req: RetrievePreviewRequest):
-    """The documents /chat WOULD draw on for this question: the same scoped
-    vector search, stopped before the LLM. Returns the matched documents plus an
-    `ambiguous` flag telling the client whether a human still needs to
-    disambiguate (several close matches) or one document clearly wins (answer
-    straight away). Meta/conversational questions return no documents."""
-    if not req.document_ids or is_meta_question(req.message):
-        return {"documents": [], "ambiguous": False}
-
-    hits = retrieve_chunks(req.message, req.organization_id, req.document_ids, k=10)
-
-    # Distinct documents, keeping each one's best similarity.
-    best: dict[str, float] = {}
-    for h in hits:
-        did = str(h["document_id"])
-        sim = float(h.get("similarity") or 0)
-        if did not in best or sim > best[did]:
-            best[did] = sim
-    if not best:
-        return {"documents": [], "ambiguous": False}
-
-    ranked = sorted(best.items(), key=lambda kv: kv[1], reverse=True)
-    top_sim = ranked[0][1]
-    # Relative filter around the top hit, with an absolute junk floor, then cap.
-    kept = [
-        (did, sim)
-        for did, sim in ranked
-        if sim >= PREVIEW_ABS_FLOOR and sim >= top_sim - PREVIEW_REL_MARGIN
-    ][:MAX_PREVIEW_DOCS]
-    if not kept:
-        return {"documents": [], "ambiguous": False}
-
-    names = {str(d["id"]): d.get("file_name") for d in store.documents_by_ids([d for d, _ in kept])}
-    documents = [
-        {"id": did, "file_name": names.get(did) or "unknown", "similarity": round(sim, 4)}
-        for did, sim in kept
-        if did in names  # skip ids whose documents row has vanished
-    ]
-    # Ambiguous only when 2+ close matches remain — embeddings can't tell near
-    # duplicates (e.g. "Q2 report" vs "Q3 report") apart, so the user decides.
-    ambiguous = len(documents) >= 2
-    return {"documents": documents, "ambiguous": ambiguous}
-
-
 class VisualizeRequest(BaseModel):
     instruction: str
-    source: str | None = None  # which uploaded document to chart, by file name
-    document_id: str | None = None  # preferred: unambiguous
-    # Required to resolve `source` safely — a file name is not unique across tenants.
-    organization_id: str | None = None
+    source: str | None = None  # which uploaded document to chart
 
 
 @app.post("/visualize")
 async def visualize(req: VisualizeRequest):
-    if not req.source and not req.document_id:
+    if not req.source:
         raise HTTPException(status_code=400, detail="Select a document to chart.")
     try:
-        return await run_visualization(
-            req.source, req.instruction, req.organization_id, req.document_id
-        )
+        return await run_visualization(req.source, req.instruction)
     except ChatGoogleGenerativeAIError as e:
         msg = str(e)
         if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
@@ -1753,18 +956,13 @@ async def visualize(req: VisualizeRequest):
 
 
 class ExtractMetricsRequest(BaseModel):
-    source: str  # which uploaded document to extract dashboard metrics from, by name
-    document_id: str | None = None  # preferred: unambiguous
-    organization_id: str | None = None  # needed only when resolving by `source`
-    custom_metrics: list[dict] = []  # user-defined defs [{key,label,kind,description}]
+    source: str  # which uploaded document to extract dashboard metrics from
 
 
 @app.post("/extract-metrics")
 async def extract_metrics_endpoint(req: ExtractMetricsRequest):
     try:
-        metrics = await extract_metrics(
-            req.source, req.custom_metrics, req.document_id, req.organization_id
-        )
+        metrics = await extract_metrics(req.source)
         return {"source": req.source, "metrics": metrics}
     except ChatGoogleGenerativeAIError as e:
         msg = str(e)
@@ -1783,7 +981,6 @@ async def extract_metrics_endpoint(req: ExtractMetricsRequest):
 class GenerateDocRequest(BaseModel):
     instruction: str
     source: str | None = None  # which uploaded document to base the report on
-    organization_id: str  # whose bucket the report is written to, and whose docs are read
 
 
 @app.post("/generate-document")
@@ -1791,7 +988,7 @@ async def generate_document(req: GenerateDocRequest):
     if not req.source:
         raise HTTPException(status_code=400, detail="Select a document to base the report on.")
     try:
-        return await run_document_generation(req.instruction, req.source, req.organization_id)
+        return await run_document_generation(req.instruction, req.source)
     except ChatGoogleGenerativeAIError as e:
         msg = str(e)
         if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
@@ -1807,48 +1004,61 @@ async def generate_document(req: GenerateDocRequest):
 
 
 class IngestRequest(BaseModel):
-    filename: str
+    filename: str  # a file already present in the uploads/generated directory
     document_id: str
     organization_id: str
 
 
 @app.post("/ingest")
 def ingest_document(req: IngestRequest):
-    """Index an existing document (e.g. an AI-generated report the user chose to "Add to
-    AI") into Supabase under the given document_id, so the AI can answer questions about
-    it. The backend has already created the row pointing at the bytes in Storage; we
-    resolve them by document_id."""
-    path = docstore.resolve_source(req.filename, document_id=req.document_id)
-    if path is None:
-        raise HTTPException(status_code=404, detail=f"File '{req.filename}' not found")
+    """Index a file already on disk (e.g. a generated report) into Supabase under
+    the given document_id, so the AI can answer questions about it."""
+    safe_name = Path(req.filename).name
+    path = (UPLOAD_DIR / safe_name).resolve()
+    if UPLOAD_DIR.resolve() not in path.parents or not path.is_file():
+        raise HTTPException(status_code=404, detail=f"File '{safe_name}' not found")
     store.delete_document_data(req.document_id)  # idempotent re-index
     try:
-        result = index_document(req.document_id, req.organization_id, path, req.filename)
+        result = index_document(req.document_id, req.organization_id, path, safe_name)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-    return {"document_id": req.document_id, "filename": req.filename, **result}
-
-
-# ── Cache eviction ─────────────────────────────────────────────────────────────
-# These used to delete the only copy of a file. They no longer delete anything that
-# matters: the original lives in Supabase Storage and the documents row cascades to the
-# chunks/tables — both the backend's job. All that's left here is dropping our local
-# cached copy so we don't serve a stale one, and clearing in-memory chat history.
+    return {"document_id": req.document_id, "filename": safe_name, **result}
 
 
 @app.delete("/documents")
 def clear_documents():
+    """Clear the on-disk uploads/generated files + in-memory chat history. The
+    Supabase chunks/tables are removed by the backend (documents cascade)."""
     session_histories.clear()
-    return {"status": "cleared", "files_removed": docstore.evict()}
+    removed = 0
+    for path in UPLOAD_DIR.iterdir():
+        if path.is_file():
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                pass
+    return {"status": "cleared", "files_removed": removed}
 
 
 @app.delete("/documents/{filename}")
 def delete_document(filename: str):
+    """Delete a single document's on-disk file. Its Supabase chunks/tables are
+    removed by the backend (documents cascade)."""
     safe_name = Path(filename).name
     if not safe_name:
         raise HTTPException(status_code=400, detail="Invalid filename.")
-    removed = docstore.evict(safe_name)
-    return {"status": "deleted", "filename": safe_name, "file_removed": removed > 0}
+
+    file_removed = False
+    path = (UPLOAD_DIR / safe_name).resolve()
+    if UPLOAD_DIR.resolve() in path.parents and path.is_file():
+        try:
+            path.unlink()
+            file_removed = True
+        except OSError:
+            pass
+
+    return {"status": "deleted", "filename": safe_name, "file_removed": file_removed}
 
 
 @app.delete("/session/{session_id}")
@@ -1857,7 +1067,15 @@ def clear_session(session_id: str):
     return {"status": "cleared", "session_id": session_id}
 
 
-# NOTE: there is no /download here any more. Serving a file needs to know WHO is asking —
-# this service has no auth context, which is exactly why the old endpoint would hand any
-# caller any file it held. Downloads are served by the backend, from Storage, behind an
-# access check: GET /api/documents/:id/download.
+@app.get("/download/{filename}")
+def download_document(filename: str):
+    # Resolve against UPLOAD_DIR and reject anything that escapes it (path traversal).
+    safe_name = Path(filename).name
+    file_path = (UPLOAD_DIR / safe_name).resolve()
+    if UPLOAD_DIR.resolve() not in file_path.parents or not file_path.is_file():
+        raise HTTPException(status_code=404, detail=f"File '{safe_name}' not found")
+    return FileResponse(
+        path=str(file_path),
+        filename=safe_name,
+        media_type="application/octet-stream",
+    )

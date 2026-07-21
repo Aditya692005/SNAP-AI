@@ -11,7 +11,6 @@ function Login() {
   });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [showPassword, setShowPassword] = useState(false);
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -43,8 +42,10 @@ function Login() {
 
   return (
     <div className="login-page">
+      <div className="glow glow-1"></div>
+      <div className="glow glow-2"></div>
+
       <div className="login-card">
-        <p className="brand">SNAP AI</p>
         <h1>Welcome Back</h1>
 
         <p className="subtitle">Sign in to access your SNAP AI workspace</p>
@@ -59,25 +60,14 @@ function Login() {
             disabled={loading}
           />
 
-          <div className="input-with-toggle">
-            <input
-              type={showPassword ? "text" : "password"}
-              name="password"
-              placeholder="Password"
-              value={formData.password}
-              onChange={handleChange}
-              disabled={loading}
-            />
-            <button
-              type="button"
-              className="show-password-toggle"
-              onClick={() => setShowPassword((s) => !s)}
-              aria-pressed={showPassword}
-              aria-label={showPassword ? "Hide password" : "Show password"}
-            >
-              {showPassword ? "Hide" : "Show"}
-            </button>
-          </div>
+          <input
+            type="password"
+            name="password"
+            placeholder="Password"
+            value={formData.password}
+            onChange={handleChange}
+            disabled={loading}
+          />
 
           {error && <p className="error-message">{error}</p>}
           <button
