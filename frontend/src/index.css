@@ -16,3 +16,28 @@ select optgroup {
   background-color: #0f172a;
   color: #f1f5f9;
 }
+
+html {
+  /* 1. Force scrollbar to always exist to lock layout width */
+  overflow-y: scroll; 
+  
+  /* 2. REMOVE scrollbar-gutter to stop the extra reserved space */
+  /* scrollbar-gutter: stable;  <-- Delete this line */
+}
+
+/* 3. Hide the scrollbar visually (0 width appearance) */
+/* Chrome, Safari, Edge */
+html::-webkit-scrollbar {
+  width: 0px; 
+  /* background: transparent; */
+}
+
+/* Firefox */
+html {
+  scrollbar-width: none; 
+}
+
+/* IE/Edge */
+html {
+  -ms-overflow-style: none;
+}

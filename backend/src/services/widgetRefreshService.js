@@ -12,7 +12,7 @@
 // (config.stale). The user clicks "refresh" on the widget to actually rerun the
 // LLM, so we never silently spend on regeneration.
 
-const fetch = require("node-fetch");
+const { ragFetch } = require("../utils/ragClient");
 const { findMessageById, listMessages } = require("../models/conversationModel");
 const {
   getWidgetForUser,
@@ -29,8 +29,6 @@ const {
   listWidgetsForOrganization,
   touchBoard: touchOrgBoard,
 } = require("../models/organizationDashboardModel");
-
-const RAG_URL = process.env.RAG_SERVICE_URL || "http://localhost:8000";
 
 // Recover {instruction, sources} for a pinned chart from the AI message it came
 // from. instruction = the USER message immediately before that AI message.
@@ -61,15 +59,19 @@ async function recoverRequest(aiMessageId) {
 // system — two organizations can each have a `sales.csv`. Scoping the lookup to the org
 // that owns the widget keeps a refresh from ever charting another tenant's data.
 async function regenerateSpec(instruction, source, organizationId) {
-  const response = await fetch(`${RAG_URL}/visualize`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      instruction,
-      source: source || null,
-      organization_id: organizationId || null,
-    }),
-  });
+  const response = await ragFetch(
+    "/visualize",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instruction,
+        source: source || null,
+        organization_id: organizationId || null,
+      }),
+    },
+    120000
+  );
   if (!response.ok) {
     const err = await response.json().catch(() => ({}));
     throw new Error(err.detail || "Visualization failed");

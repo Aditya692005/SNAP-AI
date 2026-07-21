@@ -193,6 +193,54 @@
   color: #ffffff;
 }
 
+/* Countdown line along the banner's bottom edge — shrinks over the 8s the
+   banner stays up, so the auto-dismiss is visible rather than surprising. */
+.focus-banner {
+  position: relative;
+  overflow: hidden;
+}
+
+.focus-banner-timer {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  width: 100%;
+  background: #8b8ef5;
+  transform-origin: left;
+  animation: focus-banner-countdown 8s linear forwards;
+}
+
+@keyframes focus-banner-countdown {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+/* Search field inside a drawer (chat history) */
+.drawer-search {
+  margin: 0.75rem 1rem 0;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid #2c2d34;
+  border-radius: 8px;
+  color: #f0f0f0;
+  padding: 8px 12px;
+  font-size: 0.9rem;
+  font-family: inherit;
+}
+
+.drawer-search::placeholder {
+  color: #6f7280;
+}
+
+.drawer-search:focus {
+  outline: none;
+  border-color: #4b4d57;
+}
+
 /* ── Messages ── */
 .chat-messages {
   flex: 1;

@@ -7,11 +7,12 @@
 -- recreated. If the column is already 384 you can run only part (2) below.
 -- ============================================================================
 
--- 0) Ensure the columns this RPC returns exist (self-contained: safe to run this
---    file on its own, regardless of migration order).
-alter table document_chunks add column if not exists char_start int;
-alter table document_chunks add column if not exists char_end   int;
-alter table document_chunks add column if not exists metadata    jsonb;
+-- 0) Ensure the columns this RPC references exist (self-contained: safe to run
+--    this file on its own, regardless of migration order).
+alter table document_chunks add column if not exists char_start    int;
+alter table document_chunks add column if not exists char_end      int;
+alter table document_chunks add column if not exists metadata      jsonb;
+alter table document_chunks add column if not exists superseded_at timestamptz;
 
 -- 1) Ensure the embedding column is vector(384). The ANN index is bound to the
 --    column type, so drop it first, then recreate as HNSW (see rag-hnsw-index.sql).
@@ -29,7 +30,14 @@ create index idx_document_chunks_embedding
 --    through this RPC. Returns the closest chunks by COSINE distance.
 --      * p_organization_id - hard tenant boundary (always required)
 --      * p_document_ids     - optional uuid[] the caller may see (NULL = whole org)
+--      * superseded chunks (old doc versions kept for citations) are excluded
 --    similarity = 1 - cosine_distance (1.0 identical, 0 orthogonal).
+--
+--    HNSW recall (hnsw.ef_search) is raised database-wide by
+--    rag-scale-hardening.sql — NOT via a per-function SET clause: extension
+--    GUCs count as unknown "placeholder" parameters until pgvector's library
+--    loads, and setting a placeholder needs superuser, so a function-level SET
+--    can fail with "permission denied" at create or call time on Supabase.
 -- DROP first: the return type includes file_name, and Postgres won't let CREATE
 -- OR REPLACE change an existing function's return columns.
 drop function if exists match_document_chunks(vector, uuid, int, uuid[]);
@@ -68,6 +76,7 @@ as $$
     join documents d on d.id = dc.document_id
     where d.organization_id = p_organization_id
       and dc.embedding is not null
+      and dc.superseded_at is null
       and (p_document_ids is null or dc.document_id = any (p_document_ids))
     order by dc.embedding <=> query_embedding
     limit match_count;

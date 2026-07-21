@@ -3,6 +3,7 @@ import {
   Chart as ChartJS,
   CategoryScale,
   LinearScale,
+  LogarithmicScale,
   BarElement,
   LineElement,
   PointElement,
@@ -24,6 +25,7 @@ import { Chart } from "react-chartjs-2";
 ChartJS.register(
   CategoryScale,
   LinearScale,
+  LogarithmicScale,
   BarElement,
   LineElement,
   PointElement,
@@ -138,6 +140,22 @@ function toChartConfig(spec) {
     }),
   };
 
+  // Series whose magnitudes differ by orders of magnitude flatten each other on
+  // a linear axis (a 2M revenue line makes a 30K fees line look like zero). Use
+  // a log axis when the largest series dwarfs the smallest, so every series
+  // stays readable. Only for positive data — log can't plot zero/negatives.
+  let logScale = false;
+  if (!isPie && datasets.length > 1) {
+    const maxima = datasets
+      .map((d) => Math.max(...(d.data || []).map(Number).filter((v) => !Number.isNaN(v))))
+      .filter((m) => Number.isFinite(m) && m > 0);
+    const allPositive = datasets.every((d) =>
+      (d.data || []).every((v) => v == null || Number(v) > 0)
+    );
+    logScale =
+      allPositive && maxima.length > 1 && Math.max(...maxima) / Math.min(...maxima) >= 50;
+  }
+
   const options = {
     responsive: true,
     maintainAspectRatio: false,
@@ -149,7 +167,11 @@ function toChartConfig(spec) {
       ? {}
       : {
           x: { ticks: { color: "#94a3b8" }, grid: { color: "rgba(255,255,255,0.06)" } },
-          y: { ticks: { color: "#94a3b8" }, grid: { color: "rgba(255,255,255,0.06)" } },
+          y: {
+            type: logScale ? "logarithmic" : "linear",
+            ticks: { color: "#94a3b8" },
+            grid: { color: "rgba(255,255,255,0.06)" },
+          },
         },
   };
 

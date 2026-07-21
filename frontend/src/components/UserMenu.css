@@ -13,9 +13,9 @@
   width: 38px;
   height: 38px;
   border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  background: linear-gradient(135deg, #8b5cf6, #6366f1);
-  color: white;
+  border: 1px solid #3a3b42 ;
+  background: #26272e;
+  color: #f2f2f4;
   font-weight: 700;
   font-size: 0.9rem;
   letter-spacing: 0.02em;
@@ -23,8 +23,10 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 6px 18px -6px rgba(99, 102, 241, 0.6);
+
   transition: transform 0.15s ease;
+   transform: translateY(-6px);
+  ;
 }
 
 .usermenu-avatar:hover {
@@ -50,12 +52,13 @@
   right: 0;
   z-index: 61;
   width: 260px;
-  background: #0b1020;
+  background: #1a1b1f;
   border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 16px;
+  border-radius: 1px;
   box-shadow: 0 20px 50px -16px rgba(0, 0, 0, 0.7);
   padding: 1rem;
   color: #e2e8f0;
+  margin-top: 0.3rem;
 }
 
 .usermenu-id {
@@ -121,20 +124,21 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: rgba(255, 255, 255, 0.04);
+    background: rgba(139, 92, 246, 0.15); background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.1);
   color: #e2e8f0;
-  border-radius: 10px;
-  padding: 10px 12px;
+  border-radius: 1px;
+  padding: 10px 20px;
   font-family: inherit;
   font-size: 0.88rem;
   font-weight: 600;
   cursor: pointer;
   transition: background 0.15s ease;
+   margin-bottom: 8px; 
 }
 
 .usermenu-theme:hover {
-  background: rgba(139, 92, 246, 0.16);
+  background: #313238;
 }
 
 .usermenu-logout {

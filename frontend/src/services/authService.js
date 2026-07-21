@@ -139,6 +139,20 @@ export const authService = {
   },
 
   // Change password while logged in (requires current password).
+  // Confirm the current password is correct without changing anything (step 1
+  // of the two-step change-password flow).
+  async verifyPassword(currentPassword) {
+    const response = await fetch(`${API_BASE_URL}/api/auth/verify-password`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ currentPassword }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok)
+      throw new Error(data.message || "Could not verify password");
+    return data;
+  },
+
   async changePassword(currentPassword, newPassword) {
     const response = await fetch(`${API_BASE_URL}/api/auth/change-password`, {
       method: "POST",
@@ -494,6 +508,12 @@ export const documentService = {
   },
   // The document's original bytes as a Blob — powers the in-app preview and its
   // download button. The backend enforces access (own uploads + shared docs).
+  //
+  // Read via arrayBuffer() and wrap in a Blob ourselves: response.blob() routes
+  // through Chrome's browser-process blob registry, which flakily rejects larger
+  // cross-origin responses ("Failed to fetch" AFTER the full body has arrived —
+  // reproduced at 11 MB while streaming the same response succeeded). A Blob
+  // built from renderer memory sidesteps that path entirely.
   async downloadBlob(documentId) {
     const res = await fetch(
       `${API_BASE_URL}/api/documents/${documentId}/download`,
@@ -503,7 +523,59 @@ export const documentService = {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.message || "Could not load the document");
     }
-    return res.blob();
+    const buf = await res.arrayBuffer();
+    return new Blob([buf], {
+      type: res.headers.get("content-type") || "application/octet-stream",
+    });
+  },
+};
+
+// In-app "Updates" feed (the sidebar notifications panel). All endpoints are
+// scoped to the logged-in user server-side.
+export const updatesService = {
+  // { updates: [...], unread: N }
+  async list() {
+    return handle(
+      await fetch(`${API_BASE_URL}/api/updates`, { headers: authHeaders() }),
+    );
+  },
+  // Mark specific ids read, or ALL when ids is omitted. Returns { unread }.
+  async markRead(ids) {
+    return handle(
+      await fetch(`${API_BASE_URL}/api/updates/mark-read`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(ids ? { ids } : {}),
+      }),
+    );
+  },
+  // Remove one update. Returns { unread }.
+  async remove(id) {
+    return handle(
+      await fetch(`${API_BASE_URL}/api/updates/${id}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      }),
+    );
+  },
+  // Clear the whole feed.
+  async clearAll() {
+    return handle(
+      await fetch(`${API_BASE_URL}/api/updates/all`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      }),
+    );
+  },
+  // Record that an AI answer arrived while the user wasn't watching the chat.
+  async aiResponse(preview, conversationId) {
+    return handle(
+      await fetch(`${API_BASE_URL}/api/updates/ai-response`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ preview, conversation_id: conversationId || null }),
+      }),
+    );
   },
 };
 
