@@ -92,7 +92,7 @@ function UserMenu() {
 
             <div className="usermenu-sep" />
 
-            <button
+            {/* <button
               className="usermenu-theme"
               onClick={() => {
                 setOpen(false);
@@ -115,10 +115,10 @@ function UserMenu() {
             <button className="usermenu-theme" onClick={onToggleTheme}>
               <span>{theme === "dark" ? "🌙 Dark mode" : "☀️ Light mode"}</span>
               <span className={`theme-switch ${theme === "light" ? "on" : ""}`} />
-            </button>
+            </button> */}
 
             <button className="usermenu-logout" onClick={onLogout}>
-              ⎋ Log out
+               Log out
             </button>
           </div>
         </>
