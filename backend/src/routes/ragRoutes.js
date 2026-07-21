@@ -7,8 +7,8 @@ const crypto = require("crypto");
 const express = require("express");
 const multer = require("multer");
 const FormData = require("form-data");
-const fetch = require("node-fetch");
 
+const { ragFetch } = require("../utils/ragClient");
 const requireAuth = require("../middleware/requireAuth");
 const requirePermission = require("../middleware/requirePermission");
 const {
@@ -25,12 +25,14 @@ const {
   accessibleDocumentIds,
   findByFileName,
   findByContentHash,
+  findDocumentById,
   deleteAllForUser,
   listStoragePathsForUser,
 } = require("../models/documentModel");
 const {
   documentKey,
   generatedKey,
+  inferMimeType,
   putObject,
   getObject,
   removeObjects,
@@ -40,6 +42,7 @@ const { canRead, sendBuffer } = require("../services/documentDownload");
 const {
   createConversation,
   findConversation,
+  setConversationDocumentIds,
   listMessages,
   addMessage,
   deleteMessage,
@@ -48,8 +51,6 @@ const {
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
-
-const RAG_URL = process.env.RAG_SERVICE_URL || "http://localhost:8000";
 
 // ── POST /api/rag/chat ────────────────────────────────────────────────────────
 // Phase 3: persisted chat. Each turn lives in ai_conversations / ai_messages
@@ -61,6 +62,38 @@ const RAG_URL = process.env.RAG_SERVICE_URL || "http://localhost:8000";
 //   document_ids    — the docs the user chose for this answer (subset of accessible)
 //   source          — legacy single-file focus by file name
 const MAX_HISTORY_MESSAGES = 20;
+
+// Thread title from the first question: strip greeting/politeness lead-ins
+// ("hey, can you please show me the total revenue" → "Total revenue"), then
+// cap at a word boundary. Deterministic — no LLM call on every new thread —
+// but reads like a summary in the history list instead of a chat transcript.
+function makeConversationTitle(message) {
+  let t = String(message || "").replace(/\s+/g, " ").trim();
+  const fillers = [
+    /^(?:hi|hii+|hello|hey|yo|ok(?:ay)?|so|well|please|kindly)[,!.\s]+/i,
+    /^(?:can|could|would|will)\s+you\s+(?:please\s+)?/i,
+    /^please\s+/i,
+    /^(?:help\s+me\s+(?:to\s+)?|i\s+(?:want|need|would\s+like)\s+(?:you\s+)?to\s+|tell\s+me\s+|show\s+me\s+|give\s+me\s+)/i,
+  ];
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const re of fillers) {
+      const next = t.replace(re, "");
+      if (next !== t) {
+        t = next;
+        changed = true;
+      }
+    }
+  }
+  t = t.replace(/[?!.\s]+$/, "");
+  if (!t) t = String(message || "").trim(); // stripped everything → keep original
+  t = t.charAt(0).toUpperCase() + t.slice(1);
+  if (t.length > 60) {
+    const cut = t.lastIndexOf(" ", 60);
+    t = `${t.slice(0, cut > 30 ? cut : 60)}…`;
+  }
+  return t;
+}
 
 // Reduce a chronological message list to well-formed user→assistant exchanges.
 // A turn whose answer never got saved (the LLM/RAG call failed, or persisting the
@@ -175,7 +208,7 @@ router.post("/chat", requireAuth, requirePermission("USE_AI_ASSISTANT"), async (
       convo = await findConversation(conversation_id, req.user.id, orgId);
       if (!convo) return res.status(404).json({ message: "Conversation not found." });
     } else {
-      convo = await createConversation(orgId, req.user.id, message.slice(0, 80));
+      convo = await createConversation(orgId, req.user.id, makeConversationTitle(message));
     }
     const priorMessages = (await listMessages(convo.id))
       .filter((m) => m.sender_type === "USER" || m.sender_type === "AI")
@@ -223,18 +256,22 @@ router.post("/chat", requireAuth, requirePermission("USE_AI_ASSISTANT"), async (
     } else {
       let response;
       try {
-        response = await fetch(`${RAG_URL}/chat`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            message,
-            session_id: `user_${req.user.id}`,
-            history,
-            organization_id: orgId,
-            document_ids: documentIds,
-            focus_document_id: focusDocumentId,
-          }),
-        });
+        response = await ragFetch(
+          "/chat",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              message,
+              session_id: `user_${req.user.id}`,
+              history,
+              organization_id: orgId,
+              document_ids: documentIds,
+              focus_document_id: focusDocumentId,
+            }),
+          },
+          180000 // condense + retrieval + generation can legitimately take a while
+        );
       } catch (err) {
         await rollbackQuestion(); // RAG service unreachable
         throw err;
@@ -249,6 +286,14 @@ router.post("/chat", requireAuth, requirePermission("USE_AI_ASSISTANT"), async (
     }
 
     answered = true; // an answer was produced; keep the question in the thread
+
+    // Anchor the thread's document scope on its first explicitly-scoped answer
+    // (user's drawer pick or the preview's auto-match). Follow-up turns reuse
+    // this scope client-side, so the conversation stays about the same docs.
+    // Only-sets-when-NULL semantics live in the model; best-effort on purpose.
+    if (selected && documentIds.length > 0) {
+      setConversationDocumentIds(convo.id, documentIds).catch(() => {});
+    }
 
     // Persist the AI answer (the question was already saved above). Best-effort:
     // a storage hiccup must not eat the answer.
@@ -318,11 +363,15 @@ router.post("/chat/preview", requireAuth, requirePermission("USE_AI_ASSISTANT"),
     }
     if (documentIds.length === 0) return res.json({ documents: [] });
 
-    const response = await fetch(`${RAG_URL}/retrieve-preview`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, organization_id: orgId, document_ids: documentIds }),
-    });
+    const response = await ragFetch(
+      "/retrieve-preview",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message, organization_id: orgId, document_ids: documentIds }),
+      },
+      30000
+    );
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
       return res.status(response.status).json({ message: err.detail || "RAG service error" });
@@ -344,15 +393,19 @@ router.post("/visualize", requireAuth, async (req, res, next) => {
     // organization_id scopes the RAG service's filename -> storage_path lookup. `source`
     // is only a file name, which is ambiguous system-wide; without the org it could
     // resolve to a same-named document belonging to another tenant.
-    const response = await fetch(`${RAG_URL}/visualize`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        instruction,
-        source: source || null,
-        organization_id: req.user.organization_id,
-      }),
-    });
+    const response = await ragFetch(
+      "/visualize",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          instruction,
+          source: source || null,
+          organization_id: req.user.organization_id,
+        }),
+      },
+      120000
+    );
 
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
@@ -372,6 +425,11 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
     const orgId = req.user.organization_id;
     const filename = req.file.originalname;
     const overwrite = req.body?.overwrite === "true";
+    // Clients don't reliably send a real content type (curl and some browsers say
+    // octet-stream for everything); resolve it from the extension once and use it
+    // everywhere below — the bucket may enforce a MIME whitelist, and downloads
+    // echo this value back as the response Content-Type.
+    const mimeType = inferMimeType(filename, req.file.mimetype);
 
     // 0) Content-hash dedup: identical file BYTES already in this org under a
     //    DIFFERENT name → refuse, so the same data can't be double-counted. A
@@ -420,7 +478,7 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
     //    overwrites in place instead of stacking a second copy.
     const documentId = existing ? existing.id : crypto.randomUUID();
     const storagePath = documentKey(orgId, documentId, filename);
-    await putObject(storagePath, req.file.buffer, req.file.mimetype);
+    await putObject(storagePath, req.file.buffer, mimeType);
 
     // 3) Register (or reset) the document row.
     let doc = existing;
@@ -428,7 +486,7 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
       // Reuse the row: the RAG service clears this document_id's old chunks/tables
       // before re-indexing, so the content is replaced in place.
       await resetDocumentForReupload(existing.id, {
-        mimeType: req.file.mimetype,
+        mimeType,
         fileSize: req.file.size,
         contentHash,
         storagePath,
@@ -438,32 +496,38 @@ router.post("/upload", requireAuth, upload.single("file"), async (req, res, next
         id: documentId,
         fileName: filename,
         storagePath,
-        mimeType: req.file.mimetype,
+        mimeType,
         fileSize: req.file.size,
         contentHash,
       });
     }
 
-    // 4) Send the file to the RAG service to embed into Supabase (document_chunks
-    //    + document_tables) under this document_id. It gets the bytes directly — it
-    //    has no reason to re-fetch what we already hold in memory.
+    // 4) Send the file to the RAG service (it gets the bytes directly — no reason
+    //    to re-fetch what we already hold in memory). Indexing runs as a
+    //    BACKGROUND job there — this returns as soon as the bytes are spooled and
+    //    the job queued. The RAG service owns documents.status from here
+    //    (PROCESSING → PROCESSED/FAILED); poll GET /api/rag/index-status/:documentId
+    //    or the documents list to see it land.
     const form = new FormData();
-    form.append("file", req.file.buffer, { filename, contentType: req.file.mimetype });
+    form.append("file", req.file.buffer, { filename, contentType: mimeType });
     form.append("document_id", doc.id);
     form.append("organization_id", orgId);
 
-    const response = await fetch(`${RAG_URL}/index`, {
-      method: "POST",
-      body: form,
-      headers: form.getHeaders(),
-    });
+    const response = await ragFetch(
+      "/index",
+      { method: "POST", body: form, headers: form.getHeaders() },
+      60000 // just save + enqueue; the heavy work happens in the background job
+    );
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
       // Row stays PROCESSING; the file can be re-indexed later.
       return res.status(response.status).json({ message: err.detail || "Indexing failed" });
     }
     const data = await response.json();
-    await setDocumentStatus(doc.id, "PROCESSED");
+    if (data.chunks != null) {
+      // Older RAG service that still indexes synchronously.
+      await setDocumentStatus(doc.id, "PROCESSED");
+    }
     // No document_access self-grant: the uploader can already see their own
     // documents via uploaded_by_user_id, and a grant row would (wrongly) show
     // them in the document's "Shared with" list.
@@ -542,11 +606,15 @@ router.post("/ingest", requireAuth, requirePermission("USE_AI_ASSISTANT"), async
       });
     }
 
-    const response = await fetch(`${RAG_URL}/ingest`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ filename, document_id: doc.id, organization_id: orgId }),
-    });
+    const response = await ragFetch(
+      "/ingest",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename, document_id: doc.id, organization_id: orgId }),
+      },
+      300000 // synchronous parse + embed (+ per-table LLM summaries)
+    );
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
       return res.status(response.status).json({ message: err.detail || "Ingest failed" });
@@ -555,6 +623,33 @@ router.post("/ingest", requireAuth, requirePermission("USE_AI_ASSISTANT"), async
     await setDocumentStatus(doc.id, "PROCESSED");
 
     return res.json({ document_id: doc.id, ...data });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// ── GET /api/rag/index-status/:documentId ─────────────────────────────────────
+// Indexing progress for a document ('processing' | 'done' | 'failed' |
+// 'unknown' after a RAG-service restart — fall back to the documents list's
+// status column in that case). Org-checked so users can't probe other tenants.
+router.get("/index-status/:documentId", requireAuth, async (req, res, next) => {
+  try {
+    const doc = await findDocumentById(req.params.documentId);
+    if (!doc || doc.organization_id !== req.user.organization_id) {
+      return res.status(404).json({ message: "Document not found." });
+    }
+    const response = await ragFetch(
+      `/index-status/${encodeURIComponent(req.params.documentId)}`,
+      {},
+      10000
+    );
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      return res.status(response.status).json({ message: err.detail || "RAG service error" });
+    }
+    const data = await response.json();
+    // documents.status is authoritative once the job record is gone (restart).
+    return res.json({ ...data, document_status: doc.status });
   } catch (err) {
     return next(err);
   }
@@ -572,7 +667,13 @@ router.delete("/documents", requireAuth, async (req, res, next) => {
     // way left to find their objects, and the bucket would silently fill with orphans.
     const keys = await listStoragePathsForUser(req.user.id, orgId).catch(() => []);
 
-    const response = await fetch(`${RAG_URL}/documents`, { method: "DELETE" });
+    // The RAG service only drops its local file cache + chat history here; the
+    // durable copies (bucket objects, rows) are removed below.
+    const response = await ragFetch(
+      `/documents?organization_id=${encodeURIComponent(orgId)}`,
+      { method: "DELETE" },
+      30000
+    );
     const data = await response.json();
     await clearAllForUser(req.user.id);
     await deleteAllForUser(req.user.id, orgId).catch(() => {});

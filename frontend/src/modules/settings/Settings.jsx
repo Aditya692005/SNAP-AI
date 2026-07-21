@@ -7,7 +7,7 @@ import { passwordProblems } from "../../utils/password";
 import { initials, roleLabel } from "../../utils/user";
 import "./Settings.css";
 
-const TABS = ["profile", "appearance", "security"];
+const TABS = ["profile", "security"];
 
 const THEME_OPTIONS = [
   { value: "system", icon: "🖥️", label: "System", hint: "Follow your OS setting" },
@@ -27,7 +27,8 @@ function Settings() {
   // link straight to /settings?tab=security. Sidebar highlights on pathname alone,
   // so the query string doesn't disturb it.
   const [params, setParams] = useSearchParams();
-  const tab = TABS.includes(params.get("tab")) ? params.get("tab") : "profile";
+  const rawTab = params.get("tab");
+  const tab = TABS.includes(rawTab) ? rawTab : "profile";
   const setTab = (next) => setParams(next === "profile" ? {} : { tab: next }, { replace: true });
 
   const [user, setUser] = useState(authService.getUser());
@@ -42,8 +43,11 @@ function Settings() {
   // Appearance tab
   const [themePref, setThemePref] = useState(getThemePreference());
 
-  // Security tab
+  // Security tab. The new-password fields stay hidden until the user has entered
+  // their current password and confirmed it with "Continue".
   const [pw, setPw] = useState({ current: "", next: "", confirm: "" });
+  const [pwUnlocked, setPwUnlocked] = useState(false);
+  const [verifyingPw, setVerifyingPw] = useState(false);
   const [savingPw, setSavingPw] = useState(false);
 
   const pwProblems = passwordProblems(pw.next);
@@ -59,8 +63,11 @@ function Settings() {
     });
     organizationService
       .get()
-      .then((o) => alive && setOrg(o))
-      .catch(() => {}); // org name is decoration; a failure shouldn't break the page
+      .then((o) => {
+        if (!alive) return;
+        setOrg(o);
+      })
+      .catch(() => {});
     return () => {
       alive = false;
     };
@@ -97,6 +104,23 @@ function Settings() {
     setThemePref(pref);
   }
 
+  // Step 1: the new-password fields unlock only once the CURRENT password is
+  // verified correct against the server.
+  async function continueToNewPassword(e) {
+    e.preventDefault();
+    setError("");
+    if (!pw.current) return setError("Enter your current password");
+    setVerifyingPw(true);
+    try {
+      await authService.verifyPassword(pw.current);
+      setPwUnlocked(true);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setVerifyingPw(false);
+    }
+  }
+
   async function savePassword(e) {
     e.preventDefault();
     setError("");
@@ -111,6 +135,7 @@ function Settings() {
     try {
       await authService.changePassword(pw.current, pw.next);
       setPw({ current: "", next: "", confirm: "" });
+      setPwUnlocked(false);
       setNotice("Password changed");
     } catch (err) {
       setError(err.message);
@@ -135,9 +160,6 @@ function Settings() {
           <div className="settings-tabs">
             <button className={tab === "profile" ? "active" : ""} onClick={() => setTab("profile")}>
               Profile
-            </button>
-            <button className={tab === "appearance" ? "active" : ""} onClick={() => setTab("appearance")}>
-              Appearance
             </button>
             <button className={tab === "security" ? "active" : ""} onClick={() => setTab("security")}>
               Security
@@ -227,14 +249,12 @@ function Settings() {
             <p className="settings-hint">
               Your role and department are set by a company admin. Ask them if either looks wrong.
             </p>
-          </div>
-        )}
 
-        {/* ── APPEARANCE ────────────────────────────────────────── */}
-        {tab === "appearance" && (
-          <div className="settings-panel">
-            <h2 className="settings-panel-title">Theme</h2>
-            <p className="settings-hint">Applies to this browser only.</p>
+            <div className="settings-sep" />
+
+            {/* Appearance lives here now — it's a personal preference like the rest. */}
+            <h2 className="settings-panel-title">Appearance</h2>
+            <p className="settings-hint">Theme applies to this browser only.</p>
             <div className="settings-themes">
               {THEME_OPTIONS.map((opt) => (
                 <button
@@ -257,7 +277,10 @@ function Settings() {
         {tab === "security" && (
           <div className="settings-panel">
             <h2 className="settings-panel-title">Change password</h2>
-            <form className="settings-form" onSubmit={savePassword}>
+            <form
+              className="settings-form"
+              onSubmit={pwUnlocked ? savePassword : continueToNewPassword}
+            >
               <label htmlFor="pw-current">Current password</label>
               <input
                 id="pw-current"
@@ -268,45 +291,64 @@ function Settings() {
                   setPw((p) => ({ ...p, current: e.target.value }));
                   setError("");
                 }}
-                disabled={savingPw}
+                disabled={savingPw || verifyingPw || pwUnlocked}
               />
+              {pwUnlocked && <p className="settings-hint">✓ Current password confirmed.</p>}
 
-              <label htmlFor="pw-next">New password</label>
-              <input
-                id="pw-next"
-                type="password"
-                autoComplete="new-password"
-                value={pw.next}
-                onChange={(e) => {
-                  setPw((p) => ({ ...p, next: e.target.value }));
-                  setError("");
-                }}
-                disabled={savingPw}
-              />
-              {pw.next && pwProblems.length > 0 && (
-                <ul className="settings-reqs">
-                  {pwProblems.map((r) => (
-                    <li key={r}>{r}</li>
-                  ))}
-                </ul>
+              {!pwUnlocked ? (
+                <>
+                  <p className="settings-hint">
+                    Enter your current password to continue, then choose a new one.
+                  </p>
+                  <button
+                    type="submit"
+                    className="settings-save"
+                    disabled={!pw.current || verifyingPw}
+                  >
+                    {verifyingPw ? "Verifying…" : "Continue"}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <label htmlFor="pw-next">New password</label>
+                  <input
+                    id="pw-next"
+                    type="password"
+                    autoComplete="new-password"
+                    value={pw.next}
+                    onChange={(e) => {
+                      setPw((p) => ({ ...p, next: e.target.value }));
+                      setError("");
+                    }}
+                    disabled={savingPw}
+                    autoFocus
+                  />
+                  {pw.next && pwProblems.length > 0 && (
+                    <ul className="settings-reqs">
+                      {pwProblems.map((r) => (
+                        <li key={r}>{r}</li>
+                      ))}
+                    </ul>
+                  )}
+
+                  <label htmlFor="pw-confirm">Confirm new password</label>
+                  <input
+                    id="pw-confirm"
+                    type="password"
+                    autoComplete="new-password"
+                    value={pw.confirm}
+                    onChange={(e) => {
+                      setPw((p) => ({ ...p, confirm: e.target.value }));
+                      setError("");
+                    }}
+                    disabled={savingPw}
+                  />
+
+                  <button type="submit" className="settings-save" disabled={savingPw}>
+                    {savingPw ? "Updating…" : "Change password"}
+                  </button>
+                </>
               )}
-
-              <label htmlFor="pw-confirm">Confirm new password</label>
-              <input
-                id="pw-confirm"
-                type="password"
-                autoComplete="new-password"
-                value={pw.confirm}
-                onChange={(e) => {
-                  setPw((p) => ({ ...p, confirm: e.target.value }));
-                  setError("");
-                }}
-                disabled={savingPw}
-              />
-
-              <button type="submit" className="settings-save" disabled={savingPw}>
-                {savingPw ? "Updating…" : "Change password"}
-              </button>
             </form>
 
             <div className="settings-sep" />

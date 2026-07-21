@@ -4,7 +4,8 @@ import remarkGfm from "remark-gfm";
 import AppShell from "../../components/AppShell";
 import ToastStack from "../../components/Toast";
 import ChartBlock from "./ChartBlock";
-import { authService } from "../../services/authService";
+import { authService, updatesService } from "../../services/authService";
+import { previewKind, parseCsv } from "../../utils/filePreview";
 import "./AIAssistant.css";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
@@ -63,12 +64,26 @@ function AIAssistant() {
   const [showDocs, setShowDocs] = useState(false);
   // Docs the user picked for the AI to answer from (empty = search everything).
   const [selectedDocIds, setSelectedDocIds] = useState([]);
+  // The thread's established document scope (persisted on ai_conversations).
+  // Once the first answer is grounded on specific docs, follow-ups stay scoped
+  // to them — a normal conversation doesn't change subject mid-thread. Manual
+  // drawer picks (selectedDocIds) always take precedence over this.
+  const [conversationDocIds, setConversationDocIds] = useState([]);
+  // The scope banner announces itself for 30s (with a countdown line) then
+  // gets out of the way — the scope itself stays active, and any scope change
+  // brings the banner back for another 30s.
+  const [bannerVisible, setBannerVisible] = useState(false);
   // Persisted chat threads (Phase 3).
   const [conversationId, setConversationId] = useState(null);
   const [conversations, setConversations] = useState([]);
   const [showHistory, setShowHistory] = useState(false);
+  const [historyQuery, setHistoryQuery] = useState(""); // filter for the history drawer
   // Transient popup notifications (auto-dismiss after a few seconds).
   const [toasts, setToasts] = useState([]);
+  // Sources side panel: { citations: [...], sources: [...] } for one answer.
+  const [sourcesPanel, setSourcesPanel] = useState(null);
+  // Citation preview modal: { name, loading, url?, kind?, text?, rows?, error? }
+  const [citeViewer, setCiteViewer] = useState(null);
   // "Pin to dashboard" picker: { spec, aiMessageId, dashboards } while choosing.
   const [pinPicker, setPinPicker] = useState(null);
   const [pinningTo, setPinningTo] = useState(null); // dashboard id being pinned to
@@ -76,6 +91,9 @@ function AIAssistant() {
   const bottomRef = useRef(null);
   const fileRef = useRef(null);
   const toastIdRef = useRef(0);
+  // Pending background-index poll timers, so we can cancel them on a new upload
+  // or on unmount instead of leaking fetches after the user navigates away.
+  const pollTimersRef = useRef([]);
 
   function notify(text, type = "success") {
     const id = ++toastIdRef.current;
@@ -93,11 +111,32 @@ function AIAssistant() {
     // Restore the conversation the user last had open (survives navigation).
     const saved = localStorage.getItem(ACTIVE_CONVO_KEY);
     if (saved) loadConversation(saved, { silent: true });
+    // Cancel any pending background-index poll timers on unmount.
+    return () => pollTimersRef.current.forEach(clearTimeout);
   }, []);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Show the scope banner for 8s whenever the active scope changes, then hide
+  // it (the scope stays in force — the banner is just the announcement).
+  const activeScopeKey = (selectedDocIds.length > 0 ? selectedDocIds : conversationDocIds).join(",");
+  useEffect(() => {
+    if (!activeScopeKey) {
+      setBannerVisible(false);
+      return;
+    }
+    setBannerVisible(true);
+    const t = setTimeout(() => setBannerVisible(false), 8000);
+    return () => clearTimeout(t);
+  }, [activeScopeKey]);
+
+  // History drawer filter — match on the thread title.
+  const historyQ = historyQuery.trim().toLowerCase();
+  const shownConversations = historyQ
+    ? conversations.filter((c) => (c.title || "Untitled").toLowerCase().includes(historyQ))
+    : conversations;
 
   // Documents the user can access (uploaded/processed), from Supabase.
   async function fetchDocs() {
@@ -158,6 +197,7 @@ function AIAssistant() {
         );
       setMessages([GREETING, ...mapped]);
       setConversationId(id);
+      setConversationDocIds(data.conversation?.document_ids || []);
       localStorage.setItem(ACTIVE_CONVO_KEY, id);
       setShowHistory(false);
     } catch (err) {
@@ -187,6 +227,7 @@ function AIAssistant() {
 
   function newChat() {
     setConversationId(null);
+    setConversationDocIds([]);
     setMessages([GREETING]);
     setShowHistory(false);
     localStorage.removeItem(ACTIVE_CONVO_KEY);
@@ -212,6 +253,7 @@ function AIAssistant() {
       }
       setDocList((prev) => prev.filter((x) => x.id !== d.id));
       setSelectedDocIds((prev) => prev.filter((id) => id !== d.id));
+      setConversationDocIds((prev) => prev.filter((id) => id !== d.id));
       notify(`Removed "${d.file_name}" from the AI, database, and dashboard.`);
     } catch (err) {
       notify(err.message, "error");
@@ -243,6 +285,16 @@ function AIAssistant() {
     // these requests skip narrowing and use everything the user can access.
     if (wantsAggregate(text)) {
       await askAI(text, undefined);
+      return;
+    }
+
+    // Follow-up in a thread that already has an established document scope:
+    // keep talking about the same docs instead of re-guessing per message.
+    // Without this, "compare it to Q3" could silently re-match a different
+    // document mid-conversation. Aggregate requests were already sent broad
+    // above; manual drawer picks (the first guard) always win over this.
+    if (conversationId && conversationDocIds.length > 0) {
+      await askAI(text, conversationDocIds);
       return;
     }
 
@@ -333,6 +385,11 @@ function AIAssistant() {
       if (data.conversation_id) {
         localStorage.setItem(ACTIVE_CONVO_KEY, data.conversation_id);
       }
+      // A scoped answer anchors the thread to its documents (the backend
+      // persists the same set on ai_conversations) — follow-ups reuse it.
+      if (documentIds?.length && conversationDocIds.length === 0) {
+        setConversationDocIds(documentIds);
+      }
       setMessages((prev) => [
         ...prev,
         {
@@ -347,6 +404,17 @@ function AIAssistant() {
           metric: data.metric || undefined, // present when the prompt asked to track a metric
         },
       ]);
+
+      // If the answer arrived while the user had switched away (tab hidden),
+      // drop it in the Updates feed so they notice it — then nudge the feed to
+      // refresh so the badge/popup show up promptly.
+      if (typeof document !== "undefined" && document.hidden) {
+        const preview = String(data.answer || "").replace(/\s+/g, " ").trim().slice(0, 160);
+        updatesService
+          .aiResponse(preview, data.conversation_id)
+          .then(() => window.dispatchEvent(new Event("snap:updates-refresh")))
+          .catch(() => {});
+      }
     } catch (err) {
       setMessages((prev) => [
         ...prev,
@@ -468,7 +536,14 @@ function AIAssistant() {
     for (const file of files) {
       try {
         const data = await uploadResolvingDuplicates(file);
-        succeeded.push({ filename: data.filename, chunks: data.chunks, documentId: data.document_id });
+        succeeded.push({
+          filename: data.filename,
+          chunks: data.chunks,
+          // Indexing now runs in the background on the RAG service; the doc
+          // shows as "processing" in the sidebar until it flips to ready.
+          processing: data.status === "processing",
+          documentId: data.document_id,
+        });
       } catch (err) {
         if (err.message !== "upload cancelled") {
           failed.push({ filename: file.name, error: err.message });
@@ -486,11 +561,13 @@ function AIAssistant() {
 
     if (succeeded.length === 1 && failed.length === 0) {
       notify(
-        `Indexed "${succeeded[0].filename}" (${succeeded[0].chunks} chunks) — selected for this chat.`
+        succeeded[0].processing
+          ? `Uploaded "${succeeded[0].filename}" — indexing in the background; it'll be ready to query in a moment.`
+          : `Indexed "${succeeded[0].filename}" (${succeeded[0].chunks} chunks) — selected for this chat.`
       );
     } else if (succeeded.length > 0) {
       notify(
-        `Indexed ${succeeded.length} documents:\n${succeeded
+        `Uploaded ${succeeded.length} documents (indexing in the background):\n${succeeded
           .map((s) => s.filename)
           .join(", ")}`
       );
@@ -505,6 +582,15 @@ function AIAssistant() {
     }
 
     fetchDocs();
+    // Background indexing: refresh again so "processing" flips to ready without a
+    // manual reload. Cancel any prior batch first, and track the timers so the
+    // unmount effect can clear them (no fetches fire after navigating away).
+    pollTimersRef.current.forEach(clearTimeout);
+    if (succeeded.some((s) => s.processing)) {
+      pollTimersRef.current = [5000, 15000, 45000].map((ms) => setTimeout(fetchDocs, ms));
+    } else {
+      pollTimersRef.current = [];
+    }
     setUploading(false);
     setUploadProgress(null);
     e.target.value = "";
@@ -698,17 +784,60 @@ function AIAssistant() {
   }
 
   // ── download a cited source document ────────────────────────────────────────
+  // Fetch a source's bytes. arrayBuffer + Blob (not response.blob()) — Chrome's
+  // blob registry flakily rejects larger cross-origin responses (see
+  // documentService.downloadBlob for the full story).
+  async function fetchSourceBlob(filename) {
+    const res = await fetch(
+      `${API_BASE}/api/rag/download/${encodeURIComponent(filename)}`,
+      { headers: authHeaders() }
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || "Download failed");
+    }
+    const buf = await res.arrayBuffer();
+    return new Blob([buf], {
+      type: res.headers.get("content-type") || "application/octet-stream",
+    });
+  }
+
+  // Preview a cited source in a modal — same pdf/text/csv rendering as the
+  // Documents page (shared classes from Documents.css; helpers from utils).
+  async function openCitePreview(filename) {
+    setCiteViewer({ name: filename, loading: true });
+    try {
+      const blob = await fetchSourceBlob(filename);
+      const kind = previewKind(filename);
+      const typed = kind === "pdf" ? new Blob([blob], { type: "application/pdf" }) : blob;
+      const url = URL.createObjectURL(typed);
+      const next = { name: filename, loading: false, url, kind };
+      if (kind === "text") next.text = await blob.text();
+      if (kind === "csv") next.rows = parseCsv(await blob.text());
+      setCiteViewer((v) => {
+        if (!v || v.name !== filename) {
+          URL.revokeObjectURL(url); // closed (or switched) while loading
+          return v;
+        }
+        return next;
+      });
+    } catch (err) {
+      setCiteViewer((v) =>
+        v && v.name === filename ? { name: filename, loading: false, error: err.message } : v
+      );
+    }
+  }
+
+  function closeCitePreview() {
+    setCiteViewer((v) => {
+      if (v?.url) URL.revokeObjectURL(v.url);
+      return null;
+    });
+  }
+
   async function downloadSource(filename) {
     try {
-      const res = await fetch(
-        `${API_BASE}/api/rag/download/${encodeURIComponent(filename)}`,
-        { headers: authHeaders() }
-      );
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.message || "Download failed");
-      }
-      const blob = await res.blob();
+      const blob = await fetchSourceBlob(filename);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -825,33 +954,63 @@ function AIAssistant() {
           </div>
         </div>
 
-        {/* Selected-documents banner — confirms which docs answers will use */}
-        {selectedDocIds.length > 0 && (
-          <div className="focus-banner">
+        {/* Scope banner — confirms which docs answers will use. Manual drawer
+            picks win; otherwise the thread's established conversation scope.
+            Auto-hides after 8s (countdown line below); ✕ dismisses early. */}
+        {bannerVisible && (selectedDocIds.length > 0 || conversationDocIds.length > 0) && (
+          <div className="focus-banner" key={activeScopeKey}>
             <span>
-              🎯 Answering from{" "}
+              🎯 {selectedDocIds.length > 0 ? "Answering from" : "Conversation about"}{" "}
               <strong>
-                {docList
-                  .filter((d) => selectedDocIds.includes(d.id))
-                  .map((d) => d.file_name)
-                  .join(", ") || `${selectedDocIds.length} selected document(s)`}
+                {(() => {
+                  const ids = selectedDocIds.length > 0 ? selectedDocIds : conversationDocIds;
+                  return (
+                    docList
+                      .filter((d) => ids.includes(d.id))
+                      .map((d) => d.file_name)
+                      .join(", ") || `${ids.length} document(s)`
+                  );
+                })()}
               </strong>
             </span>
+            {selectedDocIds.length === 0 && (
+              <button
+                type="button"
+                className="focus-clear"
+                onClick={() => setShowDocs(true)}
+                title="Pick different documents for this conversation"
+              >
+                Change
+              </button>
+            )}
             <button
               type="button"
               className="focus-clear"
-              onClick={() => setSelectedDocIds([])}
-              title="Clear selection (search all documents)"
+              onClick={() => {
+                setSelectedDocIds([]);
+                setConversationDocIds([]);
+              }}
+              title="Clear scope (search all documents)"
             >
-              ✕ Clear
+              Clear
             </button>
+            <button
+              type="button"
+              className="focus-clear"
+              onClick={() => setBannerVisible(false)}
+              title="Dismiss (the scope stays active)"
+              aria-label="Dismiss"
+            >
+              ✕
+            </button>
+            <div className="focus-banner-timer" aria-hidden="true" />
           </div>
         )}
 
         {/* Messages */}
         <div className="chat-messages">
           {messages.map((msg, i) => (
-            <div key={i} className={`chat-bubble ${msg.role} ${msg.error ? "error" : ""}`}>
+            <div key={msg.id ?? `m-${i}`} className={`chat-bubble ${msg.role} ${msg.error ? "error" : ""}`}>
               {msg.picker ? (
                 <div className="doc-picker">
                   <div className="doc-picker-title">
@@ -964,47 +1123,26 @@ function AIAssistant() {
                   </div>
                 </div>
               )}
-              {msg.citations?.length > 0 ? (
+              {(msg.citations?.length > 0 || msg.sources?.length > 0) && (
                 <div className="bubble-sources">
-                  Cited from:{" "}
-                  {dedupeCitations(msg.citations).map((c, i) => {
-                    const name = c.file_name || "source";
-                    const pct = c.similarity != null ? Math.round(c.similarity * 100) : null;
-                    const span =
-                      c.char_start != null && c.char_end != null
-                        ? ` · chars ${c.char_start}–${c.char_end}`
-                        : "";
-                    return (
-                      <button
-                        key={`${name}-${c.page ?? ""}-${i}`}
-                        type="button"
-                        className="source-chip"
-                        onClick={() => c.file_name && downloadSource(c.file_name)}
-                        title={`${pct != null ? `Relevance ${pct}%` : ""}${span} — click to open the source`}
-                      >
-                        📄 {name}
-                        {c.page != null ? ` · p.${c.page}` : ""}
-                      </button>
-                    );
-                  })}
+                  <button
+                    type="button"
+                    className="source-chip sources-open"
+                    onClick={() =>
+                      setSourcesPanel({
+                        citations: dedupeCitations(msg.citations || []),
+                        sources: msg.sources || [],
+                      })
+                    }
+                    title="Show the sources this answer was grounded on"
+                  >
+                    Sources (
+                    {msg.citations?.length > 0
+                      ? dedupeCitations(msg.citations).length
+                      : msg.sources.length}
+                    )
+                  </button>
                 </div>
-              ) : (
-                msg.sources?.length > 0 && (
-                  <div className="bubble-sources">
-                    Sources:{" "}
-                    {msg.sources.map((s) => (
-                      <button
-                        key={s}
-                        type="button"
-                        className="source-chip"
-                        onClick={() => downloadSource(s)}
-                        title={`Download ${s}`}
-                      >
-                        ⬇ {s}
-                      </button>
-                    ))}
-                  </div>
-                )
               )}
             </div>
           ))}
@@ -1130,11 +1268,24 @@ function AIAssistant() {
           </button>
         </div>
 
+        {conversations.length > 0 && (
+          <input
+            type="search"
+            className="drawer-search"
+            placeholder="Search conversations…"
+            value={historyQuery}
+            onChange={(e) => setHistoryQuery(e.target.value)}
+            aria-label="Search conversations"
+          />
+        )}
+
         {conversations.length === 0 ? (
           <div className="docs-empty">No conversations yet — say hi!</div>
+        ) : shownConversations.length === 0 ? (
+          <div className="docs-empty">No conversations match "{historyQuery}".</div>
         ) : (
           <div className="docs-drawer-list">
-            {conversations.map((c) => (
+            {shownConversations.map((c) => (
               <div key={c.id} className="docs-drawer-row">
                 <button
                   type="button"
@@ -1163,6 +1314,159 @@ function AIAssistant() {
           </div>
         )}
       </aside>
+
+      {/* Sources panel — the citations behind one answer, previewable and
+          downloadable like the Documents page. */}
+      <aside className={`docs-drawer ${sourcesPanel ? "open" : ""}`} aria-hidden={!sourcesPanel}>
+        <div className="docs-drawer-header">
+          <div>
+            <h2>Sources</h2>
+            <span className="docs-drawer-hint">
+              What this answer was grounded on — click a source to preview it.
+            </span>
+          </div>
+          <button
+            className="docs-drawer-close"
+            onClick={() => setSourcesPanel(null)}
+            title="Close"
+            aria-label="Close sources"
+          >
+            ✕
+          </button>
+        </div>
+        {sourcesPanel && (
+          <div className="docs-drawer-list">
+            {sourcesPanel.citations.length > 0
+              ? sourcesPanel.citations.map((c, i) => {
+                  const name = c.file_name || "source";
+                  const pct = c.similarity != null ? Math.round(c.similarity * 100) : null;
+                  return (
+                    <div key={`${name}-${c.page ?? ""}-${i}`} className="docs-drawer-row">
+                      <button
+                        type="button"
+                        className="docs-drawer-item"
+                        onClick={() => c.file_name && openCitePreview(c.file_name)}
+                        title={`Preview ${name}`}
+                      >
+                        <span className="docs-item-name">📄 {name}</span>
+                        <span className="convs-item-date">
+                          {c.page != null ? `p.${c.page}` : ""}
+                          {pct != null ? `${c.page != null ? " · " : ""}${pct}% match` : ""}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        className="docs-item-remove"
+                        onClick={() => c.file_name && downloadSource(c.file_name)}
+                        title={`Download ${name}`}
+                      >
+                        ⬇
+                      </button>
+                    </div>
+                  );
+                })
+              : sourcesPanel.sources.map((s) => (
+                  <div key={s} className="docs-drawer-row">
+                    <button
+                      type="button"
+                      className="docs-drawer-item"
+                      onClick={() => openCitePreview(s)}
+                      title={`Preview ${s}`}
+                    >
+                      <span className="docs-item-name">📄 {s}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="docs-item-remove"
+                      onClick={() => downloadSource(s)}
+                      title={`Download ${s}`}
+                    >
+                      ⬇
+                    </button>
+                  </div>
+                ))}
+          </div>
+        )}
+      </aside>
+
+      {/* Citation preview — pdf/text/csv modal, same classes as the Documents
+          page viewer (Documents.css is in the global bundle). */}
+      {citeViewer && (
+        <>
+          <div className="viewer-overlay" onClick={closeCitePreview} />
+          <div className="viewer-modal" role="dialog" aria-label={`Preview of ${citeViewer.name}`}>
+            <div className="viewer-header">
+              <span className="viewer-title" title={citeViewer.name}>
+                {citeViewer.name}
+              </span>
+              <div className="viewer-actions">
+                <button
+                  type="button"
+                  className="viewer-btn"
+                  onClick={() => downloadSource(citeViewer.name)}
+                  title="Download"
+                  aria-label="Download"
+                >
+                  ⬇
+                </button>
+                <button
+                  type="button"
+                  className="viewer-btn"
+                  onClick={closeCitePreview}
+                  title="Close"
+                  aria-label="Close preview"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+            <div className="viewer-body">
+              {citeViewer.loading ? (
+                <p className="viewer-msg">Loading…</p>
+              ) : citeViewer.error ? (
+                <p className="viewer-msg viewer-error">❌ {citeViewer.error}</p>
+              ) : citeViewer.kind === "pdf" ? (
+                <iframe className="viewer-frame" src={citeViewer.url} title={citeViewer.name} />
+              ) : citeViewer.kind === "text" ? (
+                <pre className="viewer-pre">{citeViewer.text}</pre>
+              ) : citeViewer.kind === "csv" && citeViewer.rows?.length > 0 ? (
+                <div className="viewer-table-wrap">
+                  <table className="viewer-table">
+                    <thead>
+                      <tr>
+                        {citeViewer.rows[0].map((h, i) => (
+                          <th key={i}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {citeViewer.rows.slice(1).map((r, i) => (
+                        <tr key={i}>
+                          {r.map((c, j) => (
+                            <td key={j}>{c}</td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="viewer-fallback">
+                  <span className="viewer-fallback-icon">📄</span>
+                  <p>No in-browser preview for this file type.</p>
+                  <button
+                    type="button"
+                    className="viewer-download-btn"
+                    onClick={() => downloadSource(citeViewer.name)}
+                  >
+                    ⬇ Download {citeViewer.name}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </>
+      )}
 
       {/* Pin-to-dashboard picker — shown when the user has more than one dashboard */}
       {pinPicker && (

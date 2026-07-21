@@ -37,10 +37,38 @@ function generatedKey(organizationId, fileName) {
   return `generated/${organizationId}/${safeName(fileName)}`;
 }
 
+// The bucket may be configured with an allowed-MIME whitelist, and clients don't
+// reliably send a real type — curl and some browsers hand every file over as
+// application/octet-stream, which such a bucket rejects (415). The extension is
+// what our parsers trust anyway, so infer the type from it whenever the client's
+// type is missing or generic.
+const _MIME_BY_EXT = {
+  ".pdf": "application/pdf",
+  ".csv": "text/csv",
+  ".txt": "text/plain",
+  ".md": "text/markdown",
+  ".json": "application/json",
+  ".doc": "application/msword",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".xls": "application/vnd.ms-excel",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".ppt": "application/vnd.ms-powerpoint",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+};
+
+function inferMimeType(fileName, provided) {
+  if (provided && provided !== "application/octet-stream") return provided;
+  const m = /\.[^.]+$/.exec(String(fileName || "").toLowerCase());
+  return (m && _MIME_BY_EXT[m[0]]) || provided || "application/octet-stream";
+}
+
 async function putObject(key, buffer, contentType) {
   const { error } = await supabaseAdmin.storage
     .from(BUCKET)
-    .upload(key, buffer, { contentType: contentType || "application/octet-stream", upsert: true });
+    .upload(key, buffer, {
+      contentType: inferMimeType(key, contentType),
+      upsert: true,
+    });
   if (error) throw error;
   return key;
 }
@@ -90,6 +118,7 @@ module.exports = {
   BUCKET,
   documentKey,
   generatedKey,
+  inferMimeType,
   putObject,
   getObject,
   objectExists,

@@ -143,6 +143,36 @@
   color: #4ade80;
 }
 
+/* Processed docs show just a tick — compact, no "Ready" text */
+.status.ready-tick {
+  min-width: 0;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+/* Search field in the section header (Documents + Reports pages) */
+.doc-search {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid #2c2d34;
+  border-radius: 8px;
+  color: #f0f0f0;
+  padding: 8px 12px;
+  font-size: 0.9rem;
+  font-family: inherit;
+  min-width: 220px;
+}
+
+.doc-search::placeholder {
+  color: #6f7280;
+}
+
+.doc-search:focus {
+  outline: none;
+  border-color: #4b4d57;
+}
+
 /* Primary action — white gradient with dark text, like the auth CTAs */
 .upload-button,
 .replace-btn {
@@ -316,6 +346,7 @@
 }
 
 .share-form select,
+.share-person-search,
 .share-expiry input[type="date"] {
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid #3a3b42;
@@ -644,4 +675,186 @@
   .share-dialog {
     padding: 1.25rem;
   }
+}
+
+/* ── Share dialog: people search results ── */
+.share-people-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid #3a3b42;
+}
+
+.share-person {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid #24252b;
+  padding: 10px 12px;
+  color: #f0f0f0;
+  font-family: inherit;
+  font-size: 0.92rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.share-person:last-child {
+  border-bottom: none;
+}
+
+.share-person:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.share-person.active {
+  background: rgba(139, 142, 245, 0.12);
+}
+
+.share-person-name {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.share-person-email {
+  color: #9a9da8;
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.share-person-tick {
+  margin-left: auto;
+  color: #4ade80;
+  font-weight: 700;
+}
+
+.share-people-empty {
+  color: #9a9da8;
+  font-size: 0.9rem;
+  padding: 12px;
+  margin: 0;
+}
+
+/* ── Bulk-share selection (Drive-style hover reveal) ───────────────────────── */
+/* The checkbox lives in a fixed-width gutter so nothing shifts when it fades in.
+   Hidden until the row is hovered or the doc is selected. */
+.document-select-slot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  cursor: pointer;
+}
+
+.document-row:hover .document-select-slot,
+.document-row.selected .document-select-slot,
+.document-select-slot:focus-within {
+  opacity: 1;
+}
+
+.document-select {
+  width: 18px;
+  height: 18px;
+  accent-color: #8b8ef5;
+  cursor: pointer;
+  margin: 0;
+}
+
+/* Selected rows get a soft highlight + accent rail, echoing the bulk bar. */
+.document-row.selected {
+  background: rgba(139, 142, 245, 0.1);
+  box-shadow: inset 3px 0 0 #8b8ef5;
+}
+
+.document-row.selected:hover {
+  background: rgba(139, 142, 245, 0.14);
+}
+
+.bulk-share-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 0.7rem 1.6rem;
+  margin: 0 0 0.6rem;
+  background: rgba(139, 142, 245, 0.1);
+  border: 1px solid rgba(139, 142, 245, 0.35);
+  border-radius: 8px;
+}
+
+.bulk-share-count {
+  font-weight: 600;
+  color: #f0f0f0;
+}
+
+.bulk-share-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.bulk-share-clear {
+  background: transparent;
+  border: 1px solid #3a3b42;
+  color: #c8c9d0;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-family: inherit;
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+
+.bulk-share-clear:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* ── Selected-recipient chips (share dialog) ──────────────────────────────── */
+.share-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 8px;
+  border: 1px solid #3a3b42;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.share-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: rgba(139, 142, 245, 0.18);
+  border: 1px solid rgba(139, 142, 245, 0.4);
+  color: #f0f0f0;
+  border-radius: 999px;
+  padding: 4px 6px 4px 10px;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.share-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  color: #f0f0f0;
+  font-size: 0.7rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.share-chip-remove:hover {
+  background: rgba(255, 255, 255, 0.25);
 }

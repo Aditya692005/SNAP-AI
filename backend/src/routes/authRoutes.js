@@ -11,6 +11,7 @@ const {
   emailExists,
   forgotPassword,
   resetPassword,
+  verifyPassword,
   changePassword,
   inviteInfo,
   acceptInvite,
@@ -33,6 +34,7 @@ router.get("/email-exists", emailExists);
 // Password flows
 router.post("/forgot-password", forgotPassword); // public: email a reset link
 router.post("/reset-password", resetPassword); // public: set new password via token
+router.post("/verify-password", requireAuth, verifyPassword); // logged-in: confirm current pw
 router.post("/change-password", requireAuth, changePassword); // logged-in: current + new
 
 // Invitations (admin-added users)

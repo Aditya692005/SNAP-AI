@@ -3,15 +3,21 @@ and run vector similarity search via the match_document_chunks RPC.
 
 Embeddings are stored in the vector(384) column. PostgREST needs the vector as
 its text literal ("[0.1,0.2,...]"), so we format lists that way on the way in.
+
+Re-indexing is versioned: the new version's rows are inserted FIRST, then the
+old version is retired (chunks soft-superseded so cited chunk ids still
+resolve; table rows deleted). Queries never see an empty document mid-reindex.
 """
 
 import os
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
-
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
-
 from supabase import create_client
+
+# Load .env before any client is created (create_client only reads env lazily in
+# sb(), so importing supabase first is fine).
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 _client = None
 
@@ -30,13 +36,29 @@ def sb():
     if _client is None:
         url = os.environ["SUPABASE_URL"]
         key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.environ["SUPABASE_KEY"]
-        _client = create_client(url, key)
+        # Bound every PostgREST call so a slow/unreachable Supabase can't pile
+        # up requests indefinitely. Falls back to defaults on older clients.
+        try:
+            try:
+                from supabase.lib.client_options import SyncClientOptions as _Options
+            except ImportError:
+                from supabase.lib.client_options import ClientOptions as _Options
+            timeout = int(os.getenv("SUPABASE_TIMEOUT_SECONDS", "15"))
+            _client = create_client(
+                url, key, options=_Options(postgrest_client_timeout=timeout)
+            )
+        except Exception:
+            _client = create_client(url, key)
     return _client
 
 
 def _vec(embedding) -> str:
     """List[float] -> pgvector text literal."""
     return "[" + ",".join(repr(float(x)) for x in embedding) + "]"
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def storage_path_for(
@@ -70,17 +92,22 @@ def storage_path_for(
     return rows[0]["storage_path"], rows[0].get("file_name") or (file_name or "")
 
 
-def insert_document_table(document_id: str, table) -> None:
-    sb().table("document_tables").insert(
-        {
-            "document_id": document_id,
-            "sheet_name": table.sheet_name,
-            "table_name": table.table_name,
-            "table_data": {"rows": table.rows},
-            "table_index": table.table_index,
-            "heading_context": table.heading_context,
-        }
-    ).execute()
+def insert_document_table(document_id: str, table, doc_version: int = 1) -> None:
+    row = {
+        "document_id": document_id,
+        "sheet_name": table.sheet_name,
+        "table_name": table.table_name,
+        "table_data": {"rows": table.rows},
+        "table_index": table.table_index,
+        "heading_context": table.heading_context,
+        "doc_version": doc_version,
+    }
+    try:
+        sb().table("document_tables").insert(row).execute()
+    except Exception:
+        # doc_version column not deployed yet (rag-scale-hardening.sql).
+        row.pop("doc_version", None)
+        sb().table("document_tables").insert(row).execute()
 
 
 def get_document_version(document_id: str) -> int:
@@ -94,6 +121,49 @@ def get_document_version(document_id: str) -> int:
     except Exception:
         pass
     return 1
+
+
+def get_max_chunk_version(document_id: str) -> int:
+    """Highest doc_version among a document's existing chunks (0 = none). Used
+    so re-indexing always writes a strictly newer version even if the backend
+    didn't bump documents.version."""
+    try:
+        res = (
+            sb().table("document_chunks").select("doc_version")
+            .eq("document_id", document_id)
+            .order("doc_version", desc=True).limit(1).execute()
+        )
+        data = res.data or []
+        if data and data[0].get("doc_version") is not None:
+            return int(data[0]["doc_version"])
+        if data:
+            return 1  # chunks exist but predate the doc_version column
+    except Exception:
+        pass
+    return 0
+
+
+def set_document_status(document_id: str, status: str, error=None) -> None:
+    """Update documents.status (and processing_error) — the background index
+    job owns the document's lifecycle. Best-effort with pre-migration
+    fallbacks: never raises."""
+    update: dict = {"status": status}
+    if error is not None:
+        update["processing_error"] = str(error)[:2000]
+    elif status == "PROCESSED":
+        update["processing_error"] = None
+    attempts = [update]
+    if "processing_error" in update:
+        attempts.append({"status": status})  # processing_error column missing
+    if status == "FAILED":
+        attempts.append({"status": "UPLOADED"})  # 'FAILED' not in check constraint yet
+    for payload in attempts:
+        try:
+            sb().table("documents").update(payload).eq("id", document_id).execute()
+            return
+        except Exception:
+            continue
+    print(f"[rag] could not set status={status} for document {document_id}")
 
 
 def insert_document_chunks(
@@ -137,7 +207,15 @@ def insert_document_chunks(
         return 0
     try:
         sb().table("document_chunks").insert(rows).execute()
-    except Exception:
+    except Exception as exc:
+        # Loud, not silent: chunks inserted this way have NO organization_id, so
+        # tenant-filtered retrieval cannot see them until the migrations run.
+        print(
+            "[rag] FULL-METADATA CHUNK INSERT FAILED — falling back to minimal "
+            f"columns (chunks will be invisible to org-scoped search): {exc}. "
+            "Apply rag-chunk-metadata.sql / rag-chunk-offsets.sql / "
+            "rag-scale-hardening.sql."
+        )
         minimal = [
             {"document_id": r["document_id"], "chunk_index": r["chunk_index"],
              "chunk_text": r["chunk_text"], "embedding": r["embedding"]}
@@ -145,6 +223,50 @@ def insert_document_chunks(
         ]
         sb().table("document_chunks").insert(minimal).execute()
     return len(rows)
+
+
+def supersede_old_versions(document_id: str, current_version: int, before_iso: str) -> None:
+    """Retire everything older than `current_version` AFTER the new version is
+    fully inserted: chunks are soft-superseded (rows kept so chunk ids cited in
+    old chat messages still resolve; retrieval filters them out), table rows are
+    deleted (they feed answers, not citations). `before_iso` is the indexing
+    start time — the pre-migration fallback uses created_at < before_iso so it
+    can never touch the rows just inserted."""
+    try:
+        (
+            sb().table("document_chunks")
+            .update({"superseded_at": _utcnow_iso()})
+            .eq("document_id", document_id)
+            .lt("doc_version", current_version)
+            .is_("superseded_at", "null")
+            .execute()
+        )
+    except Exception:
+        try:  # superseded_at/doc_version not deployed → legacy hard delete of old rows
+            sb().table("document_chunks").delete() \
+                .eq("document_id", document_id).lt("created_at", before_iso).execute()
+        except Exception:
+            pass
+    try:
+        sb().table("document_tables").delete() \
+            .eq("document_id", document_id).lt("doc_version", current_version).execute()
+    except Exception:
+        try:
+            sb().table("document_tables").delete() \
+                .eq("document_id", document_id).lt("created_at", before_iso).execute()
+        except Exception:
+            pass
+
+
+def delete_version(document_id: str, version: int) -> None:
+    """Remove one version's chunks + tables — cleanup after a failed re-index,
+    so a partial new version never becomes retrievable."""
+    for table in ("document_chunks", "document_tables"):
+        try:
+            sb().table(table).delete() \
+                .eq("document_id", document_id).eq("doc_version", version).execute()
+        except Exception:
+            pass
 
 
 def hybrid_match_chunks(query_embedding, query_text: str, organization_id: str, document_ids=None, match_count: int = 30) -> list[dict]:
@@ -209,34 +331,45 @@ def tables_for_documents(document_ids) -> list[dict]:
 
 
 def chunks_for_documents(document_ids, limit: int = 200) -> list[dict]:
-    """Text chunks for a set of documents (for report context)."""
+    """Live (non-superseded) text chunks for a set of documents (report context)."""
     if not document_ids:
         return []
-    res = (
-        sb()
-        .table("document_chunks")
-        .select("document_id, chunk_index, chunk_text")
-        .in_("document_id", document_ids)
-        .order("chunk_index")
-        .limit(limit)
-        .execute()
-    )
+
+    def q():
+        return (
+            sb()
+            .table("document_chunks")
+            .select("document_id, chunk_index, chunk_text")
+            .in_("document_id", document_ids)
+            .order("chunk_index")
+            .limit(limit)
+        )
+
+    try:
+        res = q().is_("superseded_at", "null").execute()
+    except Exception:  # superseded_at not deployed yet
+        res = q().execute()
     return res.data or []
 
 
 def chunks_for_document(document_id: str) -> list[dict]:
-    res = (
-        sb()
-        .table("document_chunks")
-        .select("chunk_index, chunk_text")
-        .eq("document_id", document_id)
-        .order("chunk_index")
-        .execute()
-    )
+    def q():
+        return (
+            sb()
+            .table("document_chunks")
+            .select("chunk_index, chunk_text")
+            .eq("document_id", document_id)
+            .order("chunk_index")
+        )
+
+    try:
+        res = q().is_("superseded_at", "null").execute()
+    except Exception:
+        res = q().execute()
     return res.data or []
 
 
 def delete_document_data(document_id: str) -> None:
-    """Remove a document's chunks + tables (e.g. before re-indexing)."""
+    """Remove ALL of a document's chunks + tables (document deletion)."""
     sb().table("document_chunks").delete().eq("document_id", document_id).execute()
     sb().table("document_tables").delete().eq("document_id", document_id).execute()

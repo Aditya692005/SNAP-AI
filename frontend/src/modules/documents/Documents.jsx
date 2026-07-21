@@ -1,69 +1,21 @@
 import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import AppShell from "../../components/AppShell";
 import ToastStack from "../../components/Toast";
 import ShareDialog from "./ShareDialog";
 import { documentService } from "../../services/authService";
+import { previewKind, parseCsv } from "../../utils/filePreview";
 import "./Documents.css";
 
 // Human-readable status + badge style for a document's processing state.
+// A processed document just gets a compact green tick — "Ready" as a word
+// added noise to every row once most documents are done.
 function statusLabel(status) {
   const s = (status || "").toUpperCase();
-  if (s === "PROCESSED") return { text: "Ready", className: "uploaded" };
+  if (s === "PROCESSED") return { text: "✓", className: "uploaded ready-tick", title: "Ready" };
   if (s === "PROCESSING") return { text: "Processing", className: "pending" };
   if (s === "FAILED") return { text: "Failed", className: "pending" };
   return { text: status || "Unknown", className: "pending" };
-}
-
-// How the preview modal renders a file, by extension. PDFs use the browser's
-// built-in viewer; txt/csv render as text/table; office formats have no native
-// in-browser renderer, so they get a download-only fallback.
-function previewKind(fileName) {
-  const ext = String(fileName).slice(fileName.lastIndexOf(".") + 1).toLowerCase();
-  if (ext === "pdf") return "pdf";
-  if (ext === "txt") return "text";
-  if (ext === "csv") return "csv";
-  return "none";
-}
-
-// Minimal RFC-4180-ish CSV parser (quoted fields, embedded commas/newlines).
-// Enough for previewing; the authoritative parsing happens server-side.
-function parseCsv(text, maxRows = 500) {
-  const rows = [];
-  let row = [];
-  let field = "";
-  let inQuotes = false;
-  for (let i = 0; i < text.length && rows.length < maxRows; i++) {
-    const c = text[i];
-    if (inQuotes) {
-      if (c === '"') {
-        if (text[i + 1] === '"') {
-          field += '"';
-          i++;
-        } else {
-          inQuotes = false;
-        }
-      } else {
-        field += c;
-      }
-    } else if (c === '"') {
-      inQuotes = true;
-    } else if (c === ",") {
-      row.push(field);
-      field = "";
-    } else if (c === "\n") {
-      row.push(field);
-      field = "";
-      if (row.some((v) => v !== "")) rows.push(row);
-      row = [];
-    } else if (c !== "\r") {
-      field += c;
-    }
-  }
-  if ((field !== "" || row.length > 0) && rows.length < maxRows) {
-    row.push(field);
-    if (row.some((v) => v !== "")) rows.push(row);
-  }
-  return rows;
 }
 
 function Documents() {
@@ -72,17 +24,24 @@ function Documents() {
   const [error, setError] = useState(null);
   // Share tiers + pick-lists for the current user, from /api/documents/share-targets.
   const [targets, setTargets] = useState(null);
-  const [shareDoc, setShareDoc] = useState(null); // doc whose share dialog is open
+  const [shareDocs, setShareDocs] = useState(null); // docs whose share dialog is open (array)
+  // Ids of documents ticked for a bulk share (Set of doc id).
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(null); // { done, total }
   const [deletingId, setDeletingId] = useState(null);
   // Preview modal: { doc, loading, url?, kind?, text?, rows?, error? }
   const [viewer, setViewer] = useState(null);
+  // Filter the list by name/title as you type.
+  const [query, setQuery] = useState("");
   // Transient popup notifications (auto-dismiss after a few seconds).
   const [toasts, setToasts] = useState([]);
 
   const fileRef = useRef(null);
   const toastIdRef = useRef(0);
+  // Deep-link: an Updates-panel "View / download" lands here as ?preview=<docId>.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const handledPreviewRef = useRef(null);
 
   function notify(text, type = "success") {
     const id = ++toastIdRef.current;
@@ -125,10 +84,49 @@ function Documents() {
     };
   }, []);
 
+  // Open the requested document's preview once the list has loaded, then strip
+  // the query param so a refresh/back doesn't reopen it. A doc that isn't in the
+  // list (no access) is simply ignored.
+  useEffect(() => {
+    const id = searchParams.get("preview");
+    if (!id || loading) return;
+    if (handledPreviewRef.current === id) return;
+    const d = docs.find((x) => x.id === id);
+    if (!d) return;
+    handledPreviewRef.current = id;
+    openViewer(d);
+    const next = new URLSearchParams(searchParams);
+    next.delete("preview");
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, docs, loading]);
+
   // Share/Delete show on documents this user uploaded, or on every document
   // for org_admins. The backend re-enforces all of this server-side.
   function canManage(d) {
     return targets && (targets.is_admin || d.uploaded_by_user_id === targets.user_id);
+  }
+
+  // Whether the current user can share at all (any tier is offered).
+  const canShare = !!(targets && targets.can && Object.values(targets.can).some(Boolean));
+
+  // Toggle one document's tick in the bulk-share selection.
+  function toggleSelected(id) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
+  function clearSelection() {
+    setSelectedIds(new Set());
+  }
+
+  // Open the share dialog for the ticked documents.
+  function shareSelected() {
+    const chosen = docs.filter((d) => selectedIds.has(d.id) && canManage(d));
+    if (chosen.length > 0) setShareDocs(chosen);
   }
 
   // "report.pdf" → "report (1).pdf" — starting suggestion for the rename prompt.
@@ -282,6 +280,12 @@ function Documents() {
     try {
       await documentService.remove(d.id);
       setDocs((prev) => prev.filter((x) => x.id !== d.id));
+      setSelectedIds((prev) => {
+        if (!prev.has(d.id)) return prev;
+        const next = new Set(prev);
+        next.delete(d.id);
+        return next;
+      });
       notify(`Deleted "${d.file_name}".`);
     } catch (err) {
       notify(err.message, "error");
@@ -289,6 +293,18 @@ function Documents() {
       setDeletingId(null);
     }
   }
+
+  // How many ticked docs the user can actually share (bulk toolbar shows for these).
+  const selectedShareable = docs.filter((d) => selectedIds.has(d.id) && canManage(d)).length;
+
+  const trimmedQuery = query.trim().toLowerCase();
+  const shownDocs = trimmedQuery
+    ? docs.filter(
+        (d) =>
+          d.file_name.toLowerCase().includes(trimmedQuery) ||
+          (d.title || "").toLowerCase().includes(trimmedQuery)
+      )
+    : docs;
 
   return (
     <AppShell>
@@ -306,10 +322,18 @@ function Documents() {
             <h2>Your Documents</h2>
 
             <div className="section-header-actions">
+              <input
+                type="search"
+                className="doc-search"
+                placeholder="Search documents…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                aria-label="Search documents"
+              />
               <span>
                 {loading
                   ? "Loading…"
-                  : `${docs.length} document${docs.length === 1 ? "" : "s"}`}
+                  : `${shownDocs.length} document${shownDocs.length === 1 ? "" : "s"}`}
               </span>
               <button
                 type="button"
@@ -334,6 +358,22 @@ function Documents() {
             </div>
           </div>
 
+          {canShare && selectedShareable > 0 && (
+            <div className="bulk-share-bar">
+              <span className="bulk-share-count">
+                {selectedShareable} document{selectedShareable === 1 ? "" : "s"} selected
+              </span>
+              <div className="bulk-share-actions">
+                <button type="button" className="share-button" onClick={shareSelected}>
+                  ⤴ Share selected
+                </button>
+                <button type="button" className="bulk-share-clear" onClick={clearSelection}>
+                  Clear
+                </button>
+              </div>
+            </div>
+          )}
+
           <div className="documents-list">
             {error && (
               <div className="document-row">
@@ -355,10 +395,36 @@ function Documents() {
               </div>
             )}
 
-            {docs.map((d) => {
+            {!loading && !error && docs.length > 0 && shownDocs.length === 0 && (
+              <div className="document-row">
+                <div className="document-info">
+                  <p>No documents match "{query}".</p>
+                </div>
+              </div>
+            )}
+
+            {shownDocs.map((d) => {
               const badge = statusLabel(d.status);
               return (
-                <div key={d.id} className="document-row">
+                <div
+                  key={d.id}
+                  className={`document-row${selectedIds.has(d.id) ? " selected" : ""}`}
+                >
+                  {canShare && canManage(d) && (
+                    <label
+                      className="document-select-slot"
+                      title="Select for sharing"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <input
+                        type="checkbox"
+                        className="document-select"
+                        checked={selectedIds.has(d.id)}
+                        onChange={() => toggleSelected(d.id)}
+                        aria-label={`Select "${d.file_name}" for sharing`}
+                      />
+                    </label>
+                  )}
                   <button
                     type="button"
                     className="document-info document-open"
@@ -375,14 +441,14 @@ function Documents() {
                   </button>
 
                   <div className="document-actions">
-                    <span className={`status ${badge.className}`}>
+                    <span className={`status ${badge.className}`} title={badge.title}>
                       {badge.text}
                     </span>
                     {canManage(d) && (
                       <button
                         type="button"
                         className="share-button"
-                        onClick={() => setShareDoc(d)}
+                        onClick={() => setShareDocs([d])}
                         title="Share this document (read-only)"
                       >
                         ⤴ Share
@@ -407,11 +473,21 @@ function Documents() {
         </div>
       </div>
 
-      {shareDoc && (
+      {shareDocs && shareDocs.length > 0 && (
         <ShareDialog
-          doc={shareDoc}
+          docs={shareDocs}
           targets={targets}
-          onClose={() => setShareDoc(null)}
+          onClose={() => setShareDocs(null)}
+          onShared={({ created }) => {
+            if (created) {
+              notify(
+                shareDocs.length > 1
+                  ? `Shared ${shareDocs.length} documents.`
+                  : `Shared "${shareDocs[0].title || shareDocs[0].file_name}".`
+              );
+            }
+            clearSelection();
+          }}
         />
       )}
 

@@ -3,12 +3,17 @@ RAG microservice — FastAPI + LangChain LCEL + Supabase pgvector + Gemini
 Start with: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 """
 
+import asyncio
 import json
 import os
 import re
+import shutil
 import tempfile
+import threading
 import time
-from datetime import datetime
+from collections import OrderedDict, deque
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -18,8 +23,9 @@ import numpy as np
 import pandas as pd
 from fpdf import FPDF
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -76,11 +82,21 @@ except Exception as _rerank_exc:  # noqa: BLE001
     reranker = None
     print(f"[rag] cross-encoder reranker unavailable ({_rerank_exc}); using fused order")
 
-llm = ChatGoogleGenerativeAI(
-    model=GEMINI_MODEL,
-    google_api_key=GOOGLE_API_KEY,
-    temperature=0.2,
-)
+# Bound every Gemini call so a hung upstream can't pile requests up behind it.
+LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "90"))
+try:
+    llm = ChatGoogleGenerativeAI(
+        model=GEMINI_MODEL,
+        google_api_key=GOOGLE_API_KEY,
+        temperature=0.2,
+        timeout=LLM_TIMEOUT_SECONDS,
+    )
+except TypeError:  # older langchain-google-genai without a timeout kwarg
+    llm = ChatGoogleGenerativeAI(
+        model=GEMINI_MODEL,
+        google_api_key=GOOGLE_API_KEY,
+        temperature=0.2,
+    )
 
 splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
 
@@ -155,7 +171,12 @@ def semantic_split(text: str) -> list[dict] | None:
     return merged
 
 # ── Per-session chat history (list of HumanMessage / AIMessage) ───────────────
-session_histories: dict[str, list] = {}
+# Bounded LRU: histories are a legacy fallback (the backend sends persisted
+# history), so an unbounded dict here is just a slow memory leak under many
+# users. Oldest sessions are evicted past MAX_SESSIONS.
+MAX_SESSIONS = int(os.getenv("MAX_SESSIONS", "500"))
+session_histories: "OrderedDict[str, list]" = OrderedDict()
+_sessions_lock = threading.Lock()
 
 # ── Prompts ────────────────────────────────────────────────────────────────────
 CONDENSE_PROMPT = ChatPromptTemplate.from_messages([
@@ -185,13 +206,36 @@ PLAIN_PROMPT = ChatPromptTemplate.from_messages([
 # ── FastAPI app ────────────────────────────────────────────────────────────────
 app = FastAPI(title="SNAP AI RAG Service")
 
+# Env-driven origins so a deployment doesn't silently run with localhost-only CORS.
+ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.getenv(
+        "ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:5000"
+    ).split(",")
+    if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:5000"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Optional shared-secret auth: this service does no user auth of its own (the
+# Node backend enforces per-user document access), so if it's ever reachable
+# beyond localhost, set RAG_INTERNAL_TOKEN on both sides — every request except
+# /health and /metrics must then carry the matching x-internal-token header.
+RAG_INTERNAL_TOKEN = os.getenv("RAG_INTERNAL_TOKEN", "")
+
+
+@app.middleware("http")
+async def _require_internal_token(request: Request, call_next):
+    if RAG_INTERNAL_TOKEN and request.url.path not in ("/health", "/metrics"):
+        if request.headers.get("x-internal-token") != RAG_INTERNAL_TOKEN:
+            return JSONResponse(status_code=401, content={"detail": "Invalid internal token."})
+    return await call_next(request)
 
 # ── File loaders ───────────────────────────────────────────────────────────────
 ALLOWED_EXTENSIONS = {".pdf", ".csv", ".txt", ".xlsx", ".xls", ".docx", ".pptx"}
@@ -235,8 +279,22 @@ def summarize_table(table) -> str:
 
 def index_document(document_id: str, organization_id: str, path: Path, filename: str) -> dict:
     """Parse a file into Supabase: tables -> document_tables, and text + table
-    summaries -> embedded document_chunks. Returns {chunks, tables}."""
+    summaries -> embedded document_chunks. Returns {chunks, tables, version}.
+
+    Versioned, no visibility gap: the new version's rows are inserted FIRST,
+    then the old version is retired (chunks soft-superseded so cited chunk ids
+    keep resolving; old table rows deleted). A failure mid-way cleans up the
+    partial new version and leaves the old one live."""
     parsed = parse_file(path)
+
+    # Strictly newer than both documents.version (backend bumps on re-upload)
+    # and whatever version the existing chunks carry, so old rows can always be
+    # told apart from the ones inserted below.
+    new_version = max(
+        store.get_document_version(document_id),
+        store.get_max_chunk_version(document_id) + 1,
+    )
+    index_started = datetime.now(timezone.utc).isoformat()
 
     chunk_texts: list[str] = []
     chunk_metas: list[dict] = []  # parallel: {char_start, char_end, page} per chunk
@@ -260,72 +318,163 @@ def index_document(document_id: str, organization_id: str, path: Path, filename:
                 chunk_texts.append(c["text"])
                 chunk_metas.append({"char_start": c["start"], "char_end": c["end"], "page": page})
 
-    # Table summaries → short generated text (not a verbatim source span, so no
-    # offsets); the recursive splitter is fine.
-    for table in parsed.tables:
-        store.insert_document_table(document_id, table)
-        summary = summarize_table(table)
-        if summary and summary.strip():
-            for c in splitter.split_text(summary):
-                if c.strip():
-                    chunk_texts.append(c)
-                    chunk_metas.append({})
+    try:
+        # Table summaries → short generated text (not a verbatim source span, so
+        # no offsets); the recursive splitter is fine.
+        for table in parsed.tables:
+            store.insert_document_table(document_id, table, doc_version=new_version)
+            summary = summarize_table(table)
+            if summary and summary.strip():
+                for c in splitter.split_text(summary):
+                    if c.strip():
+                        chunk_texts.append(c)
+                        chunk_metas.append({})
 
-    if chunk_texts:
-        vectors = embeddings.embed_documents(chunk_texts)
-        store.insert_document_chunks(
-            document_id,
-            chunk_texts,
-            vectors,
-            organization_id=organization_id,
-            doc_version=store.get_document_version(document_id),
-            source=filename,
-            metas=chunk_metas,
-        )
+        if chunk_texts:
+            vectors = embeddings.embed_documents(chunk_texts)
+            store.insert_document_chunks(
+                document_id,
+                chunk_texts,
+                vectors,
+                organization_id=organization_id,
+                doc_version=new_version,
+                source=filename,
+                metas=chunk_metas,
+            )
+    except Exception:
+        store.delete_version(document_id, new_version)
+        raise
 
-    return {"chunks": len(chunk_texts), "tables": len(parsed.tables)}
+    # New version fully live → retire the old one.
+    store.supersede_old_versions(document_id, new_version, before_iso=index_started)
+
+    return {"chunks": len(chunk_texts), "tables": len(parsed.tables), "version": new_version}
 
 
-@app.post("/index")
+# ── Background indexing (P3) ──────────────────────────────────────────────────
+# Parsing + sentence embedding + per-table LLM summaries can take minutes for a
+# big file; doing that inside the request handler ties a worker up for the whole
+# time. /index now saves the file, queues a job on a small executor, and returns
+# immediately; the job owns documents.status (PROCESSING → PROCESSED/FAILED).
+INDEX_WORKERS = int(os.getenv("INDEX_WORKERS", "2"))
+_index_executor = ThreadPoolExecutor(max_workers=INDEX_WORKERS, thread_name_prefix="rag-index")
+_index_jobs: dict[str, dict] = {}
+_jobs_lock = threading.Lock()
+_JOB_PUBLIC_FIELDS = ("document_id", "filename", "status", "error", "chunks", "tables", "version")
+
+
+def _job_public(job: dict) -> dict:
+    return {k: job.get(k) for k in _JOB_PUBLIC_FIELDS}
+
+
+def _run_index_job(document_id: str, organization_id: str, path: Path, filename: str) -> None:
+    with _jobs_lock:
+        job = _index_jobs[document_id]
+        job["status"] = "processing"
+        job["started_at"] = time.time()
+    store.set_document_status(document_id, "PROCESSING")
+    try:
+        result = index_document(document_id, organization_id, path, filename)
+        store.set_document_status(document_id, "PROCESSED")
+        with _jobs_lock:
+            job.update(status="done", finished_at=time.time(), **result)
+    except Exception as exc:  # noqa: BLE001 — job must record any failure
+        print(f"[rag] indexing failed for {filename} ({document_id}): {exc}")
+        store.set_document_status(document_id, "FAILED", error=exc)
+        with _jobs_lock:
+            job.update(status="failed", finished_at=time.time(), error=str(exc)[:500])
+    finally:
+        # The spool dir was created just for this job; the durable copy of the
+        # file lives in Supabase Storage.
+        shutil.rmtree(path.parent, ignore_errors=True)
+
+
+def _save_upload(fileobj, dest: Path) -> None:
+    with dest.open("wb") as f:
+        shutil.copyfileobj(fileobj, f)
+
+
+@app.post("/index", status_code=202)
 async def index_endpoint(
     file: UploadFile = File(...),
     document_id: str = Form(...),
     organization_id: str = Form(...),
 ):
     """Phase 2 ingestion. The backend creates the documents row (with org + user), puts
-    the original bytes in Supabase Storage, then posts them here with the document_id to
-    embed into Supabase.
+    the original bytes in Supabase Storage, then posts them here with the document_id.
+    The bytes are spooled to a scratch file and indexing is queued; poll
+    /index-status/{document_id} (or documents.status) for the outcome.
 
-    We parse from a TEMP file and throw it away. The bytes arrive in the request, so
-    there's nothing to fetch — and the durable copy is already in the bucket, so keeping
-    one here would just be a second, quietly diverging original."""
+    The spool file is deleted once the job finishes — the durable copy is already in
+    the bucket, so keeping one here would just be a second, quietly diverging
+    original."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided.")
-    suffix = Path(file.filename).suffix.lower()
+    safe_name = Path(file.filename).name
+    suffix = Path(safe_name).suffix.lower()
     if suffix not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported type '{suffix}'. Allowed: {sorted(ALLOWED_EXTENSIONS)}",
         )
 
-    with tempfile.TemporaryDirectory() as tmp:
-        # Keep the real name: some parsers dispatch on the extension.
-        dest = Path(tmp) / Path(file.filename).name
-        dest.write_bytes(await file.read())
+    # A re-upload replaces the bucket object under the SAME storage key, so any
+    # locally cached copy of this file is now stale — evict it, or /visualize,
+    # /extract-metrics and chart refresh keep reading the old bytes forever.
+    await asyncio.to_thread(docstore.evict, safe_name)
 
-        # Idempotent re-index: clear any existing chunks/tables for this document.
-        store.delete_document_data(document_id)
-        try:
-            result = index_document(document_id, organization_id, dest, file.filename)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Indexing failed: {exc}")
+    # Spool to a scratch dir that OUTLIVES this request (the background job needs
+    # it); _run_index_job removes the whole dir when it finishes. Keep the real
+    # file name — some parsers dispatch on the extension.
+    spool = Path(tempfile.mkdtemp(prefix="rag-index-"))
+    dest = spool / safe_name
+    await asyncio.to_thread(_save_upload, file.file, dest)
 
-    return {"document_id": document_id, "filename": file.filename, **result}
+    with _jobs_lock:
+        existing = _index_jobs.get(document_id)
+        if existing and existing["status"] in ("queued", "processing"):
+            # Same document already being indexed — don't stack a second job.
+            shutil.rmtree(spool, ignore_errors=True)
+            return {**_job_public(existing), "status": "processing"}
+        _index_jobs[document_id] = {
+            "document_id": document_id,
+            "filename": safe_name,
+            "status": "queued",
+            "queued_at": time.time(),
+        }
+        # Bound the registry: drop the oldest finished jobs past 1000 entries.
+        if len(_index_jobs) > 1000:
+            done = [k for k, j in _index_jobs.items() if j["status"] in ("done", "failed")]
+            for k in done[:500]:
+                _index_jobs.pop(k, None)
+
+    _index_executor.submit(_run_index_job, document_id, organization_id, dest, safe_name)
+    return {"document_id": document_id, "filename": safe_name, "status": "processing"}
+
+
+@app.get("/index-status/{document_id}")
+def index_status(document_id: str):
+    """Status of a queued/running/finished indexing job. 'unknown' after a
+    service restart — fall back to documents.status in that case."""
+    with _jobs_lock:
+        job = _index_jobs.get(document_id)
+        return _job_public(job) if job else {"document_id": document_id, "status": "unknown"}
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def get_history(session_id: str) -> list:
-    return session_histories.setdefault(session_id, [])
+    with _sessions_lock:
+        hist = session_histories.setdefault(session_id, [])
+        session_histories.move_to_end(session_id)
+        while len(session_histories) > MAX_SESSIONS:
+            session_histories.popitem(last=False)
+    return hist
+
+
+def set_history(session_id: str, messages: list) -> None:
+    with _sessions_lock:
+        session_histories[session_id] = messages
+        session_histories.move_to_end(session_id)
 
 
 # Max characters of context fed to the model when summarizing a whole document.
@@ -426,6 +575,26 @@ def is_meta_question(question: str) -> bool:
     return any(k in q for k in META_KEYWORDS)
 
 
+# Smalltalk — greetings, thanks, sign-offs and other pleasantries that don't
+# need the documents at all. Matched against the WHOLE (normalized) message, not
+# a substring, so "hi, what were Q4 sales?" still goes through retrieval while a
+# bare "hi" doesn't produce an answer decorated with irrelevant citations.
+_SMALLTALK_RE = re.compile(
+    r"^(?:hi|hii+|hello|hey|heya|yo|hola|good\s+(?:morning|afternoon|evening|day)|"
+    r"thanks?|thank\s+you(?:\s+(?:so|very)\s+much)?|thx|ty|"
+    r"ok(?:ay)?|cool|nice|great|awesome|perfect|got\s+it|understood|sounds\s+good|"
+    r"bye|goodbye|good\s+night|see\s+(?:you|ya)(?:\s+later)?|take\s+care|"
+    r"how\s+are\s+you(?:\s+doing)?|what'?s\s+up|sup|"
+    r"help|can\s+you\s+help(?:\s+me)?)"
+    r"[\s!.?,]*$",
+    re.IGNORECASE,
+)
+
+
+def is_smalltalk(question: str) -> bool:
+    return bool(_SMALLTALK_RE.match(question.strip()))
+
+
 # Phrases signalling the user wants a chart built from data the AI ALREADY
 # presented (a table/answer whose sources were already cited), rather than a
 # fresh look at the documents — e.g. "make a bar graph of the above table". A
@@ -523,6 +692,13 @@ VIZ_PROMPT = ChatPromptTemplate.from_messages([
      "in that range that appears in ANY table, sorted chronologically — never stop "
      "at the periods from just one table.\n"
      "- Aggregate/group when the request implies it (e.g. totals by category).\n"
+     "- When the request names SPECIFIC series (e.g. 'advertising revenue vs "
+     "channel sales'), map each requested series to the dataset column whose "
+     "name matches it MOST CLOSELY, and use that column's values only. NEVER "
+     "substitute a different column for a requested series: if no column "
+     "plausibly matches a requested name, OMIT that series and say so in "
+     "notes — a chart with a missing series is correct, one with swapped-in "
+     "wrong data is not.\n"
      "- labels and each dataset's data array must be the SAME length.\n"
      "- pie/doughnut must have exactly one dataset.\n"
      "- Numbers must be plain (no commas, currency symbols, or units).\n"
@@ -562,6 +738,18 @@ def rank_documents_by_relevance(question: str, organization_id, document_ids, ma
     return ids or list(document_ids or [])
 
 
+# Filler words that must NOT make an off-topic table look relevant to a chart
+# request (chart/graph verbs, articles, the metric-request scaffolding).
+_VIZ_STOP = {
+    "give", "show", "me", "a", "an", "the", "of", "for", "where", "are", "is",
+    "visible", "want", "need", "please", "chart", "graph", "bar", "line", "plot",
+    "pie", "doughnut", "scatter", "histogram", "diagram", "table", "visualize",
+    "visualise", "visualization", "visualisation", "compare", "comparison", "and",
+    "with", "by", "per", "each", "all", "from", "to", "in", "on", "over", "time",
+    "trend", "make", "create", "draw", "them", "their", "that", "this", "data",
+}
+
+
 def build_viz_context_supabase(instruction: str, organization_id, document_ids, focus_document_id) -> tuple[str, bool, list]:
     """Chart context from Supabase: prefer stored tables (accurate numbers),
     else fall back to text chunks. Scoped to the focused doc, or the accessible
@@ -570,37 +758,95 @@ def build_viz_context_supabase(instruction: str, organization_id, document_ids, 
     ids that actually contributed data (for sources)."""
     if focus_document_id:
         ids = [focus_document_id]
+        ranked_set = {focus_document_id}
     else:
         ranked = rank_documents_by_relevance(instruction, organization_id, document_ids)
         # Charts often compare data SPLIT across several files (e.g. 2024-25 in one
-        # upload, 2026-27 in another). Narrowing to the top-ranked docs drops the
-        # rest and loses whole periods, so include EVERY accessible doc — ranked
-        # ones first so the most relevant survive if we hit the context cap.
+        # upload, 2026-27 in another), so include EVERY accessible doc — ranked
+        # ones first. But a doc that neither ranked NOR matches the query by column
+        # is only included when its COLUMNS match the request (see _table_relevant):
+        # otherwise a "marks" chart pulls in the department Revenue tables, and the
+        # model fixates on those clean CSVs and reports the marks "not present".
         rest = [d for d in (document_ids or []) if d not in ranked]
         ids = ranked + rest
-    parts = []
-    used = set()
+        ranked_set = set(ranked)
+
+    # Query tokens (minus filler) used to judge whether an unranked table is on-topic.
+    q_tokens = {
+        _singular(t) for t in _word_tokens(instruction)
+        if len(t) >= 2 and t not in _VIZ_STOP
+    }
+
+    def _table_relevant(table) -> bool:
+        rows = (table.get("table_data") or {}).get("rows") or []
+        if not rows:
+            return False
+        ctoks: set = set()
+        for c in rows[0].keys():
+            ctoks |= {_singular(x) for x in _word_tokens(c)}
+        return bool(ctoks & q_tokens)
+
     tables_by_doc: dict = {}
     for t in store.tables_for_documents(ids):
         tables_by_doc.setdefault(t.get("document_id"), []).append(t)
-    for did in ids:  # relevance order, doc by doc
-        for t in tables_by_doc.get(did, []):
-            rows = (t.get("table_data") or {}).get("rows") or []
-            if not rows:
+
+    # Docs WITHOUT a stored table (PDFs / plain text) still need their chunk text
+    # included. Otherwise a chart request spanning a MIX of CSV tables and text
+    # docs silently drops the text docs — the bug where "bar graph of ESE/MSE
+    # marks" ignored the marks PDF because the department CSVs happened to have
+    # tables, so the tabular branch returned before the text fallback ran.
+    #
+    # Use the query-RELEVANT chunks (semantic/hybrid retrieval), not the document
+    # from the top: the data being charted is often a small table buried deep in a
+    # long doc (the marks scheme sits ~2/3 into a 127-chunk syllabus, after pages
+    # of front matter), which a top-of-doc dump would truncate away.
+    text_only = [d for d in ids if d not in tables_by_doc]
+    chunks_by_doc: dict = {}
+    if text_only:
+        hits = retrieve_chunks(instruction, organization_id or "", text_only, k=20)
+        for h in hits:
+            chunks_by_doc.setdefault(h["document_id"], []).append(h.get("chunk_text") or "")
+        # If retrieval surfaced NOTHING at all, fall back to raw chunks so a lone
+        # text doc still charts. (When some text doc matched, unmatched ones are
+        # off-topic and intentionally left out.)
+        if not chunks_by_doc:
+            for c in store.chunks_for_documents(text_only):
+                chunks_by_doc.setdefault(c["document_id"], []).append(c.get("chunk_text") or "")
+
+    parts = []
+    used = []
+    has_table = False
+    for did in ids:  # relevance order, doc by doc — tables OR chunk text per doc
+        if did in tables_by_doc:
+            # Skip an unranked doc's table unless its columns match the request,
+            # so off-topic tables don't crowd out / mislead the model.
+            if did not in ranked_set and not any(_table_relevant(t) for t in tables_by_doc[did]):
                 continue
-            used.add(did)
-            name = t.get("table_name") or t.get("sheet_name") or "table"
-            cols = list(rows[0].keys())
-            lines = [",".join(map(str, cols))]
-            for r in rows[:500]:
-                lines.append(",".join("" if r.get(c) is None else str(r.get(c)) for c in cols))
-            parts.append(f"TABLE: {name}\n" + "\n".join(lines))
-    if parts:
-        return ("TABULAR DATA:\n" + "\n\n".join(parts))[:MAX_VIZ_CHARS], True, list(used)
-    chunks = store.chunks_for_documents(ids)
-    used = list({c["document_id"] for c in chunks})
-    text = "DOCUMENT TEXT:\n" + "\n\n".join(c["chunk_text"] for c in chunks)
-    return text[:MAX_VIZ_CHARS], False, used
+            for t in tables_by_doc[did]:
+                rows = (t.get("table_data") or {}).get("rows") or []
+                if not rows:
+                    continue
+                has_table = True
+                if did not in used:
+                    used.append(did)
+                name = t.get("table_name") or t.get("sheet_name") or "table"
+                cols = list(rows[0].keys())
+                lines = [",".join(map(str, cols))]
+                for r in rows[:500]:
+                    lines.append(",".join("" if r.get(c) is None else str(r.get(c)) for c in cols))
+                parts.append(f"TABLE: {name}\n" + "\n".join(lines))
+        elif did in chunks_by_doc:
+            body = "\n\n".join(t for t in chunks_by_doc[did] if t.strip())
+            if not body.strip():
+                continue
+            if did not in used:
+                used.append(did)
+            parts.append(f"DOCUMENT TEXT:\n{body}")
+
+    if not parts:
+        return "", False, []
+    prefix = "TABULAR DATA:\n" if has_table else "DOCUMENT TEXT:\n"
+    return (prefix + "\n\n".join(parts))[:MAX_VIZ_CHARS], has_table, used
 
 
 async def _visualize_from_dataset(dataset: str, is_tabular: bool, instruction: str, source_label) -> dict:
@@ -627,13 +873,28 @@ async def run_visualization(
     organization_id: str | None = None,
     document_id: str | None = None,
 ) -> dict:
-    dataset, is_tabular = build_source_context(source, document_id, organization_id)
+    # File parsing is blocking I/O + pandas — keep it off the event loop.
+    # Named-series requests are computed deterministically from the parsed
+    # table (exact columns and values); everything else goes to the LLM.
+    df = await asyncio.to_thread(load_dataframe, source or "", document_id, organization_id)
+    if df is not None and not df.empty:
+        spec = await asyncio.to_thread(
+            compute_series_chart, instruction, df.to_dict("records")
+        )
+        if spec is not None:
+            spec["source"] = source or "document"
+            return spec
+    dataset, is_tabular = await asyncio.to_thread(
+        build_source_context, source, document_id, organization_id
+    )
     return await _visualize_from_dataset(dataset, is_tabular, instruction, source or "document")
 
 
 async def run_visualization_supabase(instruction: str, organization_id, document_ids, focus_document_id) -> tuple[dict, list]:
-    dataset, is_tabular, used_ids = build_viz_context_supabase(instruction, organization_id, document_ids, focus_document_id)
-    source_files = store.file_names_for_documents(used_ids)
+    dataset, is_tabular, used_ids = await asyncio.to_thread(
+        build_viz_context_supabase, instruction, organization_id, document_ids, focus_document_id
+    )
+    source_files = await asyncio.to_thread(store.file_names_for_documents, used_ids)
     spec = await _visualize_from_dataset(dataset, is_tabular, instruction, "")
     return spec, source_files
 
@@ -745,6 +1006,172 @@ def compute_tabular_aggregation(message, rows) -> dict | None:
     return {"func": func, "group_col": group_col, "metric_cols": metric_cols, "rows": out_rows}
 
 
+def _requested_chart_type(message, n_series, default="bar") -> str:
+    """The chart type the user asked for; `default` when unstated. Pie only
+    fits a single series."""
+    q = message.lower()
+    if "line" in q or "trend" in q:
+        return "line"
+    if "area" in q:
+        return "area"
+    if ("pie" in q or "doughnut" in q or "donut" in q) and n_series == 1:
+        return "pie"
+    if "scatter" in q:
+        return "scatter"
+    return default
+
+
+_NORM_PHRASE_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _norm_phrase(s) -> str:
+    return _NORM_PHRASE_RE.sub(" ", str(s).lower()).strip()
+
+
+def _year_range_from_message(message) -> tuple[int | None, int | None]:
+    """(min_year, max_year) filters implied by the message, e.g. 'from 2024
+    onwards' -> (2024, None), '2024 to 2026' -> (2024, 2026). (None, None) when
+    no years are named."""
+    years = [int(y) for y in re.findall(r"\b((?:19|20)\d{2})\b", message)]
+    if not years:
+        return None, None
+    if len(years) >= 2:
+        return min(years), max(years)
+    y = years[0]
+    q = message.lower()
+    if re.search(r"\b(until|till|up to|through|before)\b", q):
+        return None, y
+    # "from 2024", "2024 onwards", "since 2024", "after 2024" — or a bare year,
+    # where 'from that year' is the only sensible single-year reading.
+    return y, None
+
+
+def compute_series_chart(message, rows) -> dict | None:
+    """Deterministic chart when the user NAMES the columns to plot over time
+    ("line graph of licensing fees vs advertising revenue from 2024 onwards").
+
+    The LLM path transcribes numbers out of a CSV dump and reliably confuses
+    similar column names ("Advertising revenue" vs "Revenue Generated") — so
+    when every requested series can be resolved to a real column by exact
+    phrase match, the chart is computed in pandas instead: right columns,
+    exact values, every period. Returns a chart spec, or None to fall through
+    to the LLM (no period column, or no column named in the message)."""
+    if not rows:
+        return None
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return None
+    period_fn, period_cols = _build_period_extractor(df)
+    if period_fn is None:
+        return None
+
+    # Which columns does the message name? Exact normalized-phrase match,
+    # longest column names first, consuming each matched span so a shorter
+    # column name can never re-match inside a longer one already claimed
+    # ("Advertising revenue" consumes its span; a column named "Revenue"
+    # can't then match the word 'revenue' inside it).
+    msg = f" {_norm_phrase(message)} "
+    candidates = [c for c in df.columns if c not in period_cols]
+    matched: list = []
+    for c in sorted(candidates, key=lambda c: -len(_norm_phrase(c))):
+        cn = _norm_phrase(c)
+        if len(cn) < 3:
+            continue
+        idx = msg.find(f" {cn} ")
+        if idx < 0:
+            continue
+        matched.append(c)
+        msg = msg[: idx + 1] + " " * len(cn) + msg[idx + 1 + len(cn):]
+    # Keep the table's column order; drop non-numeric matches (e.g. "employees"
+    # naming a text column). Judge numeric-ness over the rows where the column
+    # is PRESENT — `rows` may concatenate several tables with different schemas,
+    # so a column from one small table is null everywhere else and a whole-frame
+    # ratio would wrongly reject it.
+    series_cols = []
+    for c in df.columns:
+        if c not in matched:
+            continue
+        present = df[c].dropna()
+        if not present.empty and _to_numeric(present).notna().mean() >= 0.5:
+            series_cols.append(c)
+    if not series_cols:
+        return None
+
+    periods = df.apply(period_fn, axis=1)
+    keep = periods.notna()
+    df, periods = df[keep], periods[keep]
+    if df.empty:
+        return None
+
+    y_min, y_max = _year_range_from_message(message)
+    if y_min is not None or y_max is not None:
+        def in_range(p):
+            m = re.match(r"(\d{4})", str(p))
+            if not m:
+                return False
+            y = int(m.group(1))
+            return (y_min is None or y >= y_min) and (y_max is None or y <= y_max)
+        keep = periods.map(in_range)
+        df, periods = df[keep], periods[keep]
+        if df.empty:
+            return None
+
+    work = pd.DataFrame({"__period": periods})
+    for c in series_cols:
+        work[c] = _to_numeric(df[c]).values
+    grouped = work.groupby("__period").sum(min_count=1).sort_index()
+
+    labels = [str(p).replace("-", " ") for p in grouped.index]
+    datasets = []
+    for c in series_cols:
+        datasets.append({
+            "label": str(c),
+            "data": [None if pd.isna(v) else round(float(v), 2) for v in grouped[c]],
+        })
+    return {
+        "chart_type": _requested_chart_type(message, len(series_cols), default="line"),
+        "title": ", ".join(str(c) for c in series_cols) + " over time",
+        "labels": labels,
+        "datasets": datasets,
+        "notes": (
+            f"Computed exactly from the table: {', '.join(str(c) for c in series_cols)} "
+            f"per period over {len(labels)} periods."
+        ),
+        "source": "",
+        "is_tabular": True,
+    }
+
+
+def run_series_chart_supabase(message, organization_id, document_ids, focus_document_id) -> dict | None:
+    """Deterministic named-series chart over the relevant docs' stored tables.
+    Returns ChatResponse kwargs (answer/sources/chart), or None to fall through
+    to the LLM viz path."""
+    if focus_document_id:
+        ids = [focus_document_id]
+    elif document_ids:
+        ids = list(document_ids)
+    else:
+        return None
+    all_rows, per_table = [], []
+    for t in store.tables_for_documents(ids):
+        trows = (t.get("table_data") or {}).get("rows") or []
+        if trows:
+            all_rows.extend(trows)
+            per_table.append((t.get("document_id"), trows))
+    spec = compute_series_chart(message, all_rows)
+    if spec is None:
+        return None
+    # Cite only the documents whose tables actually CONTAIN a plotted column —
+    # `ids` may span every accessible document.
+    plotted = {d["label"] for d in spec["datasets"]}
+    used = []
+    for doc_id, trows in per_table:
+        if doc_id not in used and any(col in trows[0] for col in plotted):
+            used.append(doc_id)
+    sources = store.file_names_for_documents(used)
+    return {"answer": spec["notes"], "sources": sources, "chart": spec}
+
+
 def run_aggregation_supabase(message, organization_id, document_ids, focus_document_id, want_chart) -> dict | None:
     """Deterministic groupby answer over the relevant docs' stored tables.
     Returns ChatResponse kwargs (answer/sources/chart), or None to fall through."""
@@ -771,8 +1198,9 @@ def run_aggregation_supabase(message, organization_id, document_ids, focus_docum
     note = f"{label.title()} of {', '.join(mcols)} by {gcol}, computed exactly over {len(all_rows)} rows."
 
     if want_chart:
+        chart_type = _requested_chart_type(message, len(mcols), default="bar")
         spec = {
-            "chart_type": "bar",
+            "chart_type": chart_type,
             "title": f"{label.title()} {', '.join(mcols)} by {gcol}",
             "labels": [r[gcol] for r in out_rows],
             "datasets": [{"label": mc, "data": [r[mc] for r in out_rows]} for mc in mcols],
@@ -881,6 +1309,46 @@ def parse_json_array(raw: str) -> list:
     return data if isinstance(data, list) else []
 
 
+# Word stems that pin a metric's value kind regardless of what the LLM guessed,
+# so a money metric can't be shown as a percentage (the "$840,000 -> 840,000%"
+# bug) and a rate can't be shown as a raw count.
+_MONEY_WORDS = {
+    "revenue", "profit", "sales", "income", "cost", "costs", "expense", "expenses",
+    "expenditure", "price", "cash", "fee", "fees", "spend", "spending", "budget",
+    "turnover", "earnings", "salary", "payroll", "valuation", "arr", "mrr", "ebitda",
+}
+_RATE_WORDS = {
+    "rate", "ratio", "percent", "percentage", "margin", "share", "utilization",
+    "occupancy", "conversion", "churn", "growth", "cagr", "yield", "apr", "apy",
+}
+# Count nouns disambiguate a money word: "sales closed"/"units sold"/"deals" are
+# COUNTS, not dollars — so a count word wins over a money word.
+_COUNT_WORDS = {
+    "closed", "won", "deal", "deals", "count", "counts", "number", "num", "unit",
+    "units", "quantity", "qty", "volume", "order", "orders", "transaction",
+    "transactions", "signed", "signups", "tickets", "items", "leads", "customer",
+    "customers", "subscribers", "users", "visits", "clicks", "sessions",
+    "headcount", "hires", "employees", "downloads", "installs",
+}
+
+
+def infer_kind(metric: str, llm_kind: str, value: float, currency) -> str:
+    """Deterministic value-kind from the metric name, so display is consistent
+    regardless of LLM drift. Precedence: count nouns ("sales closed" = number) >
+    rate words ("conversion rate" = percent) > money words ("revenue" =
+    currency) > whatever the LLM said (with an absurd percent demoted)."""
+    toks = set(metric.split("_"))
+    if toks & _COUNT_WORDS:
+        return "count" if llm_kind == "count" else "number"
+    if toks & _RATE_WORDS:
+        return "percent" if abs(value) <= 1000 else "number"
+    if (toks & _MONEY_WORDS) or currency:
+        return "currency"
+    if llm_kind == "percent" and abs(value) > 1000:
+        return "number"
+    return llm_kind
+
+
 def normalize_metric(raw: dict) -> dict | None:
     """Validate/normalize one extracted metric; drop anything unusable.
 
@@ -904,6 +1372,7 @@ def normalize_metric(raw: dict) -> dict | None:
     kind = str(raw.get("kind") or "number").strip().lower()
     if kind not in _ALLOWED_KINDS:
         kind = "number"
+    kind = infer_kind(metric, kind, value, currency)
     try:
         confidence = float(raw.get("confidence", 0.5))
     except (TypeError, ValueError):
@@ -1158,14 +1627,14 @@ async def extract_metrics(
     by the LLM chunk-by-chunk over the WHOLE document and merged, so periods no
     longer fall past a truncation cap. `custom_defs` steer the LLM path and set
     the kind on the tabular path."""
-    df = load_dataframe(source, document_id, organization_id)
+    df = await asyncio.to_thread(load_dataframe, source, document_id, organization_id)
     if df is not None:
-        tabular = extract_metrics_tabular(df, custom_defs)
+        tabular = await asyncio.to_thread(extract_metrics_tabular, df, custom_defs)
         if tabular:
             return tabular
         # Couldn't structure the table → fall through to the LLM.
 
-    text = _full_source_text(source, document_id, organization_id)
+    text = await asyncio.to_thread(_full_source_text, source, document_id, organization_id)
     if not text.strip():
         return []
     system_text = build_metrics_system(custom_defs)
@@ -1285,17 +1754,19 @@ async def _generate_doc_from_context(
 
     title = extract_title(md_text)
     filename = f"{slugify(title)}-{datetime.now():%Y%m%d-%H%M%S}.pdf"
-
     # Build the PDF in a temp dir, then hand it to Storage. Nothing durable is written
-    # here — the backend serves the download straight out of the bucket.
+    # here — the backend serves the download straight out of the bucket. Both steps
+    # are blocking (fpdf + HTTP upload), so keep them off the event loop.
     with tempfile.TemporaryDirectory() as tmp:
         out_path = Path(tmp) / filename
         try:
-            markdown_to_pdf(md_text, out_path)
+            await asyncio.to_thread(markdown_to_pdf, md_text, out_path)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"PDF generation failed: {exc}")
         try:
-            storage_path = docstore.put_generated(organization_id, filename, out_path)
+            storage_path = await asyncio.to_thread(
+                docstore.put_generated, organization_id, filename, out_path
+            )
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Could not store the report: {exc}")
 
@@ -1309,13 +1780,17 @@ async def _generate_doc_from_context(
 
 
 async def run_document_generation(instruction: str, source: str | None, organization_id: str) -> dict:
-    context, _ = build_source_context(source, organization_id=organization_id)
+    context, _ = await asyncio.to_thread(
+        build_source_context, source, None, organization_id
+    )
     return await _generate_doc_from_context(context, instruction, source, organization_id)
 
 
 async def run_document_generation_supabase(instruction: str, organization_id, document_ids, focus_document_id) -> tuple[dict, list]:
-    context, used_ids = build_doc_context_supabase(instruction, organization_id, document_ids, focus_document_id)
-    source_files = store.file_names_for_documents(used_ids)
+    context, used_ids = await asyncio.to_thread(
+        build_doc_context_supabase, instruction, organization_id, document_ids, focus_document_id
+    )
+    source_files = await asyncio.to_thread(store.file_names_for_documents, used_ids)
     doc = await _generate_doc_from_context(context, instruction, focus_document_id, organization_id)
     return doc, source_files
 
@@ -1339,14 +1814,106 @@ def to_lc_messages(history: list[dict] | None) -> list:
 # so the cross-encoder reranker has a real pool to reorder).
 HYBRID_CANDIDATES = 30
 
-# ── Retrieval caches (P1.5) ───────────────────────────────────────────────────
+# ── Retrieval caches (P1.5 / P3) ──────────────────────────────────────────────
 # (a) embedding cache: identical/whitespace-different queries skip re-embedding.
+#     Per-process lru_cache — cheap to miss, so it needn't be shared.
 # (b) result cache: a full retrieval result is reused for a short TTL, so re-asks
 #     within a turn are instant. Time-based invalidation is safe because a new
 #     upload only needs to be reflected after the TTL (a few seconds).
+#     Backed by Redis when REDIS_URL is set, so multiple uvicorn workers /
+#     replicas share hits and survive restarts; else an in-process dict (now
+#     lock-guarded, since retrieval runs on worker threads).
 _RESULT_TTL_SECONDS = 60
 _result_cache: dict[str, tuple[float, list]] = {}
+_result_lock = threading.Lock()
 _cache_stats = {"result_hits": 0, "result_miss": 0}
+
+_redis = None
+if os.getenv("REDIS_URL"):
+    try:
+        import redis as _redis_mod
+        _redis = _redis_mod.Redis.from_url(
+            os.environ["REDIS_URL"], socket_timeout=2, decode_responses=True
+        )
+        _redis.ping()
+        print("[rag] result cache: Redis")
+    except Exception as _redis_exc:  # noqa: BLE001
+        _redis = None
+        print(f"[rag] REDIS_URL set but unusable ({_redis_exc}); using in-process cache")
+
+
+def _result_cache_get(key: str) -> list | None:
+    if _redis is not None:
+        try:
+            raw = _redis.get("rag:res:" + key)
+            return json.loads(raw) if raw else None
+        except Exception:
+            return None
+    now = time.time()
+    with _result_lock:
+        cached = _result_cache.get(key)
+        return cached[1] if cached and cached[0] > now else None
+
+
+def _result_cache_set(key: str, result: list) -> None:
+    if _redis is not None:
+        try:
+            _redis.setex("rag:res:" + key, _RESULT_TTL_SECONDS, json.dumps(result))
+        except Exception:
+            pass
+        return
+    now = time.time()
+    with _result_lock:
+        _result_cache[key] = (now + _RESULT_TTL_SECONDS, result)
+        if len(_result_cache) > 1024:  # bound: drop expired, else oldest-ish
+            stale = [k2 for k2, v in _result_cache.items() if v[0] <= now][:512]
+            for kk in stale or list(_result_cache)[:256]:
+                _result_cache.pop(kk, None)
+
+
+# Retrieval latency samples (ms) for /metrics — cache misses only, i.e. real
+# embed + search + rerank round-trips.
+_retrieval_latencies: deque = deque(maxlen=500)
+_latency_lock = threading.Lock()
+
+# Per-stage chat latency samples (ms) for /metrics, so we can see where a chat
+# turn spends its time: condense / retrieve / tables / generate. A condense
+# sample of ~0 means the follow-up was self-contained and the LLM call was
+# skipped (P3 optimisation).
+_stage_latencies: dict[str, deque] = {
+    "condense": deque(maxlen=500),
+    "retrieve": deque(maxlen=500),
+    "tables": deque(maxlen=500),
+    "generate": deque(maxlen=500),
+}
+
+
+def _record_stage(stage: str, ms: float) -> None:
+    with _latency_lock:
+        _stage_latencies[stage].append(ms)
+
+
+# Words that signal a question leans on the prior turn (pronouns, deixis,
+# ellipsis). Only these — or a very short question — need the condense LLM call
+# to be rewritten into a standalone query; a self-contained question is used
+# as-is, saving one Gemini round-trip per follow-up.
+_FOLLOWUP_MARKERS = (
+    "it", "its", "it's", "that", "this", "they", "them", "those", "these",
+    "he", "she", "him", "her", "his", "their", "theirs", "one", "ones",
+    "above", "previous", "previously", "earlier", "aforementioned", "former",
+    "latter", "same", "then", "there", "such", "another", "again",
+)
+_FOLLOWUP_RE = re.compile(r"\b(" + "|".join(re.escape(m) for m in _FOLLOWUP_MARKERS) + r")\b", re.I)
+
+
+def _needs_condense(question: str) -> bool:
+    """True when the question references the prior conversation (so it must be
+    rewritten to a standalone query before retrieval). Self-contained questions
+    return False and skip the condense LLM call."""
+    q = (question or "").strip()
+    if len(q.split()) <= 5:  # terse → likely elliptical ("and Q3?", "why?")
+        return True
+    return bool(_FOLLOWUP_RE.search(q))
 
 
 def _norm_query(q: str) -> str:
@@ -1368,16 +1935,19 @@ def retrieve_chunks(question: str, organization_id: str, document_ids=None, k: i
     """Retrieve the most relevant chunks, scoped to an org and (optionally) the
     accessible document ids. Hybrid dense + full-text (RRF) → cross-encoder
     rerank; falls back to dense-only if the P1.3 migration isn't applied.
-    Caches the query embedding and the final result (short TTL)."""
+    Caches the query embedding and the final result (short TTL).
+
+    CPU-bound (query embedding + cross-encoder) — call from async code via
+    asyncio.to_thread so it never blocks the event loop."""
     norm_q = _norm_query(question)
     key = _result_key(organization_id, document_ids, norm_q, k)
-    now = time.time()
-    cached = _result_cache.get(key)
-    if cached and cached[0] > now:
+    cached = _result_cache_get(key)
+    if cached is not None:
         _cache_stats["result_hits"] += 1
-        return cached[1]
+        return cached
     _cache_stats["result_miss"] += 1
 
+    started = time.perf_counter()
     query_vec = list(_embed_query_cached(norm_q))
     try:
         hits = store.hybrid_match_chunks(
@@ -1387,11 +1957,10 @@ def retrieve_chunks(question: str, organization_id: str, document_ids=None, k: i
     except Exception:
         hits = store.match_chunks(query_vec, organization_id, document_ids=document_ids, match_count=k)
     result = rerank_hits(question, hits, k)
+    with _latency_lock:
+        _retrieval_latencies.append((time.perf_counter() - started) * 1000.0)
 
-    _result_cache[key] = (now + _RESULT_TTL_SECONDS, result)
-    if len(_result_cache) > 1024:  # bound: drop expired, else oldest-ish
-        for kk in [k2 for k2, v in list(_result_cache.items()) if v[0] <= now][:512] or list(_result_cache)[:256]:
-            _result_cache.pop(kk, None)
+    _result_cache_set(key, result)
     return result
 
 
@@ -1410,12 +1979,11 @@ def rerank_hits(question: str, hits: list[dict], k: int) -> list[dict]:
         pass  # keep fused order
     return hits[:k]
 
-def render_document_tables(document_id) -> str:
-    """A document's stored tabular data (document_tables) rendered as CSV text, so
-    the LLM can answer over the ACTUAL rows rather than just the embedded summary
-    chunk. Returns '' for documents that have no tables (e.g. plain text)."""
+def _render_table_rows(tables: list[dict]) -> str:
+    """Render already-fetched document_tables rows as CSV text blocks, so the LLM
+    can answer over the ACTUAL rows rather than just the embedded summary chunk."""
     blocks = []
-    for t in store.tables_for_documents([document_id]):
+    for t in tables:
         rows = (t.get("table_data") or {}).get("rows") or []
         if not rows:
             continue
@@ -1426,6 +1994,23 @@ def render_document_tables(document_id) -> str:
             lines.append(",".join("" if r.get(c) is None else str(r.get(c)) for c in cols))
         blocks.append(f"FULL TABLE DATA ({name}):\n" + "\n".join(lines))
     return "\n\n".join(blocks)
+
+
+def render_document_tables_batch(document_ids: list) -> list[str]:
+    """Rendered CSV blocks for several documents' tables in ONE Supabase read
+    (was N+1: one RPC per document), returned in document_ids order with empties
+    dropped."""
+    if not document_ids:
+        return []
+    by_doc: dict = {}
+    for t in store.tables_for_documents(document_ids):
+        by_doc.setdefault(t.get("document_id"), []).append(t)
+    out = []
+    for did in document_ids:
+        block = _render_table_rows(by_doc.get(did, []))
+        if block:
+            out.append(block)
+    return out
 
 
 async def run_rag_chain(
@@ -1445,17 +2030,28 @@ async def run_rag_chain(
     else:
         chat_history = get_history(session_id)
 
-    # Step 1 — condense follow-up into standalone question if there's history
-    if chat_history:
+    # Step 1 — condense a follow-up into a standalone question, but ONLY when it
+    # references the prior turn (pronouns/deixis/very short). Self-contained
+    # questions skip this extra Gemini round-trip — the RAG prompt still receives
+    # chat_history below, so no context is lost.
+    _t = time.perf_counter()
+    if chat_history and _needs_condense(question):
         condense_chain = CONDENSE_PROMPT | llm | StrOutputParser()
         standalone = await condense_chain.ainvoke({"chat_history": chat_history, "question": question})
     else:
         standalone = question
+    _record_stage("condense", (time.perf_counter() - _t) * 1000.0)
 
     # Step 2 — Supabase pgvector retrieval, scoped by org + the docs the user may
-    # see. A focus_document_id narrows the search to a single document.
+    # see. A focus_document_id narrows the search to a single document. Run on a
+    # worker thread: embedding + reranking are CPU-bound and would otherwise
+    # freeze the event loop for every other request.
     ids = [focus_document_id] if focus_document_id else document_ids
-    hits = retrieve_chunks(standalone, organization_id or "", ids, k=8 if focus_document_id else 5)
+    _t = time.perf_counter()
+    hits = await asyncio.to_thread(
+        retrieve_chunks, standalone, organization_id or "", ids, 8 if focus_document_id else 5
+    )
+    _record_stage("retrieve", (time.perf_counter() - _t) * 1000.0)
 
     # Include the ACTUAL tabular data (document_tables) for the relevant documents
     # so questions over "the whole document" use real rows, not just the embedded
@@ -1474,11 +2070,9 @@ async def run_rag_chain(
             if len(table_doc_ids) >= MAX_TABLE_DOCS:
                 break
 
-    context_parts = []
-    for did in table_doc_ids:
-        table_text = render_document_tables(did)
-        if table_text:
-            context_parts.append(table_text)
+    _t = time.perf_counter()
+    context_parts = await asyncio.to_thread(render_document_tables_batch, table_doc_ids)
+    _record_stage("tables", (time.perf_counter() - _t) * 1000.0)
     chunk_text = "\n\n".join(h["chunk_text"] for h in hits)
     if chunk_text:
         context_parts.append(chunk_text)
@@ -1500,18 +2094,20 @@ async def run_rag_chain(
     # Sources are the source FILE NAMES (downloadable), not document ids.
     sources: list[str] = list({str(h["file_name"]) for h in hits if h.get("file_name")})
     if focus_document_id and not sources:
-        sources = store.file_names_for_documents([focus_document_id])
+        sources = await asyncio.to_thread(store.file_names_for_documents, [focus_document_id])
 
     # Step 3 — generate answer (cap context length for very large documents)
     if len(context) > MAX_CONTEXT_CHARS:
         context = context[:MAX_CONTEXT_CHARS]
 
     rag_chain = RAG_PROMPT | llm | StrOutputParser()
+    _t = time.perf_counter()
     answer = await rag_chain.ainvoke({
         "context": context,
         "chat_history": chat_history,
         "question": question,
     })
+    _record_stage("generate", (time.perf_counter() - _t) * 1000.0)
 
     # Step 4 — update in-memory history only when not using caller-supplied history.
     if history is None:
@@ -1519,7 +2115,7 @@ async def run_rag_chain(
         mem.append(HumanMessage(content=question))
         mem.append(AIMessage(content=answer))
         if len(mem) > 12:
-            session_histories[session_id] = mem[-12:]
+            set_history(session_id, mem[-12:])
 
     return answer, sources, retrieved
 
@@ -1538,7 +2134,7 @@ async def run_plain_chain(question: str, session_id: str, history: list[dict] | 
         mem.append(HumanMessage(content=question))
         mem.append(AIMessage(content=answer))
         if len(mem) > 12:
-            session_histories[session_id] = mem[-12:]
+            set_history(session_id, mem[-12:])
 
     return answer
 
@@ -1579,9 +2175,10 @@ async def chat(req: ChatRequest):
         n_docs = len(req.document_ids or [])
 
         # Meta/conversational questions ("what was my last question?", "what time
-        # is it?") are answered from the chat itself, not the documents — so give a
-        # normal answer with NO sources cited.
-        if is_meta_question(req.message):
+        # is it?") and smalltalk ("hi", "thanks") are answered from the chat
+        # itself, not the documents — a normal answer with NO sources cited, so
+        # a plain "hello" never comes back decorated with citations.
+        if is_meta_question(req.message) or is_smalltalk(req.message):
             answer = await run_plain_chain(req.message, req.session_id, req.history)
             return ChatResponse(answer=answer, sources=[], doc_count=0)
 
@@ -1601,9 +2198,10 @@ async def chat(req: ChatRequest):
         # rows are lost to the context cap and the numbers are precise. Handles
         # both the chart form and the plain-answer form; falls through when the
         # request isn't a (numeric agg BY category) over a table.
-        agg = run_aggregation_supabase(
+        agg = await asyncio.to_thread(
+            run_aggregation_supabase,
             req.message, req.organization_id, req.document_ids, req.focus_document_id,
-            want_chart=wants_chart(req.message) or wants_table(req.message),
+            wants_chart(req.message) or wants_table(req.message),
         )
         if agg is not None:
             return ChatResponse(
@@ -1612,6 +2210,21 @@ async def chat(req: ChatRequest):
 
         # Chart/table from the accessible/focused documents.
         if wants_chart(req.message) or wants_table(req.message):
+            # When the user NAMES the series ("licensing fees vs advertising
+            # revenue ... from 2024"), build the chart deterministically from
+            # the stored table — the LLM path transcribes numbers from a CSV
+            # dump and reliably picks look-alike columns ("Revenue Generated"
+            # for "advertising revenue"). Falls through when no named column
+            # or period structure is found.
+            series = await asyncio.to_thread(
+                run_series_chart_supabase,
+                req.message, req.organization_id, req.document_ids, req.focus_document_id,
+            )
+            if series is not None:
+                sources = [] if references_prior_output(req.message) else series["sources"]
+                return ChatResponse(
+                    answer=series["answer"], sources=sources, doc_count=n_docs, chart=series["chart"]
+                )
             try:
                 spec, source_files = await run_visualization_supabase(
                     req.message, req.organization_id, req.document_ids, req.focus_document_id
@@ -1673,7 +2286,11 @@ class RetrievePreviewRequest(BaseModel):
 # A query is "ambiguous" (→ show the picker) only when 2+ docs survive with
 # similar scores; otherwise the client answers directly without a picker step.
 PREVIEW_REL_MARGIN = 0.06
-PREVIEW_ABS_FLOOR = 0.30
+# 0.15, not higher: table/list-heavy documents (syllabi, spec sheets) embed
+# weakly — MiniLM tops out near ~0.30 dense similarity even for on-topic
+# queries against them, and hybrid FTS-only hits carry similarity 0 by design.
+# Off-topic chunks sit around ~0.10, so 0.15 still guards against junk.
+PREVIEW_ABS_FLOOR = 0.15
 MAX_PREVIEW_DOCS = 4
 
 
@@ -1687,7 +2304,9 @@ async def retrieve_preview(req: RetrievePreviewRequest):
     if not req.document_ids or is_meta_question(req.message):
         return {"documents": [], "ambiguous": False}
 
-    hits = retrieve_chunks(req.message, req.organization_id, req.document_ids, k=10)
+    hits = await asyncio.to_thread(
+        retrieve_chunks, req.message, req.organization_id, req.document_ids, 10
+    )
 
     # Distinct documents, keeping each one's best similarity.
     best: dict[str, float] = {}
@@ -1710,7 +2329,8 @@ async def retrieve_preview(req: RetrievePreviewRequest):
     if not kept:
         return {"documents": [], "ambiguous": False}
 
-    names = {str(d["id"]): d.get("file_name") for d in store.documents_by_ids([d for d, _ in kept])}
+    docs_rows = await asyncio.to_thread(store.documents_by_ids, [d for d, _ in kept])
+    names = {str(d["id"]): d.get("file_name") for d in docs_rows}
     documents = [
         {"id": did, "file_name": names.get(did) or "unknown", "similarity": round(sim, 4)}
         for did, sim in kept
@@ -1817,11 +2437,16 @@ def ingest_document(req: IngestRequest):
     """Index an existing document (e.g. an AI-generated report the user chose to "Add to
     AI") into Supabase under the given document_id, so the AI can answer questions about
     it. The backend has already created the row pointing at the bytes in Storage; we
-    resolve them by document_id."""
+    resolve them by document_id. Synchronous (files here are small, and the caller wants
+    the chunk count) — but a sync `def` endpoint, so FastAPI runs it on its threadpool,
+    off the event loop. Versioned re-index: index_document supersedes the old chunks
+    only after the new ones land, so cited chunk ids stay resolvable."""
+    # Evict any cached copy first: a regenerated report reuses its storage key,
+    # so a cache hit here would index the previous version's bytes.
+    docstore.evict(Path(req.filename).name)
     path = docstore.resolve_source(req.filename, document_id=req.document_id)
     if path is None:
         raise HTTPException(status_code=404, detail=f"File '{req.filename}' not found")
-    store.delete_document_data(req.document_id)  # idempotent re-index
     try:
         result = index_document(req.document_id, req.organization_id, path, req.filename)
     except Exception as exc:
@@ -1837,13 +2462,21 @@ def ingest_document(req: IngestRequest):
 
 
 @app.delete("/documents")
-def clear_documents():
-    session_histories.clear()
+def clear_documents(organization_id: str | None = None):
+    """Drop the local file cache + in-memory chat history. The originals live in
+    Supabase Storage and the chunks/tables go with the documents row — both the
+    backend's job, so nothing durable is touched here. organization_id is
+    accepted for backward compatibility with callers but the cache is evicted
+    wholesale (it only ever holds copies)."""
+    with _sessions_lock:
+        session_histories.clear()
     return {"status": "cleared", "files_removed": docstore.evict()}
 
 
 @app.delete("/documents/{filename}")
-def delete_document(filename: str):
+def delete_document(filename: str, organization_id: str | None = None):
+    """Drop any cached local copies of this file. The bucket object and the
+    documents row (cascading to chunks/tables) are removed by the backend."""
     safe_name = Path(filename).name
     if not safe_name:
         raise HTTPException(status_code=400, detail="Invalid filename.")
@@ -1853,7 +2486,8 @@ def delete_document(filename: str):
 
 @app.delete("/session/{session_id}")
 def clear_session(session_id: str):
-    session_histories.pop(session_id, None)
+    with _sessions_lock:
+        session_histories.pop(session_id, None)
     return {"status": "cleared", "session_id": session_id}
 
 
@@ -1861,3 +2495,43 @@ def clear_session(session_id: str):
 # this service has no auth context, which is exactly why the old endpoint would hand any
 # caller any file it held. Downloads are served by the backend, from Storage, behind an
 # access check: GET /api/documents/:id/download.
+
+
+@app.get("/metrics")
+def service_metrics():
+    """Operational counters for monitoring: cache effectiveness, retrieval
+    latency (cache misses = real embed+search+rerank round-trips), indexing
+    job states, and which optional components are active."""
+    def _summarize(samples: list) -> dict:
+        s = sorted(samples)
+        out: dict = {"samples": len(s)}
+        if s:
+            out.update(
+                avg_ms=round(sum(s) / len(s), 1),
+                p50_ms=round(s[len(s) // 2], 1),
+                p95_ms=round(s[min(len(s) - 1, int(len(s) * 0.95))], 1),
+                max_ms=round(s[-1], 1),
+            )
+        return out
+
+    with _latency_lock:
+        lat = list(_retrieval_latencies)
+        stages = {name: list(dq) for name, dq in _stage_latencies.items()}
+    latency = _summarize(lat)
+    stage_latency = {name: _summarize(samples) for name, samples in stages.items()}
+    with _jobs_lock:
+        jobs: dict[str, int] = {}
+        for j in _index_jobs.values():
+            jobs[j["status"]] = jobs.get(j["status"], 0) + 1
+    embed_info = _embed_query_cached.cache_info()
+    with _sessions_lock:
+        n_sessions = len(session_histories)
+    return {
+        "result_cache": {**_cache_stats, "backend": "redis" if _redis is not None else "memory"},
+        "embed_cache": {"hits": embed_info.hits, "misses": embed_info.misses, "size": embed_info.currsize},
+        "retrieval_latency": latency,
+        "chat_stage_latency": stage_latency,
+        "index_jobs": jobs,
+        "sessions": n_sessions,
+        "reranker": reranker is not None,
+    }

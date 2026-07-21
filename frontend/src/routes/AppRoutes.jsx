@@ -8,11 +8,12 @@ import ForgotPassword from "../modules/auth/ForgotPassword";
 import AcceptInvite from "../modules/auth/AcceptInvite";
 import Dashboard from "../modules/dashboard/Dashboard";
 import Documents from "../modules/documents/Documents";
+import UpdatesPage from "../modules/updates/Updates";
 import AIAssistant from "../modules/ai/AIAssistant";
 import Admin from "../modules/admin/Admin";
 import Settings from "../modules/settings/Settings";
+import Reports from "../modules/reports/Reports";
 import ProtectedRoute from "../components/ProtectedRoute";
-import PlaceholderPage from "../components/PlaceholderPage";
 
 function AppRoutes() {
   return (
@@ -28,9 +29,10 @@ function AppRoutes() {
       <Route path="/change-password" element={<Navigate to="/settings?tab=security" replace />} />
       <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
       <Route path="/documents" element={<ProtectedRoute><Documents /></ProtectedRoute>} />
+      <Route path="/updates" element={<ProtectedRoute><UpdatesPage /></ProtectedRoute>} />
       <Route path="/ai" element={<ProtectedRoute><AIAssistant /></ProtectedRoute>} />
 
-      <Route path="/reports" element={<ProtectedRoute><PlaceholderPage title="Reports" description="Generate and view reports from your knowledge base." /></ProtectedRoute>} />
+      <Route path="/reports" element={<ProtectedRoute><Reports /></ProtectedRoute>} />
       <Route path="/admin" element={<ProtectedRoute role="org_admin"><Admin /></ProtectedRoute>} />
       <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
 

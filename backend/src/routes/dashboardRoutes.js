@@ -5,8 +5,8 @@
 // Mount in server.js:  app.use("/api/dashboard", dashboardRoutes);
 
 const express = require("express");
-const fetch = require("node-fetch");
 
+const { ragFetch } = require("../utils/ragClient");
 const requireAuth = require("../middleware/requireAuth");
 const {
   getIncludedMetrics,
@@ -24,6 +24,7 @@ const {
   deleteDashboard,
   listWidgets,
   listArchivedWidgetsForUser,
+  deleteArchivedWidgetsForUser,
   listRecentMetricWidgetsForUser,
   findWidgetByMessage,
   findMetricWidget,
@@ -44,6 +45,7 @@ const {
   findByFileName: findDocByName,
   deleteDocument: deleteDocumentRow,
   listUploadedFileNames,
+  listUploadedDocuments,
   documentIdsForDepartment,
   documentIdsForOrganization,
 } = require("../models/documentModel");
@@ -85,9 +87,9 @@ const {
   refreshDepartmentWidget,
   refreshOrganizationWidget,
 } = require("../services/widgetRefreshService");
+const { notifyMetricAdded } = require("../services/updateNotifier");
 
 const router = express.Router();
-const RAG_URL = process.env.RAG_SERVICE_URL || "http://localhost:8000";
 
 // Turn a period label ("2024", "2024-03", "2024-Q2") into a sortable number.
 function periodKey(period) {
@@ -98,6 +100,39 @@ function periodKey(period) {
   const m = /^\d{4}-(\d{2})/.exec(period);
   if (m) return year * 100 + Number(m[1]);
   return year * 100;
+}
+
+// Deterministic value-kind override from the metric name — mirrors the RAG
+// service's infer_kind so a money metric never renders as a percentage and a
+// rate never renders as a raw count, whatever the stored/LLM kind says.
+const MONEY_WORDS = new Set([
+  "revenue", "profit", "sales", "income", "cost", "costs", "expense", "expenses",
+  "expenditure", "price", "cash", "fee", "fees", "spend", "spending", "budget",
+  "turnover", "earnings", "salary", "payroll", "valuation", "arr", "mrr", "ebitda",
+]);
+const RATE_WORDS = new Set([
+  "rate", "ratio", "percent", "percentage", "margin", "share", "utilization",
+  "occupancy", "conversion", "churn", "growth", "cagr", "yield", "apr", "apy",
+]);
+// Count nouns disambiguate a money word: "sales closed"/"units sold"/"deals"
+// are COUNTS, not dollars — a count word wins over a money word.
+const COUNT_WORDS = new Set([
+  "closed", "won", "deal", "deals", "count", "counts", "number", "num", "unit",
+  "units", "quantity", "qty", "volume", "order", "orders", "transaction",
+  "transactions", "signed", "signups", "tickets", "items", "leads", "customer",
+  "customers", "subscribers", "users", "visits", "clicks", "sessions",
+  "headcount", "hires", "employees", "downloads", "installs",
+]);
+// Deterministic value-kind from the metric name (mirrors the RAG infer_kind).
+// Precedence: count > rate > money > the majority stored kind.
+function resolveKind(metric, majorityKind) {
+  const maj = majorityKind || "number";
+  const toks = new Set(String(metric || "").split("_"));
+  const has = (set) => [...toks].some((t) => set.has(t));
+  if (has(COUNT_WORDS)) return maj === "count" ? "count" : "number";
+  if (has(RATE_WORDS)) return "percent";
+  if (has(MONEY_WORDS)) return "currency";
+  return maj;
 }
 
 // Aggregate a set of values for one metric by its `kind`: money and counts SUM;
@@ -176,10 +211,22 @@ function shapeMetrics(metrics) {
 
   const present = [...new Set(metrics.map((r) => r.metric))];
   const departments = {};
-  const kinds = {};
+  // Tally kinds per metric so ONE mislabeled row can't set the metric's kind
+  // (the "$840,000 shown as 840,000%" bug). Majority wins, then a name-based
+  // override forces money/rate concepts regardless of the LLM's guess.
+  const kindTally = {};
   for (const r of metrics) {
     if (r.department && !departments[r.metric]) departments[r.metric] = r.department;
-    if (r.kind && !kinds[r.metric]) kinds[r.metric] = r.kind;
+    if (r.kind) {
+      (kindTally[r.metric] || (kindTally[r.metric] = {}))[r.kind] =
+        (kindTally[r.metric][r.kind] || 0) + 1;
+    }
+  }
+  const kinds = {};
+  for (const m of present) {
+    const majority =
+      Object.entries(kindTally[m] || {}).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+    kinds[m] = resolveKind(m, majority);
   }
 
   const kpis = present
@@ -390,6 +437,18 @@ router.patch("/widgets/:id", requireAuth, async (req, res, next) => {
   }
 });
 
+// DELETE /api/dashboard/widgets/trash — empty the trash: permanently delete
+// every trashed widget the user owns. Declared BEFORE /widgets/:id so "trash"
+// isn't matched as an :id.
+router.delete("/widgets/trash", requireAuth, async (req, res, next) => {
+  try {
+    const removed = await deleteArchivedWidgetsForUser(req.user.id);
+    return res.json({ deleted: removed });
+  } catch (err) {
+    return next(err);
+  }
+});
+
 // DELETE /api/dashboard/widgets/:id — remove a widget (any of the user's dashboards).
 router.delete("/widgets/:id", requireAuth, async (req, res, next) => {
   try {
@@ -500,12 +559,15 @@ router.post("/metric-definitions", requireAuth, async (req, res, next) => {
 
     // Backfill: re-extract the user's existing docs so a just-defined metric
     // pulls values from files uploaded earlier. Background + best effort.
-    listUploadedFileNames(req.user.id, req.user.organization_id)
-      .then((sources) =>
-        sources.reduce(
-          (chain, s) =>
+    listUploadedDocuments(req.user.id, req.user.organization_id)
+      .then((docs) =>
+        docs.reduce(
+          (chain, d) =>
             chain.then(() =>
-              extractAndStore(req.user.id, s, { organizationId: req.user.organization_id }).catch(() => {})
+              extractAndStore(req.user.id, d.file_name, {
+                documentId: d.id,
+                organizationId: req.user.organization_id,
+              }).catch(() => {})
             ),
           Promise.resolve()
         )
@@ -556,12 +618,15 @@ router.post("/track-metric", requireAuth, async (req, res, next) => {
       label: String(label).trim(),
       kind: kind || "number",
     });
-    listUploadedFileNames(req.user.id, req.user.organization_id)
-      .then((sources) =>
-        sources.reduce(
-          (chain, s) =>
+    listUploadedDocuments(req.user.id, req.user.organization_id)
+      .then((docs) =>
+        docs.reduce(
+          (chain, d) =>
             chain.then(() =>
-              extractAndStore(req.user.id, s, { organizationId: req.user.organization_id }).catch(() => {})
+              extractAndStore(req.user.id, d.file_name, {
+                documentId: d.id,
+                organizationId: req.user.organization_id,
+              }).catch(() => {})
             ),
           Promise.resolve()
         )
@@ -585,6 +650,12 @@ router.post("/track-metric", requireAuth, async (req, res, next) => {
         ai_message_id: null,
       });
       touchOrgBoard(board.id, req.user.id);
+      notifyMetricAdded({
+        organizationId: req.user.organization_id,
+        actorId: req.user.id,
+        scope: "organization",
+        label: def.label,
+      }).catch(() => {});
       return res.status(201).json(widget);
     }
     if (target === "department") {
@@ -603,6 +674,13 @@ router.post("/track-metric", requireAuth, async (req, res, next) => {
         ai_message_id: null,
       });
       touchBoard(board.id, req.user.id);
+      notifyMetricAdded({
+        organizationId: req.user.organization_id,
+        actorId: req.user.id,
+        scope: "department",
+        departmentId: board.department_id,
+        label: def.label,
+      }).catch(() => {});
       return res.status(201).json(widget);
     }
 
@@ -671,7 +749,25 @@ router.get("/department", requireAuth, async (req, res, next) => {
       await getOrCreateDefaultDepartmentDashboard(user.department_id, orgId, user.id);
     }
 
-    const boards = await listDefaultDashboardsByDepartmentIds([...visible]);
+    let boards = await listDefaultDashboardsByDepartmentIds([...visible]);
+
+    // Admins see every department — including ones whose board was never
+    // created because no manager or employee has visited it yet. Materialize
+    // the missing defaults so every department has a board the admin can open
+    // and add metrics/charts to.
+    if (isAdmin(user)) {
+      const have = new Set(boards.map((b) => b.department_id));
+      const missing = [...visible].filter((id) => !have.has(id));
+      if (missing.length > 0) {
+        await Promise.all(
+          missing.map((id) =>
+            getOrCreateDefaultDepartmentDashboard(id, orgId, user.id).catch(() => null)
+          )
+        );
+        boards = await listDefaultDashboardsByDepartmentIds([...visible]);
+      }
+    }
+
     const shaped = boards
       .map((b) => ({
         id: b.id,
@@ -759,6 +855,15 @@ router.post("/department/:id/widgets", requireAuth, async (req, res, next) => {
       ai_message_id: ai_message_id ?? null,
     });
     touchBoard(board.id, req.user.id);
+    if (widget_type === "metric") {
+      notifyMetricAdded({
+        organizationId: req.user.organization_id,
+        actorId: req.user.id,
+        scope: "department",
+        departmentId: board.department_id,
+        label: title || config.metric_key,
+      }).catch(() => {});
+    }
     return res.status(201).json(widget);
   } catch (err) {
     return next(err);
@@ -970,6 +1075,14 @@ router.post("/organization/widgets", requireAuth, async (req, res, next) => {
       ai_message_id: ai_message_id ?? null,
     });
     touchOrgBoard(board.id, req.user.id);
+    if (widget_type === "metric") {
+      notifyMetricAdded({
+        organizationId: req.user.organization_id,
+        actorId: req.user.id,
+        scope: "organization",
+        label: title || config.metric_key,
+      }).catch(() => {});
+    }
     return res.status(201).json(widget);
   } catch (err) {
     return next(err);
@@ -1123,9 +1236,13 @@ router.delete("/documents/:source", requireAuth, async (req, res, next) => {
     // Best-effort: also drop the file + vectors from the RAG service. If RAG is
     // down the metrics are still gone; the file can be cleared later.
     try {
-      await fetch(`${RAG_URL}/documents/${encodeURIComponent(req.params.source)}`, {
-        method: "DELETE",
-      });
+      await ragFetch(
+        `/documents/${encodeURIComponent(req.params.source)}?organization_id=${encodeURIComponent(
+          req.user.organization_id
+        )}`,
+        { method: "DELETE" },
+        15000
+      );
     } catch {
       /* RAG unavailable — dashboard data already removed */
     }

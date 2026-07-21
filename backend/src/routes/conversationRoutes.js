@@ -19,12 +19,25 @@ const {
   findConversation,
   deleteConversation,
   listMessages,
+  listGeneratedReports,
 } = require("../models/conversationModel");
 
 const router = express.Router();
 router.use(requireAuth);
 // Chat threads are part of the AI-assistant surface — same gate as /api/rag/chat.
 router.use(requirePermission("USE_AI_ASSISTANT"));
+
+// GET /api/conversations/reports — every AI-generated report across this
+// user's threads (for the Reports page). Declared BEFORE /:id so "reports"
+// isn't matched as a conversation id.
+router.get("/reports", async (req, res, next) => {
+  try {
+    const reports = await listGeneratedReports(req.user.id, req.user.organization_id);
+    return res.json({ reports });
+  } catch (err) {
+    return next(err);
+  }
+});
 
 router.get("/", async (req, res, next) => {
   try {

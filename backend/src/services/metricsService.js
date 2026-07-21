@@ -3,7 +3,7 @@
 // Bridges the RAG service's metric extraction with Supabase storage. Used both
 // when a document is uploaded (auto-extract) and when the user clicks Recompute.
 
-const fetch = require("node-fetch");
+const { ragFetch } = require("../utils/ragClient");
 const { replaceDocumentMetrics, upsertStatus } = require("../models/metricsModel");
 const { listMetricDefinitions } = require("../models/metricDefinitionsModel");
 const {
@@ -11,8 +11,6 @@ const {
   metricKeysOnDashboard,
   addWidget,
 } = require("../models/dashboardModel");
-
-const RAG_URL = process.env.RAG_SERVICE_URL || "http://localhost:8000";
 
 // "customer_churn" -> "Customer Churn"
 function prettyLabel(key) {
@@ -69,7 +67,12 @@ const _QUALIFIER = new Set([
 // extracted key is a shorter form of the definition ("interest" -> "interest
 // income"), an exact token match, or a MORE specific form whose only extra words
 // are generic qualifiers ("royalty income" -> "royalties"). Always requires a
-// shared distinctive (>=4 char) token so nothing merges on tiny/generic words.
+// shared distinctive token so nothing merges on tiny/generic words: >=4 chars,
+// or any length with a digit — chemical/measurement codes like "no2", "co2",
+// "pm25" are short but unmistakably specific.
+function _distinctive(t) {
+  return t.length >= 4 || /\d/.test(t);
+}
 function _matchDefinition(metricKey, defs) {
   const ex = _tokens(metricKey);
   if (!ex.length) return null;
@@ -88,7 +91,7 @@ function _matchDefinition(metricKey, defs) {
       }
       if (!ok) continue;
       const shared = dt.filter((t) => ex.includes(t));
-      if (!shared.some((t) => t.length >= 4)) continue;
+      if (!shared.some(_distinctive)) continue;
       const exact = exSubDef && defSubEx;
       // Prefer exact, then the most specific (most shared tokens) definition.
       const score = (exact ? 1000 : 0) + shared.length * 10 + Math.min(dt.length, ex.length);
@@ -166,12 +169,22 @@ async function extractAndStore(userId, source, opts = {}) {
     // document_id, not just the file name: the RAG service fetches the original bytes
     // from Storage by resolving the id to a storage_path. Resolving by name alone was
     // ambiguous across organizations — two orgs with a `report.pdf` would extract each
-    // other's numbers.
-    const response = await fetch(`${RAG_URL}/extract-metrics`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source, document_id: documentId, custom_metrics: customMetrics }),
-    });
+    // other's numbers. organization_id covers the name-only fallback. Chunked
+    // whole-document LLM extraction can be slow → generous timeout.
+    const response = await ragFetch(
+      "/extract-metrics",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source,
+          document_id: documentId,
+          custom_metrics: customMetrics,
+          organization_id: organizationId,
+        }),
+      },
+      300000
+    );
 
     if (!response.ok) {
       await upsertStatus(userId, source, { status: "error" });
