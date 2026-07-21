@@ -33,8 +33,8 @@
 
 /* Expand on hover, and keep the rail open briefly after a navigation click. */
 .sidebar:hover,
-.sidebar.expanded,
-.sidebar:focus-within {
+.sidebar.expanded
+/*.sidebar:focus-within */ {
   width: 220px;
 }
 
@@ -80,8 +80,8 @@
 }
 
 .sidebar:hover .nav-label,
-.sidebar.expanded .nav-label,
-.sidebar:focus-within .nav-label {
+.sidebar.expanded .nav-label
+/*.sidebar:focus-within .nav-label*/ {
   width: auto;
   opacity: 1;
 }

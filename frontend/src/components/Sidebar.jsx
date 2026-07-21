@@ -64,7 +64,7 @@ function Sidebar() {
     window.__snapSidebarForceTimer = window.setTimeout(() => {
       window.__snapSidebarForceOpen = false;
       window.dispatchEvent(new Event("snap:sidebar-force-open"));
-    }, 900);
+    }, 100);
   };
 
   return (
