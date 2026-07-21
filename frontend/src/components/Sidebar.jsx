@@ -14,12 +14,24 @@ import "./Sidebar.css";
 // expand/collapse is pure CSS, driven by :hover.
 function Sidebar() {
   const location = useLocation();
+  const [isExpanded, setIsExpanded] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return Boolean(window.__snapSidebarForceOpen);
+  });
   // Re-read permission-gated items when SessionWatcher refreshes the cached user.
   const [, setUserTick] = useState(0);
   useEffect(() => {
     const bump = () => setUserTick((n) => n + 1);
     window.addEventListener("snap:user-updated", bump);
-    return () => window.removeEventListener("snap:user-updated", bump);
+
+    const syncExpanded = () =>
+      setIsExpanded(Boolean(window.__snapSidebarForceOpen));
+    window.addEventListener("snap:sidebar-force-open", syncExpanded);
+
+    return () => {
+      window.removeEventListener("snap:user-updated", bump);
+      window.removeEventListener("snap:sidebar-force-open", syncExpanded);
+    };
   }, []);
 
   const isAdmin = authService.isAdmin();
@@ -30,13 +42,33 @@ function Sidebar() {
   ];
   if (authService.canUseAIAssistant())
     items.push({ to: "/ai", label: "AI Assistant", icon: <VscEditSparkle /> });
-  items.push({ to: "/reports", label: "Reports", icon: <HiOutlineDocumentReport /> });
+  items.push({
+    to: "/reports",
+    label: "Reports",
+    icon: <HiOutlineDocumentReport />,
+  });
   if (isAdmin)
     items.push({ to: "/admin", label: "Admin", icon: <GrUserAdmin /> });
   items.push({ to: "/settings", label: "Settings", icon: <IoSettingsSharp /> });
 
+  const handleNavClick = () => {
+    if (typeof window === "undefined") return;
+
+    window.__snapSidebarForceOpen = true;
+    window.dispatchEvent(new Event("snap:sidebar-force-open"));
+
+    if (window.__snapSidebarForceTimer) {
+      window.clearTimeout(window.__snapSidebarForceTimer);
+    }
+
+    window.__snapSidebarForceTimer = window.setTimeout(() => {
+      window.__snapSidebarForceOpen = false;
+      window.dispatchEvent(new Event("snap:sidebar-force-open"));
+    }, 900);
+  };
+
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar ${isExpanded ? "expanded" : ""}`.trim()}>
       <nav>
         {items.map((it) => (
           <Link
@@ -44,6 +76,7 @@ function Sidebar() {
             to={it.to}
             className={location.pathname === it.to ? "active" : ""}
             title={it.label}
+            onClick={handleNavClick}
           >
             {it.icon && <span className="nav-icon">{it.icon}</span>}
             <span className="nav-label">{it.label}</span>

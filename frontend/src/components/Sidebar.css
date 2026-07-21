@@ -18,7 +18,11 @@
   border-right: 1px solid rgba(255, 255, 255, 0.08);
   backdrop-filter: blur(20px);
 
-  font-family: "Manrope", -apple-system, "Segoe UI", sans-serif;
+  font-family:
+    "Manrope",
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
 
   overflow: hidden;
   white-space: nowrap;
@@ -27,8 +31,10 @@
   transition: width 0.2s ease;
 }
 
-/* Only the width changes on hover — padding stays fixed so the icons never move. */
-.sidebar:hover {
+/* Expand on hover, and keep the rail open briefly after a navigation click. */
+.sidebar:hover,
+.sidebar.expanded,
+.sidebar:focus-within {
   width: 220px;
 }
 
@@ -73,7 +79,9 @@
   transition: opacity 0.15s ease;
 }
 
-.sidebar:hover .nav-label {
+.sidebar:hover .nav-label,
+.sidebar.expanded .nav-label,
+.sidebar:focus-within .nav-label {
   width: auto;
   opacity: 1;
 }
