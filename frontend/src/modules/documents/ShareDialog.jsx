@@ -187,7 +187,7 @@ function ShareDialog({ docs, targets, onClose, onShared }) {
           <div>
             <h2>{docList.length > 1 ? `Share ${docList.length} documents` : "Share document"}</h2>
             <span className="share-dialog-sub">
-              📄{" "}
+              {" "}
               {docList.length > 1
                 ? `${docList.length} documents selected`
                 : single?.title || single?.file_name}{" "}
