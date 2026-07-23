@@ -148,7 +148,7 @@ async function deleteAllForUser(userId, organizationId) {
 // Grant access to a document by ROLE / DEPARTMENT / USER / ORGANIZATION.
 // ORGANIZATION rows carry no target column (all NULL): they mean "every member
 // of the document's organization" and are scoped through the documents join.
-async function grantAccess({ documentId, accessType, roleId, departmentId, userId, grantedByUserId, expiresAt }) {
+async function grantAccess({ documentId, accessType, roleId, departmentId, userId, grantedByUserId, expiresAt, organizationId }) {
   const row = {
     document_id: documentId,
     access_type: accessType,
@@ -157,6 +157,7 @@ async function grantAccess({ documentId, accessType, roleId, departmentId, userI
     user_id: accessType === "USER" ? userId : null,
     granted_by_user_id: grantedByUserId,
     expires_at: expiresAt ?? null,
+    organization_id: organizationId
   };
   const { data, error } = await supabase
     .from("document_access")
@@ -268,6 +269,7 @@ async function accessibleDocumentIds(userId, organizationId, { subtreeDepartment
           .select("document_id")
           .eq("access_type", "ROLE")
           .eq("role_id", roleId)
+          .eq("organization_id", organizationId)
           .or(notExpired)
       : Promise.resolve({ data: [] }),
     // Org-wide shares: scoped to this org through the documents join (the grant

@@ -237,6 +237,7 @@ router.post("/:id/share", async (req, res, next) => {
       userId: user_id,
       grantedByUserId: req.user.id,
       expiresAt,
+      organizationId: orgId
     });
 
     await logAdminAction(req.user.id, "document.share", {
